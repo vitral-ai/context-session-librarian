@@ -61,7 +61,7 @@ def configure(args):
                                           getattr(args, 'after', ''), getattr(args, 'limit', 20))
                 return grant(store, args.reference, getattr(args, 'peer', None), getattr(args, 'source', None),
                              getattr(args, 'target', None), getattr(args, 'permission', None), getattr(args, 'scope', None),
-                             getattr(args, 'expires_at', None), revoke=args.action == 'grant-revoke')
+                             getattr(args, 'expires_at', None), revoke=args.action == 'grant-revoke', replace=getattr(args, 'replace', False))
             except MailRejected as exc:
                 return {'state': 'rejected', 'reason': exc.reason}
         # Configuration is offline only. Running connector owns its immutable snapshot.
@@ -148,7 +148,13 @@ def run(args):
                 request.update(after=args.after, limit=args.limit, outbox=args.outbox)
             else:
                 request.update(after=args.after, limit=args.limit)
-            result = local_call(args.home, request)
+            if args.action == 'inbox-status' and (not 0 <= args.after <= 2**63-1 or not 1 <= args.limit <= 100):
+                result = {'state': 'rejected', 'reason': 'invalid_mail_cursor_or_limit'}
+            else:
+                result = local_call(args.home, request)
+            if args.action == 'inbox-status' and result.get('state') == 'rejected' and result.get('reason') == 'invalid_mail_fields':
+                result = {'state': 'rejected', 'reason': 'connector_does_not_accept_inbox_status',
+                          'observed_reason': 'invalid_mail_fields'}
         elif args.action == 'run':
             from csl_bridge_engine import Connector
             connector = Connector(args.home)
@@ -245,6 +251,7 @@ def add_commands(subparsers, csl):
     grant.add_argument('--permission', action='append', choices=['communicate', 'activate', 'work'], required=True)
     grant.add_argument('--scope', required=True)
     grant.add_argument('--expires-at', help='Optional owner-chosen timezone-aware ISO8601 grant expiry.')
+    grant.add_argument('--replace', action='store_true', help='Explicitly replace an existing reference, including revoked grants; changes authority of earlier messages that reference it.')
     revoke = sub.add_parser('grant-revoke', help='Owner-only local revocation; stored messages remain intact.')
     revoke.add_argument('reference')
     grant_list = sub.add_parser('grant-list', help='Inspect local owner grants, including expiry, revocation and descriptive scope.')

@@ -8,6 +8,9 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
+from contextlib import redirect_stdout
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from csl_bridge_mailbox import grant
 from csl_bridge_mcp import Adapter, configuration, serve
@@ -85,7 +88,12 @@ class CompletionTests(unittest.TestCase):
         past = (datetime.now(timezone.utc)-timedelta(days=1)).isoformat()
         created, _ = self.cli(self.b.store.home, 'grant', 'example', '--peer', 'alice', '--from', 'alice', '--to', 'bob',
                               '--permission', 'work', '--scope', 'Descriptive review scope', '--expires-at', past)
-        self.assertEqual(created.returncode, 0)
+        self.assertEqual(created.returncode, 1)
+        future = (datetime.now(timezone.utc)+timedelta(days=1)).isoformat()
+        created, active = self.cli(self.b.store.home, 'grant', 'example', '--peer', 'alice', '--from', 'alice', '--to', 'bob',
+                                   '--permission', 'work', '--scope', 'Descriptive review scope', '--expires-at', future)
+        self.assertEqual(created.returncode, 0); self.assertTrue(active['active']); self.assertFalse(active['expired'])
+        self.b.store.db.execute('UPDATE mail_grants SET expires_at=? WHERE ref=?', (past, 'example'))
         listed, data = self.cli(self.b.store.home, 'grant-list', '--agent', 'bob')
         self.assertEqual(listed.returncode, 0); self.assertEqual(data['grants'][0]['scope'], 'Descriptive review scope')
         self.assertTrue(data['grants'][0]['expired']); self.assertFalse(data['grants'][0]['active'])
@@ -137,6 +145,66 @@ class CompletionTests(unittest.TestCase):
             results = list(pool.map(create, ['bob', 'another']))
         self.assertEqual(sum(bool(result.get('configured')) for result in results), 1)
         self.assertEqual(sum(bool(result.get('rejected')) for result in results), 1)
+
+    def test_duplicate_grants_require_explicit_owner_replace_and_do_not_widen_old_mail(self):
+        admin = Adapter(self.b.store.home, 'bob', grant_admin=True)
+        args = {'reference': 'stable', 'peer': 'alice', 'source': 'alice', 'permissions': ['communicate'], 'scope': 'Information only'}
+        first = admin.call('grant_create', args)['data']
+        self.assertFalse(first['replaced']); self.assertTrue(first['active'])
+        message = self.send(grant_ref='stable'); self.flush(self.a, 'bob')
+        widened = {**args, 'permissions': ['communicate', 'work'], 'scope': 'Work after deliberate replacement'}
+        self.assertEqual(admin.call('grant_create', widened)['data']['reason'], 'grant_exists')
+        self.assertEqual(self.receive()['messages'][0]['authority']['permissions'], ['communicate'])
+        replaced = admin.call('grant_create', {**widened, 'replace': True})['data']
+        self.assertTrue(replaced['replaced'])
+        self.assertEqual(self.receive()['messages'][0]['authority']['permissions'], ['communicate', 'work'])
+        admin.call('grant_revoke', {'reference': 'stable'})
+        self.assertEqual(admin.call('grant_create', widened)['data']['reason'], 'grant_exists')
+        self.assertTrue(admin.call('grant_create', {**widened, 'replace': True})['data']['replaced'])
+        self.assertEqual(admin.call('grant_create', {**args, 'reference': 'past', 'expires_at': '2000-01-01T00:00:00+00:00'})['data']['reason'], 'grant_expiry_not_future')
+        result, data = self.cli(self.b.store.home, 'grant', 'stable', '--peer', 'alice', '--from', 'alice', '--to', 'bob', '--permission', 'work', '--scope', 'Explicit CLI scope')
+        self.assertEqual(result.returncode, 1); self.assertEqual(data['reason'], 'grant_exists')
+        result, data = self.cli(self.b.store.home, 'grant', 'stable', '--peer', 'alice', '--from', 'alice', '--to', 'bob', '--permission', 'work', '--scope', 'Explicit CLI scope', '--replace')
+        self.assertEqual(result.returncode, 0); self.assertTrue(data['replaced'])
+
+    def test_unknown_recipient_is_terminal_but_unadmitted_existing_recipient_is_unauthorized(self):
+        self.send(target='missing'); self.flush(self.a, 'bob')
+        row = self.receive(self.a, agent='alice', outbox=True)['messages'][0]
+        self.assertEqual(row['delivery']['state'], 'undeliverable')
+        self.assertEqual(row['delivery']['result']['reason'], 'unknown_recipient')
+        self.b.agents['private'] = helpers.uid()
+        self.send(target='private'); self.flush(self.a, 'bob')
+        row = self.receive(self.a, agent='alice', outbox=True)['messages'][-1]
+        self.assertEqual(row['delivery']['state'], 'rejected')
+        self.assertEqual(row['delivery']['result']['reason'], 'unauthorized_sender')
+
+    def test_mixed_connector_inbox_status_diagnostic_retains_observed_reason(self):
+        old = {'state': 'rejected', 'reason': 'invalid_mail_fields'}
+        with patch('csl_bridge_mcp.local_call', return_value=old):
+            value = Adapter(self.b.store.home, 'bob').call('inbox_status', {})['data']
+        self.assertEqual(value, {'state': 'rejected', 'reason': 'connector_does_not_accept_inbox_status', 'observed_reason': 'invalid_mail_fields'})
+        from csl_bridge import run
+        args = SimpleNamespace(action='inbox-status', home=self.b.store.home, agent='bob', after=0, limit=20)
+        output = io.StringIO()
+        with patch('csl_bridge.local_call', return_value=old), redirect_stdout(output), self.assertRaises(SystemExit) as exit:
+            run(args)
+        self.assertEqual(exit.exception.code, 1); self.assertEqual(json.loads(output.getvalue()), value)
+        args.limit = 0
+        with patch('csl_bridge.local_call') as call, redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            run(args)
+        call.assert_not_called()
+
+    def test_mcp_schema_diagnostic_contains_field_names_but_never_values(self):
+        adapter = Adapter(self.b.store.home, 'bob')
+        inputs = [{'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {'protocolVersion': '2024-11-05'}},
+                  {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': {'name': 'send', 'arguments': {'peer': 'alice', 'target': 'alice', 'message': 'NEVER_ECHO_THIS_VALUE'}}}]
+        output = io.StringIO()
+        serve(adapter, io.BytesIO(('\n'.join(encode(item) for item in inputs)+'\n').encode()), output)
+        response = next(json.loads(line) for line in output.getvalue().splitlines() if json.loads(line)['id'] == 2)
+        self.assertEqual(response['error']['code'], -32602)
+        self.assertEqual(response['error']['data']['missing'], ['body'])
+        self.assertEqual(response['error']['data']['unexpected'], ['message'])
+        self.assertNotIn('NEVER_ECHO_THIS_VALUE', output.getvalue())
 
 
 if __name__ == '__main__':

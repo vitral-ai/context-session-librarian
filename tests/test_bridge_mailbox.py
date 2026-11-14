@@ -140,8 +140,9 @@ class MailboxTests(unittest.TestCase):
     def test_grant_mismatch_expiry_and_message_expiry_do_not_erase_mail(self):
         past = (datetime.now(timezone.utc)-timedelta(days=1)).isoformat()
         grant(self.b.store, 'wrong', 'alice', 'different', 'bob', ['work'], 'Never matches')
-        grant(self.b.store, 'expired', 'alice', 'alice', 'bob', ['work'], 'Expired scope', expires_at=past)
         future = (datetime.now(timezone.utc)+timedelta(days=1)).isoformat()
+        grant(self.b.store, 'expired', 'alice', 'alice', 'bob', ['work'], 'Expired scope', expires_at=future)
+        self.b.store.db.execute('UPDATE mail_grants SET expires_at=? WHERE ref=?', (past, 'expired'))  # a formerly valid grant aged past expiry
         self.send(grant_ref='wrong'); self.send(grant_ref='expired'); self.send(expires_at=future)
         self.flush(self.a, 'bob')
         messages = self.receive()['messages']

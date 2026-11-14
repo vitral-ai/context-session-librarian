@@ -77,8 +77,8 @@ def schema(store):
         ''')
 
 
-def grant(store, ref, peer, source, target, permissions, scope, expires_at=None, revoke=False, *, bound_target=None):
-    """Owner/operator configuration only. Deliberately absent from MCP and wire."""
+def grant(store, ref, peer, source, target, permissions, scope, expires_at=None, revoke=False, *, bound_target=None, replace=False):
+    """Local owner mutation; delegated MCP requires an explicit bound capability."""
     schema(store); name(ref)
     if bound_target is not None:
         name(bound_target)
@@ -102,15 +102,22 @@ def grant(store, ref, peer, source, target, permissions, scope, expires_at=None,
         raise MailRejected('invalid_grant_scope')
     if expires_at is not None:
         timestamp(expires_at)
+    if type(replace) is not bool:
+        raise MailRejected('invalid_grant_replace')
     with store.transaction() as db:
         previous = db.execute('SELECT target FROM mail_grants WHERE ref=?', (ref,)).fetchone()
         if bound_target is not None and previous and previous['target'] != bound_target:
             raise MailRejected('unknown_or_unavailable_grant')
+        if previous and not replace:
+            raise MailRejected('grant_exists')
+        if expires_at is not None and timestamp(expires_at) <= timestamp(now()):
+            raise MailRejected('grant_expiry_not_future')
         db.execute('INSERT INTO mail_grants VALUES(?,?,?,?,?,?,?,0) ON CONFLICT(ref) DO UPDATE SET '
                    'peer=excluded.peer,source=excluded.source,target=excluded.target,permissions=excluded.permissions,'
                    'scope=excluded.scope,expires_at=excluded.expires_at,revoked=0',
                    (ref, peer, source, target, encode(sorted(set(permissions))), scope, expires_at))
-    return {'grant_ref': ref, 'configured': True}
+    expired = bool(expires_at and timestamp(expires_at) <= timestamp(now()))
+    return {'grant_ref': ref, 'configured': True, 'replaced': bool(previous), 'expired': expired, 'active': not expired}
 
 
 def inspect_grants(store, reference=None, target=None, after='', limit=20):
@@ -203,10 +210,12 @@ class Mailbox:
     def incoming(self, peer, request):
         validate_mail(request)
         config = self.connector.peers.get(peer)
-        if not config or 'mail' not in config['allow_ops'] or request['source'] not in config.get('allow_sources', []) or request['target'] not in config['allow_agents']:
+        if not config or 'mail' not in config['allow_ops'] or request['source'] not in config.get('allow_sources', []):
             return {'state': 'rejected', 'reason': 'unauthorized_sender', 'request_id': request['id']}
         if request['target'] not in self.connector.agents:
             return {'state': 'undeliverable', 'reason': 'unknown_recipient', 'request_id': request['id']}
+        if request['target'] not in config['allow_agents']:
+            return {'state': 'rejected', 'reason': 'unauthorized_sender', 'request_id': request['id']}
         action = request['action']
         if action != 'send':
             row = self.message(request['message_id'])

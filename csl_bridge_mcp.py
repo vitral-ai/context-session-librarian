@@ -6,6 +6,7 @@ exposes existing bridge operations, never shell, filesystem, auth or runtime API
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import json
+import re
 from pathlib import Path
 import sys
 import threading
@@ -19,6 +20,16 @@ NAME = {'type': 'string', 'pattern': '[a-z][a-z0-9-]{0,31}'}
 UUID = {'type': 'string', 'format': 'uuid'}
 GRANT_ADMIN = {'grant_create', 'grant_revoke'}
 MAIL_TOOLS = {'send', 'receive', 'ack', 'reply', 'inbox_status', 'grant_list', 'grant_show'} | GRANT_ADMIN
+
+
+class ToolFieldsError(BridgeError):
+    """Only bounded field names; values and arbitrary strings are never echoed."""
+    def __init__(self, missing=(), unexpected=(), invalid=()):
+        clean = lambda fields: sorted({field if isinstance(field, str) and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,63}', field) else '<nonstandard-field>' for field in fields})[:32]
+        self.details = {'missing': clean(missing), 'unexpected': clean(unexpected), 'invalid': clean(invalid)}
+        super().__init__('Invalid bridge tool fields')
+
+
 TOOLS = {
     'inbox_status': ('Read only counts and pending id/from/kind headers for this endpoint; no bodies, scopes, acknowledgement or wake.',
                      {'after': {'type': 'integer', 'minimum': 0, 'maximum': 2**63-1},
@@ -31,7 +42,7 @@ TOOLS = {
                      {'reference': NAME, 'peer': NAME, 'source': NAME,
                       'permissions': {'type': 'array', 'minItems': 1, 'maxItems': 3,
                                       'items': {'type': 'string', 'enum': ['communicate', 'activate', 'work']}},
-                      'scope': TEXT, 'expires_at': TEXT}, ['reference', 'peer', 'source', 'permissions', 'scope']),
+                      'scope': TEXT, 'expires_at': TEXT, 'replace': {'type': 'boolean'}}, ['reference', 'peer', 'source', 'permissions', 'scope']),
     'grant_revoke': ('Owner-admin capability only: revoke an own-endpoint grant without erasing mail.',
                      {'reference': NAME}, ['reference']),
     'send': ('Queue task-independent mail; does not activate or steer a model.',
@@ -108,24 +119,32 @@ class Adapter:
             raise BridgeError('Unknown bridge tool or arguments')
         _, fields, required = TOOLS[tool]
         if not set(required) <= set(arguments) or not set(arguments) <= set(fields):
-            raise BridgeError('Invalid bridge tool fields')
+            raise ToolFieldsError(missing=set(required)-set(arguments), unexpected=set(arguments)-set(fields))
         for key, value in arguments.items():
             schema = fields[key]
             if schema['type'] == 'integer':
                 if type(value) is not int or not schema['minimum'] <= value <= schema['maximum']:
-                    raise BridgeError('Invalid bridge tool bound')
+                    raise ToolFieldsError(invalid=[key])
             elif schema['type'] == 'array':
                 if not isinstance(value, list) or not 1 <= len(value) <= 3 or any(item not in schema['items']['enum'] for item in value):
-                    raise BridgeError('Invalid grant permissions')
+                    raise ToolFieldsError(invalid=[key])
             elif schema['type'] == 'boolean':
                 if type(value) is not bool:
-                    raise BridgeError('Invalid bridge tool boolean')
+                    raise ToolFieldsError(invalid=[key])
             elif schema.get('format') == 'uuid':
-                identifier(value)
+                try:
+                    identifier(value)
+                except BridgeError:
+                    raise ToolFieldsError(invalid=[key]) from None
             elif schema is NAME:
-                name(value)
+                try:
+                    name(value)
+                except BridgeError:
+                    raise ToolFieldsError(invalid=[key]) from None
             elif not isinstance(value, str) or not value.strip() or len(value) > 12000:
-                raise BridgeError('Invalid selected bridge message')
+                raise ToolFieldsError(invalid=[key])
+            if 'enum' in schema and value not in schema['enum']:
+                raise ToolFieldsError(invalid=[key])
         if any(contains_findings(arguments[key]) for key in ('message', 'body') if key in arguments):
             raise BridgeError('Possible secrets detected; select redacted text before sending')
         request_id = arguments.get('id') or str(uuid.uuid4())
@@ -163,6 +182,8 @@ class Adapter:
             # Give the caller its stable ID even if a reply was lost. Do not retry.
             data = {'state': 'uncertain', 'request_id': request_id,
                     'note': 'Inspect receipt/state before retry; no automatic resend was made.'}
+        if tool == 'inbox_status' and data.get('state') == 'rejected' and data.get('reason') == 'invalid_mail_fields':
+            data = {'state': 'rejected', 'reason': 'connector_does_not_accept_inbox_status', 'observed_reason': 'invalid_mail_fields'}
         return {'notice': NOTICE, 'bound_agent': self.agent, 'data': data}
 
     def grant_call(self, tool, arguments):
@@ -181,7 +202,7 @@ class Adapter:
                 return {'state': 'rejected', 'reason': 'unknown_or_unavailable_grant'}
             return grant(store, arguments['reference'], arguments.get('peer'), arguments.get('source'), self.agent,
                          arguments.get('permissions'), arguments.get('scope'), arguments.get('expires_at'),
-                         revoke=tool == 'grant_revoke', bound_target=self.agent)
+                         revoke=tool == 'grant_revoke', bound_target=self.agent, replace=arguments.get('replace', False))
         except MailRejected as exc:
             return {'state': 'rejected', 'reason': exc.reason}
         finally:
@@ -223,6 +244,9 @@ def serve(adapter, input_stream=None, output_stream=None):
                          'error': {'code': -32601, 'message': 'Unsupported MCP method'}})
                 return
             respond({'jsonrpc': '2.0', 'id': request_id, 'result': result})
+        except ToolFieldsError as exc:
+            respond({'jsonrpc': '2.0', 'id': request_id, 'error': {'code': -32602,
+                     'message': 'Invalid bridge tool fields', 'data': exc.details}})
         except (BridgeError, OSError, ValueError, KeyError, TypeError):
             respond({'jsonrpc': '2.0', 'id': request_id, 'error': {'code': -32602,
                      'message': 'Bridge request rejected; no message/configuration was echoed'}})
