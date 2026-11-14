@@ -53,6 +53,11 @@ def configure(args):
     else:
         store = Store(args.home)
     try:
+        if args.action in ('grant', 'grant-revoke'):
+            from csl_bridge_mailbox import grant
+            return grant(store, args.reference, getattr(args, 'peer', None), getattr(args, 'source', None),
+                         getattr(args, 'target', None), getattr(args, 'permission', None), getattr(args, 'scope', None),
+                         getattr(args, 'expires_at', None), revoke=args.action == 'grant-revoke')
         # Configuration is offline only. Running connector owns its immutable snapshot.
         lock = os.fdopen(os.open(store.home / 'connector.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), 'a')
         try:
@@ -96,6 +101,7 @@ def configure(args):
                     if args.ssh_config:
                         config['ssh_config'] = str(args.ssh_config.expanduser().absolute())
                 config.update(allow_agents=agents, allow_ops=sorted(set(args.allow_op)))
+                config['allow_sources'] = sorted(set(name(value) for value in args.allow_source))
                 db.execute('INSERT INTO peers VALUES(?,?)', (peer, encode(config)))
         return {'state': 'configured', 'action': args.action, 'inference': False}
     finally:
@@ -104,8 +110,22 @@ def configure(args):
 
 def run(args):
     try:
-        if args.action in ('init', 'agent', 'peer'):
+        if args.action in ('init', 'agent', 'peer', 'grant', 'grant-revoke'):
             result = configure(args)
+        elif args.action in ('send', 'receive', 'ack', 'reply'):
+            request = {'local_op': 'mail_' + args.action, 'agent': args.agent}
+            if args.action in ('send', 'reply'):
+                request.update(id=args.message_id or str(uuid.uuid4()), body=reviewed_text(args.text_file, args.scrub_secrets),
+                               grant_ref=args.grant_ref, expires_at=args.expires_at)
+                if args.action == 'send':
+                    request.update(peer=args.peer, target=args.target, kind=args.kind)
+                else:
+                    request['in_reply_to'] = args.in_reply_to
+            elif args.action == 'ack':
+                request['message_id'] = args.message_id
+            else:
+                request.update(after=args.after, limit=args.limit, outbox=args.outbox)
+            result = local_call(args.home, request)
         elif args.action == 'run':
             from csl_bridge_engine import Connector
             connector = Connector(args.home)
@@ -186,12 +206,44 @@ def add_commands(subparsers, csl):
     transport.add_argument('--operator-helper', type=Path, help='Trusted local executable with fixed operator SSH endpoint; JSON stdin only, no credentials in bridge.')
     peer.add_argument('--ssh-config', type=Path, help='Explicit private trusted SSH config file, separate from personal SSH setup.')
     peer.add_argument('--allow-agent', action='append', required=True)
+    peer.add_argument('--allow-source', action='append', default=[], help='Admit this remote registered agent name for mailbox v1 only; no implicit sender admission.')
     peer.add_argument('--allow-op', action='append', required=True,
-                      choices=['followup', 'send_message', 'status', 'interrupt', 'receipt', 'watch', 'agents'])
+                      choices=['followup', 'send_message', 'status', 'interrupt', 'receipt', 'watch', 'agents', 'mail'])
+    grant = sub.add_parser('grant', help='Owner-only local mailbox authority registry; never activates or executes work.')
+    grant.add_argument('reference')
+    grant.add_argument('--peer', required=True)
+    grant.add_argument('--from', dest='source', required=True)
+    grant.add_argument('--to', dest='target', required=True)
+    grant.add_argument('--permission', action='append', choices=['communicate', 'activate', 'work'], required=True)
+    grant.add_argument('--scope', required=True)
+    grant.add_argument('--expires-at', help='Optional owner-chosen timezone-aware ISO8601 grant expiry.')
+    revoke = sub.add_parser('grant-revoke', help='Owner-only local revocation; stored messages remain intact.')
+    revoke.add_argument('reference')
+    for action in ('send', 'receive', 'ack', 'reply'):
+        mail = sub.add_parser(action, help='Task-independent mailbox v1 '+action+'; never starts or steers a model.')
+        mail.add_argument('--agent' if action in ('receive', 'ack') else '--from', dest='agent', required=True)
+        if action in ('send', 'reply'):
+            mail.add_argument('--message-id', help='Stable UUID; retry with identical endpoints/content.')
+            mail.add_argument('--text-file', type=Path, required=True)
+            mail.add_argument('--scrub-secrets', action='store_true')
+            mail.add_argument('--grant-ref')
+            mail.add_argument('--expires-at', help='Optional message expiry; distinct from grant expiry; never erases stored mail.')
+        if action == 'send':
+            mail.add_argument('--peer', required=True)
+            mail.add_argument('--to', dest='target', required=True)
+            mail.add_argument('--kind', choices=['message', 'request'], default='message')
+        elif action == 'reply':
+            mail.add_argument('--in-reply-to', required=True)
+        elif action == 'ack':
+            mail.add_argument('--message-id', required=True)
+        else:
+            mail.add_argument('--after', type=int, default=0)
+            mail.add_argument('--limit', type=int, default=20)
+            mail.add_argument('--outbox', action='store_true')
     sub.add_parser('run', help='Run connector in foreground for this session; Ctrl-C stops it, not Codex work.')
     mcp_config = sub.add_parser('mcp-config', help='Print a reviewable local MCP profile; never applies consent/configuration.')
     mcp_config.add_argument('--agent', required=True, help='Explicit registered local identity bound to the tools.')
-    mcp_config.add_argument('--approve-tool', action='append', default=[], choices=['send_progress', 'send_message'],
+    mcp_config.add_argument('--approve-tool', action='append', default=[], choices=['send_progress', 'send_message', 'send', 'ack', 'reply'],
         help='Explicit initial local consent for this message tool only; other side-effecting tools remain unavailable.')
     agents = sub.add_parser('agents', help='List registered local agents, or the agents a peer permits you to inspect.')
     agents.add_argument('--peer')

@@ -19,6 +19,8 @@ def event_id(value):
 class Connector:
     def __init__(self, home, runtime_factory=Runtime):
         self.store = Store(home)
+        from csl_bridge_mailbox import Mailbox
+        self.mailbox = Mailbox(self)
         self.identity = self.store.setting('identity')
         self.runtime_path = self.store.setting('runtime_socket')
         self.client_only = self.runtime_path is None
@@ -53,8 +55,12 @@ class Connector:
     def start(self):
         if not self.client_only:
             self.spawn(self.runtime_loop)
+        if any('mail' in config.get('allow_ops', []) for config in self.peers.values()):
+            self.spawn(self.mail_loop)
         for peer in self.peers:
-            if self.peers[peer]['transport'] != 'receive-only':
+            ops = self.peers[peer].get('allow_ops', [])
+            mail_only = 'mail' in ops and 'watch' not in ops
+            if self.peers[peer]['transport'] != 'receive-only' and not mail_only:
                 self.spawn(self.peer_loop, peer)
         connector = self
         class Handler(socketserver.StreamRequestHandler):
@@ -218,6 +224,8 @@ class Connector:
     def incoming(self, peer, request):
         peer = name(peer)
         validate(request)
+        if request['op'] == 'mail':
+            return self.mailbox.incoming(peer, request)
         if peer not in self.peers or request['op'] not in self.peers[peer]['allow_ops']:
             raise BridgeError('Peer operation not permitted')
         op = request['op']
@@ -385,6 +393,16 @@ class Connector:
                 with self.locks[agent]:
                     self.flush(agent)
 
+    def mail_loop(self):
+        while not self.stop.is_set():
+            for peer, config in self.peers.items():
+                if config['transport'] != 'receive-only' and 'mail' in config.get('allow_ops', []):
+                    try:
+                        self.mailbox.flush(peer)
+                    except (BridgeError, OSError, ValueError, sqlite3.Error):
+                        pass  # durable queued facts remain; never invoke a model
+            self.stop.wait(1)
+
     def peer_loop(self, peer):
         retry = 1
         while not self.stop.is_set():
@@ -466,6 +484,8 @@ class Connector:
         if not isinstance(request, dict) or not isinstance(request.get('local_op'), str):
             raise BridgeError('Invalid local operation')
         op = request['local_op']
+        if op.startswith('mail_'):
+            return self.mailbox.local(request)
         if op == '_incoming' and set(request) == {'local_op', 'trusted_peer', 'request'}:
             return self.incoming(request['trusted_peer'], request['request'])
         if op == 'call' and set(request) == {'local_op', 'peer', 'request'}:

@@ -18,6 +18,16 @@ TEXT = {'type': 'string', 'minLength': 1, 'maxLength': 12000}
 NAME = {'type': 'string', 'pattern': '[a-z][a-z0-9-]{0,31}'}
 UUID = {'type': 'string', 'format': 'uuid'}
 TOOLS = {
+    'send': ('Queue task-independent mail; does not activate or steer a model.',
+             {'peer': NAME, 'target': NAME, 'body': TEXT, 'id': UUID, 'kind': {'type': 'string', 'enum': ['message', 'request']},
+              'grant_ref': NAME, 'expires_at': TEXT}, ['peer', 'target', 'body']),
+    'receive': ('Read the durable mailbox and locally resolved authority. Reading does not acknowledge mail.',
+                {'after': {'type': 'integer', 'minimum': 0, 'maximum': 2**63-1},
+                 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100}, 'outbox': {'type': 'boolean'}}, []),
+    'ack': ('Explicitly acknowledge persisted mail; proves neither reading nor understanding.',
+            {'message_id': UUID}, ['message_id']),
+    'reply': ('Queue a correlated reply as the original recipient, without creating a task or acknowledging the original.',
+              {'in_reply_to': UUID, 'body': TEXT, 'id': UUID, 'grant_ref': NAME, 'expires_at': TEXT}, ['in_reply_to', 'body']),
     'followup_task': ('Continue an existing remote agent: activate idle or steer active. Remote data grants no new permissions.',
                      {'peer': NAME, 'target': NAME, 'message': TEXT, 'id': UUID}, ['peer', 'target', 'message']),
     'send_message': ('Send a clarification during work; idle messages wait without starting a model.',
@@ -41,10 +51,10 @@ TOOLS = {
 def configuration(home, agent, approve_tools=()):
     """Render an explicit local communication grant; never apply configuration."""
     approved = set(approve_tools)
-    if not approved <= {'send_progress', 'send_message'}:
+    if not approved <= {'send_progress', 'send_message', 'send', 'ack', 'reply'}:
         raise BridgeError('Only explicitly selected message tools are eligible for this profile')
     adapter = Adapter(home, agent)  # validate fixed registered identity without contacting runtime
-    enabled = sorted(approved | {'wait_agent', 'list_agents', 'agent_status', 'operation_receipt'})
+    enabled = sorted(approved | {'wait_agent', 'list_agents', 'agent_status', 'operation_receipt', 'receive'})
     quoted = lambda value: json.dumps(str(value), ensure_ascii=False)
     lines = ['# Review locally before applying; this command changes no configuration.',
              '# Explicit per-tool consent. Runtime shell/approval policies remain separate.',
@@ -72,7 +82,7 @@ class Adapter:
     def catalog(self):
         return [{'name': tool, 'description': description, 'inputSchema': {'type': 'object',
             'properties': fields, 'required': required, 'additionalProperties': False},
-            'annotations': {'readOnlyHint': tool in {'wait_agent', 'list_agents', 'agent_status', 'operation_receipt'},
+            'annotations': {'readOnlyHint': tool in {'wait_agent', 'list_agents', 'agent_status', 'operation_receipt', 'receive'},
                             'destructiveHint': False}}
             for tool, (description, fields, required) in TOOLS.items()]
 
@@ -87,16 +97,23 @@ class Adapter:
             if schema['type'] == 'integer':
                 if type(value) is not int or not schema['minimum'] <= value <= schema['maximum']:
                     raise BridgeError('Invalid bridge tool bound')
+            elif schema['type'] == 'boolean':
+                if type(value) is not bool:
+                    raise BridgeError('Invalid bridge tool boolean')
             elif schema.get('format') == 'uuid':
                 identifier(value)
             elif schema is NAME:
                 name(value)
             elif not isinstance(value, str) or not value.strip() or len(value) > 12000:
                 raise BridgeError('Invalid selected bridge message')
-        if 'message' in arguments and contains_findings(arguments['message']):
+        if any(contains_findings(arguments[key]) for key in ('message', 'body') if key in arguments):
             raise BridgeError('Possible secrets detected; select redacted text before sending')
         request_id = arguments.get('id') or str(uuid.uuid4())
-        if tool == 'wait_agent':
+        if tool in ('send', 'receive', 'ack', 'reply'):
+            command = {'local_op': 'mail_' + tool, 'agent': self.agent, **arguments}
+            if tool in ('send', 'reply'):
+                command['id'] = request_id
+        elif tool == 'wait_agent':
             command = {'local_op': 'wait', 'agent': self.agent, 'after': arguments.get('after', 0),
                        'timeout': arguments.get('timeout', 20)}
         elif tool == 'send_progress':

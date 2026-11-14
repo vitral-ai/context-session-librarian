@@ -66,6 +66,11 @@ def validate(request):
     if not isinstance(request, dict) or type(request.get('version')) is not int or request['version'] != 1:
         raise BridgeError('Unsupported bridge version')
     op = request.get('op')
+    if op == 'mail':
+        from csl_bridge_mailbox import validate_mail
+        if len(encode(request).encode()) > MAX_WIRE - 1024:
+            raise BridgeError('Bridge size limit exceeded')
+        return validate_mail(request)
     fields = {
         'followup': {'source', 'target', 'text'},
         'send_message': {'source', 'target', 'text'},

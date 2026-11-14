@@ -201,6 +201,11 @@ A [native macOS app source prototype](macos/README.md) is included for developme
 There is no validated downloadable app bundle yet; the CLI bridge is the tested
 Mac path. The prototype does not provide automatic pairing or configure networking.
 
+Development checkouts also include [task-independent mailbox messaging](docs/BRIDGE.md#task-independent-mailbox-v1--development)
+for registered Codex/Claude clients. It persists messages for explicit receive,
+acknowledgement and correlated replies, without waking a model. This increment
+is not part of the published v0.3.0 tag and has synthetic-harness validation only.
+
 ## Experimental Encrypted Backup
 
 Manual encrypted backup is **Linux/Codex only**. It supports incremental

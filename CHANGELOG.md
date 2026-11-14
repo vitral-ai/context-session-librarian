@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Add experimental task-independent bridge mailbox v1 with durable send/receive,
+  explicit acknowledgement, correlated replies and endpoint/content-bound IDs.
+- Resolve optional owner grants locally and dynamically, separately from inbox
+  admission. Messages never activate models or execute work, including with a grant.
+- Expose the same mailbox through CLI and fixed-agent MCP tools for Codex/Claude
+  clients; real mailbox-v1 exchanges remain unvalidated. Legacy coordination is
+  unchanged and v0.3.0 remains the published baseline.
+
 ## 0.3.0 — 2026-11-14
 
 - Add an optional experimental bridge for existing Codex conversations: delegate,

@@ -23,7 +23,7 @@ registry. Update implementation, tests and this document in the same change.
 | --- | --- | --- |
 | `annotate` | supported | not-integrated |
 | `backup` | experimental | not-integrated |
-| `bridge` | experimental | not-integrated |
+| `bridge` | experimental | experimental |
 | `capabilities` | supported | supported |
 | `cockpit` | supported | not-integrated |
 | `convert` | experimental | experimental |
@@ -72,6 +72,14 @@ compatible runtime, transport and peer permissions. Linux–Mac LAN coordination
 bounded real-model evidence; Internet, Windows and live Claude coordination remain
 unvalidated. The macOS app is source only, not a validated binary. See
 [bridge compatibility and setup](BRIDGE.md).
+
+**Development mailbox v1:** task-independent `bridge send`, `receive`, `ack` and
+`reply` also support shell/MCP clients such as Claude Code, using their own
+registered session endpoint. This capability persists mail without waking or
+steering a model; the agent explicitly receives it during a normal turn. It has
+synthetic-harness evidence only, not a real mailbox-v1 Claude/Codex exchange yet.
+Claude support here does not add a native runtime/activation adapter, search or
+conversion guarantees. The published v0.3.0 tag predates this mailbox increment.
 
 `backup` is included in the
 [v0.3.0 release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.3.0)

@@ -19,7 +19,7 @@ def coverage():
     commands["verify-live"] = {"codex": "experimental", "claude": "experimental"}
     commands["migrate"] = {"codex": "experimental", "claude": "not-integrated"}
     commands["backup"] = {"codex": "experimental", "claude": "not-integrated"}
-    commands["bridge"] = {"codex": "experimental", "claude": "not-integrated"}
+    commands["bridge"] = {"codex": "experimental", "claude": "experimental"}
     for name in ("native-cut", "native-clone", "native-sanitize"):
         commands[name]["codex"] = "experimental"
     return {"schema_version": 1, "providers": ["codex", "claude"], "commands": commands,
@@ -54,6 +54,14 @@ def coverage():
                 "commands": ["export", "share", "migrate upload"], "mode": "portable-only",
                 "scope": "explicit recognized orphaned-summary-metadata recovery; exact hidden context not restored"},
             "authentication": "Recipient CLI owns authentication; CSL never copies credentials or selects billing accounts.",
+            "bridge_messaging": {"status": "experimental-development", "message_version": 1,
+                "providers": ["codex", "claude"], "operations": ["send", "receive", "ack", "reply"],
+                "delivery": "durable local inbox; explicit receive in the existing session",
+                "model_activation": False, "executes_work": False,
+                "authority": "recipient-owner registry, separate from inbox admission; none without a matching grant",
+                "identity": "operator registration and authenticated peer binding, not process attestation",
+                "validation": "synthetic harnesses only; no real mailbox-v1 exchange yet",
+                "legacy_coordination": "Codex only; unchanged"},
             "continuation": "Native file transfer is not a guarantee of model availability, context fit, or universal CLI-version compatibility."}
 
 
