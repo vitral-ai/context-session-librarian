@@ -225,6 +225,12 @@ class MailboxTests(unittest.TestCase):
             validate(request)
         self.assertEqual(self.a.local({'local_op': 'mail_receive', 'agent': 'alice', 'outbox': 'true'})['state'], 'rejected')
 
+    def test_legacy_connector_construction_does_not_create_mailbox_tables(self):
+        self.assertIsNone(self.a._mailbox)
+        self.assertEqual(self.a.store.rows("SELECT name FROM sqlite_master WHERE name LIKE 'mail_%'"), [])
+        self.receive()
+        self.assertEqual(self.b.store.rows("SELECT name FROM sqlite_master WHERE name='mail_messages'")[0]['name'], 'mail_messages')
+
 
 if __name__ == '__main__':
     unittest.main()

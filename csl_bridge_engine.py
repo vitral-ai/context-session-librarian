@@ -19,8 +19,7 @@ def event_id(value):
 class Connector:
     def __init__(self, home, runtime_factory=Runtime):
         self.store = Store(home)
-        from csl_bridge_mailbox import Mailbox
-        self.mailbox = Mailbox(self)
+        self._mailbox = None  # legacy homes do not acquire a mailbox schema on join
         self.identity = self.store.setting('identity')
         self.runtime_path = self.store.setting('runtime_socket')
         self.client_only = self.runtime_path is None
@@ -46,6 +45,14 @@ class Connector:
         # A crash while invoking is an uncertain operation, never an invitation to replay.
         with self.store.transaction() as db:
             db.execute("UPDATE operations SET state='uncertain' WHERE state='invoking'")
+
+    @property
+    def mailbox(self):
+        with self.store.lock:
+            if self._mailbox is None:
+                from csl_bridge_mailbox import Mailbox
+                self._mailbox = Mailbox(self)
+            return self._mailbox
 
     def spawn(self, function, *args):
         thread = threading.Thread(target=function, args=args, daemon=True)
