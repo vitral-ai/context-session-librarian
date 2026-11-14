@@ -29,6 +29,52 @@ class AppTests(unittest.TestCase):
   self.assertEqual(p['tools'],{'send_progress':{'approval_mode':'approve'}})
   self.assertEqual(p['default_tools_approval_mode'],'writes')
   self.assertNotIn('followup_task',p['enabled_tools'])
+ def test_optional_delegation_is_explicit_and_does_not_include_interrupt(self):
+  import tomllib
+  profile=tomllib.loads(self.service.mcp_profile(True))['mcp_servers']['csl_bridge']
+  self.assertEqual(set(profile['tools']),{'send_progress','followup_task','send_message'})
+  self.assertNotIn('interrupt_agent',profile['enabled_tools'])
+  self.assertTrue(all(v=={'approval_mode':'approve'} for v in profile['tools'].values()))
+ def test_latest_task_acceptance_is_not_previous_final_or_new_activity(self):
+  from csl_bridge_store import Store,encode
+  store=Store(self.service.home,create=True)
+  old=str(uuid.uuid4());current=str(uuid.uuid4());turn=str(uuid.uuid4())
+  with store.transaction() as db:
+   db.executemany('INSERT INTO config VALUES(?,?)',[('identity',encode('workerbox')),('runtime_socket',encode(None))])
+   db.execute('INSERT INTO agents VALUES(?,?)',('worker',str(uuid.uuid4())))
+  for task,status in ((old,'completed'),(current,'running')):
+   frame={'version':1,'op':'followup','id':task,'source':'owner','target':'worker','text':'Synthetic'}
+   store.reserve('owner',frame);store.operation(task,'delivered',{'state':'delivered','turn_id':turn})
+   with store.transaction() as db:db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?)',(task,'owner','owner','worker',turn,status))
+  def event(task,kind):
+   store.publish('owner',{'task_id':task,'source':'worker','target':'owner','kind':kind,'text':'Synthetic','turn_id':turn,'status':'completed' if kind=='final' else 'progress'},str(uuid.uuid4()))
+  event(old,'final')
+  self.assertEqual(self.service.task_phase(),'accepted_only')
+  event(current,'progress');self.assertEqual(self.service.task_phase(),'activity_observed')
+  event(current,'final');self.assertEqual(self.service.task_phase(),'final_observed')
+  store.close()
+ def test_new_outgoing_task_beats_old_incoming_final(self):
+  from csl_bridge_store import Store,encode
+  store=Store(self.service.home,create=True);old=str(uuid.uuid4());new=str(uuid.uuid4());turn=str(uuid.uuid4())
+  with store.transaction() as db:
+   db.executemany('INSERT INTO config VALUES(?,?)',[('identity',encode('owner')),('runtime_socket',encode(None))])
+   db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?)',(old,'remote','remote','worker',turn,'completed'))
+  for task,peer in ((old,'remote'),(new,'outbound:remote')):
+   frame={'version':1,'op':'followup','id':task,'source':'worker','target':'worker','text':'Synthetic'}
+   store.reserve(peer,frame);store.operation(task,'delivered',{'state':'delivered','turn_id':turn})
+  def event(task,kind):store.publish('remote',{'task_id':task,'source':'worker','target':'worker','kind':kind,'text':'Synthetic','turn_id':turn,'status':'completed' if kind=='final' else 'progress'},str(uuid.uuid4()))
+  event(old,'final');self.assertEqual(self.service.task_phase(),'accepted_only')
+  event(new,'progress');self.assertEqual(self.service.task_phase(),'activity_observed')
+  event(new,'final');self.assertEqual(self.service.task_phase(),'final_observed');store.close()
+ def test_failed_or_interrupted_final_is_not_success(self):
+  from csl_bridge_store import Store,encode
+  store=Store(self.service.home,create=True)
+  for status,expected in (('failed','final_failed'),('interrupted','final_interrupted')):
+   task=str(uuid.uuid4());frame={'version':1,'op':'followup','id':task,'source':'worker','target':'worker','text':'Synthetic'}
+   store.reserve('remote',frame);store.operation(task,'delivered',{'state':'delivered'})
+   store.publish('remote',{'task_id':task,'source':'worker','target':'worker','kind':'final','text':'Synthetic','turn_id':str(uuid.uuid4()),'status':status},str(uuid.uuid4()))
+   self.assertEqual(self.service.task_phase(),expected)
+  store.close()
  def test_only_owned_mcp_sections_replaced_other_text_preserved(self):
   old='model="owner-model"\n\n[mcp_servers.other]\ncommand="owner"\n\n[mcp_servers.csl_bridge]\ncommand="old"\n[mcp_servers.csl_bridge.tools.send_progress]\napproval_mode="prompt"\n'
   new,previous=app.Service.replace_owned(old,self.service.mcp_profile())

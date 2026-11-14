@@ -119,7 +119,7 @@ class Service:
             connected=bool(agents) and all(x.get('status')!='disconnected' for x in agents)
             ready=connected and peer['ready']
             return {'connected':ready,'runtime_ready':connected,'connector_running':True,'peer':peer,
-                    'headline':('Listo · trabajando' if active else 'Listo · intercambio verificado') if ready else (('Sesión lista · enlace remoto no responde' if peer.get('phase')=='peer_unreachable' else 'Sesión disponible · peer sin verificar') if connected else 'Conector esperando al runtime'),
+                    'task_phase':self.task_phase(),'headline':('Listo · turno activo' if active else 'Listo · intercambio verificado') if ready else (('Sesión lista · enlace remoto no responde' if peer.get('phase')=='peer_unreachable' else 'Sesión disponible · peer sin verificar') if connected else 'Conector esperando al runtime'),
                     'agents':agents,'owned':bool(self.owned()),'adopted':not bool(self.owned()),
                     'note':peer.get('note','La conversación original sigue en su runtime.') if not ready else 'Respuesta autenticada reciente; la conversación original sigue en su runtime.'}
         except (BridgeError,OSError):
@@ -127,22 +127,25 @@ class Service:
                     'note':'Selecciona una sesión existente para iniciar el conector.'}
 
     def configure(self, thread, coordinator='manunruks'):
-        identifier(thread); name(coordinator)
+        identifier(thread)
+        if coordinator is not None:name(coordinator)
         discovery = self.discover()
         if thread not in [x['id'] for x in discovery['sessions']]:
             raise AppError('La sesión ya no está cargada. Vuelve a detectar; no iniciaremos otra.')
         registered = self.registered()
-        if registered and registered != {'worker':thread}:
+        if registered and list(registered.values()) != [thread]:
             raise AppError('Este conector pertenece a otra sesión. Conservamos su estado; deténlo con su dueño antes de cambiarla.')
         if not registered:
             store=Store(self.home,create=True)
             try:
                 with store.transaction() as db:
-                    db.executemany('INSERT INTO config VALUES(?,?)',[('identity',encode('mac')),('runtime_socket',encode(discovery['socket']))])
+                    db.executemany('INSERT INTO config VALUES(?,?)',[('identity',encode('device-'+uuid.uuid4().hex[:12])),('runtime_socket',encode(discovery['socket']))])
                     db.execute('INSERT INTO agents VALUES(?,?)',('worker',thread))
-                    db.execute('INSERT INTO peers VALUES(?,?)',(coordinator,encode({'transport':'receive-only','allow_agents':['worker'],'allow_ops':['followup','send_message','status','interrupt','receipt','watch','agents']})))
+                    if coordinator is not None:
+                        db.execute('INSERT INTO peers VALUES(?,?)',(coordinator,encode({'transport':'receive-only','allow_agents':['worker'],'allow_ops':['followup','send_message','status','interrupt','receipt','watch','agents']})))
             finally:store.close()
-        self.settings.update(thread_id=thread,bridge_home=str(self.home),codex_home=str(self.codex_home),coordinator=coordinator)
+        self.settings.update(thread_id=thread,bridge_home=str(self.home),codex_home=str(self.codex_home))
+        if coordinator is not None:self.settings['coordinator']=coordinator
         json_file(self.settings_path,self.settings)
         return {'configured':True,'thread_id':thread,'note':'No se inició generación ni se cambió login.'}
 
@@ -150,7 +153,7 @@ class Service:
         if thread:self.configure(thread,coordinator)
         current=self.status()
         if current.get('runtime_ready',current['connected']):
-            return {**current,'note':'Conector existente adoptado. No se inició otro proceso ni se cambió su código.'}
+            return {**current,'started_by_this_call':False,'note':'Conector existente adoptado. No se inició otro proceso ni se cambió su código.'}
         if current.get('connector_running'):
             raise AppError('Ya hay un conector esperando al runtime. No iniciaremos otro: revisa la sesión local o deténlo desde su dueño.')
         if not self.registered():
@@ -167,7 +170,7 @@ class Service:
         end=time.monotonic()+8
         while time.monotonic()<end:
             current=self.status()
-            if current.get('runtime_ready',current['connected']):return current
+            if current.get('runtime_ready',current['connected']):return {**current,'started_by_this_call':True}
             if process.poll() is not None:break
             time.sleep(.1)
         raise AppError('El conector no pudo unirse. El runtime y tu conversación no se reiniciaron.')
@@ -186,8 +189,7 @@ class Service:
             return {'events':[{'cursor':r['seq'],'peer':r['peer'],**decode(r['body'])} for r in rows]}
         finally:store.close()
 
-    def peer_check(self, remote_agent='coordinator'):
-        name(remote_agent)
+    def peer_check(self, remote_agent=None):
         if not self.registered():raise AppError('Configura una sesión existente primero.')
         store=Store(self.home)
         try:
@@ -199,6 +201,11 @@ class Service:
             pending={'ready':False,'phase':'receive_only_not_verified','observed_at':time.time(),'note':'Este perfil recibe al coordinador. Su proceso vivo no acredita la ruta de vuelta; falta verificarla desde el otro equipo.'}
             json_file(self.state/'peer-proof.json',pending)
             return pending
+        if remote_agent is None and config.get('transport')=='lan':
+            from csl_bridge_lan import private_json
+            remote_agent=private_json(self.state/'lan/peers.json').get(selected)
+        remote_agent=remote_agent or self.settings.get('remote_agent','coordinator')
+        name(remote_agent)
         result=exchange(config,identity,{'version':1,'op':'status','id':str(uuid.uuid4()),'target':remote_agent})
         valid=result.get('agent')==remote_agent and result.get('status') in ('idle','active','tool-client') and isinstance(result.get('thread_id'),str)
         if not valid:raise AppError('La respuesta del peer no confirma el agente seleccionado; no se marca Listo.')
@@ -207,8 +214,89 @@ class Service:
         json_file(self.state/'peer-proof.json',proof)
         return proof
 
-    def mcp_profile(self):
-        return '[mcp_servers.csl_bridge]\ncommand = '+json.dumps(sys.executable)+'\nargs = '+json.dumps(['-I','-S','-B',str(SOURCE/'csl-bridge-mcp'),'--home',str(self.home),'--agent','worker'])+'\nrequired = true\nstartup_timeout_sec = 10\ntool_timeout_sec = '+str(MCP_TOOL_TIMEOUT)+'\nenabled_tools = ["send_progress", "wait_agent", "list_agents", "agent_status", "operation_receipt"]\ndefault_tools_approval_mode = "writes"\n[mcp_servers.csl_bridge.tools.send_progress]\napproval_mode = "approve"\n'
+    def lan_share(self, thread=None, bind=None):
+        from csl_bridge_lan import ensure_session, control
+        connector=self.start(thread,None)
+        session=ensure_session(self.state/'lan',self.home,bind)
+        invitation=control(self.state/'lan','invite')
+        return {**invitation,'lan_session_owned':session['started_by_caller'],'connector_owned':connector.get('started_by_this_call',False),'note':'Comparte manualmente el código o enlace privado. Un uso, cinco minutos. Sin QR. Permite encargos, mensajes, avances y resultados; no shell/historial/aprobaciones.'}
+
+    def lan_connect(self, invitation, thread=None, bind=None):
+        from csl_bridge_lan import invitation_input, connect_code
+        code,link=invitation_input(invitation)
+        connector=self.start(thread,None)
+        result=connect_code(self.state/'lan',self.home,code,bind,link)
+        if result.get('state')!='paired':return {**result,'connector_owned':connector.get('started_by_this_call',False)}
+        self.settings.update(coordinator=result['paired'],remote_agent=result['remote_agent'])
+        json_file(self.settings_path,self.settings)
+        proof=self.peer_check(result['remote_agent'])
+        return {**result,'connector_owned':connector.get('started_by_this_call',False),'verified':proof['ready'],'note':'Par autenticado. Esto no demuestra que un modelo haya avanzado o finalizado.'}
+
+    def lan_status(self):
+        from csl_bridge_lan import control, interfaces
+        try:result=control(self.state/'lan','status')
+        except (BridgeError,OSError):result={'running':False}
+        return {**result,'interfaces':interfaces()}
+
+    def lan_reconcile(self):
+        from csl_bridge_lan import control
+        result=control(self.state/'lan','reconcile')
+        if result.get('state')=='paired':
+            self.settings.update(coordinator=result['paired'],remote_agent=result['remote_agent'])
+            json_file(self.settings_path,self.settings)
+            result['verified']=self.peer_check(result['remote_agent'])['ready']
+        return result
+
+    def lan_stop(self):
+        from csl_bridge_lan import control
+        return control(self.state/'lan','stop')
+
+    def lan_call(self, action, text_file=None, request_id=None, operation_id=None, after=0, timeout=20):
+        from csl_bridge_lan import control
+        source=next(iter(self.registered()),None)
+        if not source:raise AppError('Selecciona una conversación existente primero.')
+        if action=='wait':return local_call(self.home,{'local_op':'wait','agent':source,'after':after,'timeout':timeout})
+        peers=control(self.state/'lan','status')['peers']
+        selected=self.settings.get('coordinator')
+        peer=next((p for p in peers if p['identity']==selected),None) or (peers[0] if len(peers)==1 else None)
+        if not peer:raise AppError('Selecciona un par conectado; no se eligió un destino arbitrario.')
+        request_id=identifier(request_id or str(uuid.uuid4()))
+        request={'version':1,'op':action,'id':request_id}
+        if action in ('followup','send_message'):
+            from csl_bridge import reviewed_text
+            if text_file is None:raise AppError('Selecciona el texto del encargo; no se lee historial.')
+            request.update(source=source,target=peer['agent'],text=reviewed_text(text_file))
+        elif action=='receipt':request['request_id']=identifier(operation_id)
+        try:return local_call(self.home,{'local_op':'call','peer':peer['identity'],'request':request})
+        except BridgeError:return {'state':'uncertain','request_id':request['id'],'note':'No cancelado. Consulta receipt con este ID; no recrees la tarea.'}
+
+    def task_phase(self):
+        if not (self.home/'bridge.sqlite').exists():return 'none'
+        store=Store(self.home)
+        try:
+            # Only this bridge's durable task/event metadata; no native history.
+            # Incoming and outgoing followups share this chronological reservation table.
+            # Do not compare rowids from tasks and operations or prefer old inbound work.
+            operations=[r for r in store.rows('SELECT id,request,state FROM operations ORDER BY rowid DESC LIMIT 256') if decode(r['request']).get('op')=='followup']
+            task_id=operations[0]['id'] if operations else None
+            if not task_id:return 'none'
+            rows=store.rows('SELECT body FROM outbound ORDER BY seq DESC LIMIT 256')+store.rows('SELECT body FROM inbound ORDER BY seq DESC LIMIT 256')
+            events=[decode(r['body']) for r in rows if decode(r['body']).get('task_id')==task_id]
+            final=next((e for e in events if e.get('kind')=='final'),None)
+            if final:return {'interrupted':'final_interrupted','failed':'final_failed','completed':'final_observed'}.get(final.get('status'),'final_unknown')
+            if any(e.get('kind')=='progress' for e in events):return 'activity_observed'
+            operation=store.rows('SELECT state FROM operations WHERE id=?',(task_id,))
+            if operation and operation[0]['state'] in ('uncertain','invoking'):return 'uncertain'
+            if operation and operation[0]['state']=='delivered':return 'accepted_only'
+            return 'none'
+        finally:store.close()
+
+    def mcp_profile(self, delegation=False):
+        from csl_bridge_mcp import render_profile
+        agent=next(iter(self.registered()),'worker')
+        grants=['send_progress']+(['followup_task','send_message'] if delegation else [])
+        return render_profile(self.home,agent,grants,sys.executable,
+            ['-I','-S','-B',str(SOURCE/'csl-bridge-mcp'),'--home',str(self.home),'--agent',agent])
 
     @staticmethod
     def replace_owned(text, replacement):
@@ -230,17 +318,17 @@ class Service:
         return {'profile':self.mcp_profile(),'tools':['Enviar avances de la tarea activa','Consultar estado y resultados'],
                 'note':'Consentimiento local sólo para send_progress. No cambia aprobación global, modelo, login o permisos shell.'}
 
-    def mcp_install(self):
+    def mcp_install(self, delegation=False):
         import tomllib
-        thread=self.registered().get('worker')
+        thread=next(iter(self.registered().values()),None)
         if not thread:raise AppError('Selecciona una sesión primero.')
         if thread not in [x['id'] for x in self.discover()['sessions']]:
             raise AppError('La sesión debe seguir cargada para activar herramientas. No se reabrirá implícitamente.')
         path=self.codex_home/'config.toml'
         if path.is_symlink():raise AppError('La configuración está redirigida; requiere revisión de su dueño.')
         old=path.read_text() if path.exists() else ''
-        new,previous=self.replace_owned(old,self.mcp_profile())
-        rollback={'path':str(path),'previous_owned_section':previous,'applied_profile':self.mcp_profile()}
+        new,previous=self.replace_owned(old,self.mcp_profile(delegation))
+        rollback={'path':str(path),'previous_owned_section':previous,'applied_profile':self.mcp_profile(delegation)}
         json_file(self.state/'mcp-rollback.json',rollback)
         fd,temp=tempfile.mkstemp(prefix='.csl-mcp-',dir=path.parent)
         try:
@@ -285,16 +373,43 @@ class Service:
 
 def main():
     parser=argparse.ArgumentParser(description='CSL Bridge app: existing sessions only, no model/server/login creation.')
-    parser.add_argument('action',choices=['discover','status','configure','connect','start','stop','events','peer-check','mcp-plan','mcp-install','mcp-rollback','connection-info','transport-run','transport-status','selftest'])
+    parser.add_argument('action',choices=['lan-reconcile','lan-followup','lan-message','lan-receipt','lan-wait','lan-share','lan-connect','lan-status','lan-stop','discover','status','configure','connect','start','stop','events','peer-check','mcp-plan','mcp-install','mcp-rollback','connection-info','transport-run','transport-status','selftest'])
+    parser.add_argument('--text-file',type=Path)
+    parser.add_argument('--request-id')
+    parser.add_argument('--operation-id')
+    from csl_bridge import wait_seconds
+    parser.add_argument('--timeout',type=wait_seconds,default=20)
+    parser.add_argument('--bind','--interface',dest='bind',help='Select a local IPv4 interface, no firewall changes')
+    parser.add_argument('--pair-code-stdin',action='store_true',help='Read one private manual code/link from stdin, never argv')
     parser.add_argument('--thread');parser.add_argument('--coordinator',default='manunruks');parser.add_argument('--after',type=int,default=0)
+    parser.add_argument('--approve-delegation',action='store_true',help='Initial consent: followup_task can activate idle work and consume model tokens; send_message included, not interrupt.')
     parser.add_argument('--approve-communication',action='store_true',help='Explicit local consent to install only csl_bridge communication tools after connect.')
     parser.add_argument('--transport-profile',type=Path)
-    parser.add_argument('--remote-agent',default='coordinator')
+    parser.add_argument('--remote-agent')
     parser.add_argument('--verify-peer',action='store_true',help='Explicitly refresh application-level peer response; never starts a model/task.')
     parser.add_argument('--state-root');parser.add_argument('--bridge-home');parser.add_argument('--codex-home')
     args=parser.parse_args();service=Service(args.state_root,args.bridge_home,args.codex_home)
+    def optional_communication(result):
+        if args.approve_communication:
+            if args.action=='lan-connect' and result.get('state')!='paired':return result
+            try:result['communication_tools']=service.mcp_install(args.approve_delegation)
+            except (AppError,BridgeError,RuntimeUnavailable,RuntimeRejected,OSError,ValueError):
+                result['communication_tools']={'installed':False,'note':'Communication tools were not installed. Review the local configuration/policy; pairing alone does not enable agent tools.'}
+        return result
     try:
-        if args.action=='transport-run':
+        if args.approve_delegation and not args.approve_communication:raise AppError('Delegation requires explicit initial communication consent.')
+        if args.action in ('lan-followup','lan-message','lan-receipt','lan-wait'):
+            action={'lan-followup':'followup','lan-message':'send_message','lan-receipt':'receipt','lan-wait':'wait'}[args.action]
+            result=service.lan_call(action,args.text_file,args.request_id,args.operation_id,args.after,args.timeout)
+        elif args.action=='lan-share':
+            result=service.lan_share(args.thread,args.bind)
+            result=optional_communication(result)
+        elif args.action=='lan-connect':
+            if not args.pair_code_stdin:raise AppError('Paste the private code/link through stdin; never command arguments.')
+            invitation=sys.stdin.readline(4096)
+            result=service.lan_connect(invitation,args.thread,args.bind)
+            result=optional_communication(result)
+        elif args.action=='transport-run':
             if not args.transport_profile:raise AppError('Selecciona un perfil SSH ya autorizado; no se configura red automáticamente.')
             sys.path.insert(0,str(RESOURCE))
             from ssh_session import run_profile
@@ -312,14 +427,14 @@ def main():
             if args.action=='connect':
                 result['peer_verification']=service.peer_check(args.remote_agent)
                 result.update(service.status())
-            if args.approve_communication:result['communication_tools']=service.mcp_install()
+            result=optional_communication(result)
         elif args.action=='peer-check':result=service.peer_check(args.remote_agent)
         elif args.action=='events':result=service.events(args.after)
         elif args.action=='status':result=service.status(args.verify_peer)
         else:result=getattr(service,args.action.replace('-','_'))()
         print(json.dumps({'ok':True,'data':result},ensure_ascii=False))
     except (AppError,BridgeError,RuntimeUnavailable,RuntimeRejected,OSError,ValueError,KeyError) as exc:
-        message=str(exc) if isinstance(exc,(AppError,BridgeError)) else 'Operación local no disponible. No se inició ni reinició una sesión.'
+        message=str(exc) if isinstance(exc,(AppError,BridgeError)) else 'Operación local no disponible. Conserva IDs y consulta el recibo antes de repetir encargos o permisos.'
         if isinstance(exc,(RuntimeUnavailable,RuntimeRejected)):
             message='El runtime no aceptó la consulta. Conservamos tu sesión: comprueba que sigue abierta y que permite el acceso local.'
         print(json.dumps({'ok':False,'error':message},ensure_ascii=False));return 1

@@ -4,17 +4,20 @@ import Foundation
 let bundle = Bundle.main
 let resources = bundle.resourceURL ?? URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().appendingPathComponent("../Resources").standardizedFileURL
 
-func backend(_ arguments: [String]) -> (Int32, Data) {
+func backend(_ arguments: [String], input: Data? = nil) -> (Int32, Data) {
     let process = Process()
     process.executableURL = resources.appendingPathComponent("python-runtime/bin/python3.12")
     process.arguments = ["-I", "-S", "-B", resources.appendingPathComponent("app_service.py").path] + arguments
     let output = Pipe(), errors = Pipe()
     process.standardOutput = output; process.standardError = errors
+    let incoming = Pipe()
+    if input != nil { process.standardInput = incoming }
     var environment = ProcessInfo.processInfo.environment
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     process.environment = environment
     do {
         try process.run()
+        if let body=input { incoming.fileHandleForWriting.write(body);try? incoming.fileHandleForWriting.close() }
         let data = output.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         if data.isEmpty { return (process.terminationStatus, Data("{\"ok\":false,\"error\":\"No se pudo ejecutar el runtime privado.\"}".utf8)) }
@@ -30,6 +33,10 @@ final class App: NSObject, NSApplicationDelegate {
     var connectView = NSView(), activityView = NSView()
     var sessions = NSPopUpButton()
     var coordinator = NSTextField(string: "manunruks")
+    var pairCode = NSSecureTextField(string: "")
+    var network = NSPopUpButton()
+    var allowDelegation = NSButton(checkboxWithTitle: "Permitir encargos automáticos (puede consumir tokens)", target: nil, action: nil)
+    var networkIDs: [String] = []
     var statusLabel = NSTextField(labelWithString: "Detectando sesión local…")
     var noteLabel = NSTextField(wrappingLabelWithString: "Tu conversación y login se conservan.")
     var runtimeState = NSTextField(labelWithString: "Sesión: pendiente")
@@ -42,6 +49,7 @@ final class App: NSObject, NSApplicationDelegate {
     var cursor = 0
     var busy = false
     var beganOwnedConnector = false
+    var beganOwnedLAN = false
     var monitoringPeer = false
     var renderDirectory: String?
 
@@ -65,9 +73,9 @@ final class App: NSObject, NSApplicationDelegate {
         return view
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
-        window = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 760,height: 640), styleMask: [.titled,.closable,.miniaturizable,.resizable], backing: .buffered, defer: false)
+        window = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 780,height: 880), styleMask: [.titled,.closable,.miniaturizable,.resizable], backing: .buffered, defer: false)
         window.title = "CSL Bridge · privado"
-        window.center(); window.minSize = NSSize(width: 680,height: 610)
+        window.center(); window.minSize = NSSize(width: 740,height: 840)
         let root = window.contentView!
         let title = label("CSL Bridge", bold: true, size: 27)
         let subtitle = label("Tu agente, en su conversación de siempre", size: 15)
@@ -94,7 +102,14 @@ final class App: NSObject, NSApplicationDelegate {
         connectionNote.textColor = .secondaryLabelColor
         let tools = button("Herramientas de comunicación…",#selector(installTools))
         let info = button("Copiar conexión",#selector(copyConnection))
-        let body = stack([label("Sesión existente",bold: true),intro,horizontal([sessions,find]),connectionTitle,label("Identidad del coordinador"),coordinator,connectionNote,horizontal([connect,tools,info])],spacing: 12)
+        pairCode.placeholderString="Pega el código de 26 caracteres o enlace privado"
+        network.addItem(withTitle:"Detectar red local automáticamente")
+        let pairNote=label("Ambas utilidades deben estar en la misma LAN. Comparte el código manualmente: copiar y pegar. Un uso, cinco minutos; sin QR ni relay público.")
+        pairNote.textColor = .secondaryLabelColor
+        let share=button("Compartir código…",#selector(shareLAN))
+        let join=button("Conectar con código…",#selector(joinLAN))
+        let reconcile=button("Revisar recibo",#selector(reconcileLAN))
+        let body = stack([label("Sesión existente",bold: true),intro,horizontal([sessions,find]),label("Red local",bold: true),network,pairNote,label("Código o enlace privado"),pairCode,allowDelegation,horizontal([share,join,reconcile]),label("Conexión avanzada ya configurada",bold: true),horizontal([connect,tools,info])],spacing: 12)
         body.translatesAutoresizingMaskIntoConstraints = false;connectView.addSubview(body)
         NSLayoutConstraint.activate([body.leadingAnchor.constraint(equalTo: connectView.leadingAnchor),body.trailingAnchor.constraint(equalTo: connectView.trailingAnchor),body.topAnchor.constraint(equalTo: connectView.topAnchor),sessions.widthAnchor.constraint(greaterThanOrEqualToConstant: 390),coordinator.widthAnchor.constraint(equalToConstant: 280)])
         activity.isEditable = false;activity.isSelectable = true;activity.font = .systemFont(ofSize: 13)
@@ -114,10 +129,10 @@ final class App: NSObject, NSApplicationDelegate {
             Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in if !self.busy { self.refresh() } }
         }
     }
-    func perform(_ args: [String], _ completion: @escaping ([String:Any]) -> Void) {
+    func perform(_ args: [String], input: String? = nil, _ completion: @escaping ([String:Any]) -> Void) {
         if busy { return };busy=true
         DispatchQueue.global(qos: .userInitiated).async {
-            let (_,data)=backend(args)
+            let (_,data)=backend(args,input: input.map {Data(($0+"\n").utf8)})
             let object=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any] ?? ["ok":false,"error":"Respuesta local no disponible."]
             DispatchQueue.main.async { self.busy=false;completion(object) }
         }
@@ -135,7 +150,9 @@ final class App: NSObject, NSApplicationDelegate {
         connectorState.stringValue=(value["connector_running"] as? Bool ?? false) ? "Conector: activo" : "Conector: detenido"
         let peer=value["peer"] as? [String:Any] ?? [:]
         peerState.stringValue=(peer["ready"] as? Bool ?? false) ? "Peer: verificado" : "Peer: sin verificar"
-        noteLabel.stringValue=value["note"] as? String ?? ""
+        let phase=value["task_phase"] as? String ?? "none"
+        let names=["none":"sin tarea observada","accepted_only":"aceptada; continuación no observada","activity_observed":"actividad observada por avance","final_observed":"final completed observado; no es validación","final_interrupted":"interrumpido confirmado","final_failed":"falló; no completado correctamente","final_unknown":"estado final no reconocido","uncertain":"resultado incierto; consultar recibo"]
+        noteLabel.stringValue=(value["note"] as? String ?? "")+"\nÚltimo encargo del puente: "+(names[phase] ?? "sin evidencia suficiente")
         stopButton.isEnabled=value["owned"] as? Bool ?? false
     }
     @objc func detect() {
@@ -145,14 +162,63 @@ final class App: NSObject, NSApplicationDelegate {
             self.sessions.removeAllItems();self.sessionIDs=[]
             for row in rows {self.sessions.addItem(withTitle:row["label"] as? String ?? "Sesión cargada");self.sessionIDs.append(row["id"] as? String ?? "")}
             if let chosen=value["selected"] as? String,let index=self.sessionIDs.firstIndex(of:chosen){self.sessions.selectItem(at:index)}
-            self.refresh()
+            self.perform(["lan-status"]) { metadata in
+                if let data=metadata["data"] as? [String:Any],let addresses=data["interfaces"] as? [String] {
+                    self.networkIDs=addresses;self.network.removeAllItems()
+                    self.network.addItem(withTitle:"Detectar red local automáticamente")
+                    for address in addresses {self.network.addItem(withTitle:address)}
+                }
+                self.refresh()
+            }
         }
     }
     @objc func connectSelected() {
         let index=sessions.indexOfSelectedItem
         guard index>=0 && index<sessionIDs.count else {noteLabel.stringValue="Abre tu conversación existente en Codex y pulsa Detectar.";return}
         perform(["connect","--thread",sessionIDs[index],"--coordinator",coordinator.stringValue]) { object in
-            if let value=self.unwrap(object){self.updateStatus(value);self.beganOwnedConnector=value["owned"] as? Bool ?? false;self.monitoringPeer=true}
+            if let value=self.unwrap(object){self.updateStatus(value);self.beganOwnedConnector=value["started_by_this_call"] as? Bool ?? false;self.monitoringPeer=true}
+        }
+    }
+    func lanArguments(_ action: String) -> [String]? {
+        let index=sessions.indexOfSelectedItem
+        guard index>=0 && index<sessionIDs.count else {noteLabel.stringValue="Selecciona tu conversación existente.";return nil}
+        var args=[action,"--thread",sessionIDs[index],"--approve-communication"]
+        if allowDelegation.state == .on {args += ["--approve-delegation"]}
+        let selected=network.indexOfSelectedItem-1
+        if selected>=0 && selected<networkIDs.count {args += ["--bind",networkIDs[selected]]}
+        return args
+    }
+    func communicationConsent() -> Bool {
+        let alert=NSAlert();alert.messageText="Conectar estos agentes"
+        alert.informativeText="Permite encargos, aclaraciones, avances, estado y resultados entre este par. Activa sólo herramientas de comunicación de esta conversación. No concede shell, historial, login ni aprobaciones remotas. La red local puede requerir permiso del sistema. Si seleccionaste encargos automáticos, followup puede activar al agente inactivo y consumir tokens/costo; no incluye interrupt automático."
+        alert.addButton(withTitle:"Permitir y continuar");alert.addButton(withTitle:"Cancelar")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+    @objc func shareLAN() {
+        guard let args=lanArguments("lan-share"),communicationConsent() else {return}
+        perform(args) { object in
+            guard let data=self.unwrap(object),let code=data["code"] as? String else {return}
+            self.beganOwnedLAN=data["lan_session_owned"] as? Bool ?? false
+            self.beganOwnedConnector=data["connector_owned"] as? Bool ?? false
+            self.monitoringPeer=true
+            let alert=NSAlert();alert.messageText="Código privado: "+code
+            alert.informativeText="Copia y pega el código en la otra utilidad. Caduca en cinco minutos y funciona una vez. Si UDP está bloqueado, copia el enlace privado. Emparejar no demuestra que el modelo haya avanzado."
+            alert.addButton(withTitle:"Copiar código");alert.addButton(withTitle:"Copiar enlace")
+            let response=alert.runModal()
+            let selected=response == .alertFirstButtonReturn ? code : data["link"] as? String ?? code
+            NSPasteboard.general.clearContents();NSPasteboard.general.setString(selected,forType:.string)
+            self.noteLabel.stringValue="Invitación copiada manualmente. Esperando al otro equipo; emparejar no es un encargo."
+        }
+    }
+    @objc func reconcileLAN() {
+        perform(["lan-reconcile"]) { object in if let data=self.unwrap(object) {self.noteLabel.stringValue=data["note"] as? String ?? "Recibo de emparejamiento consultado; no se creó otro permiso."} }
+    }
+    @objc func joinLAN() {
+        guard let args=lanArguments("lan-connect"),communicationConsent() else {return}
+        let invitation=pairCode.stringValue
+        pairCode.stringValue=""
+        perform(args+["--pair-code-stdin"],input:invitation) { object in
+            if let data=self.unwrap(object) {self.beganOwnedLAN=data["lan_session_owned"] as? Bool ?? false;self.beganOwnedConnector=data["connector_owned"] as? Bool ?? false;if data["state"] as? String != "paired" {self.statusLabel.stringValue="Emparejamiento sin confirmar";self.noteLabel.stringValue=data["note"] as? String ?? "Consulta el recibo antes de reintentar.";return};self.beganOwnedLAN=data["lan_session_owned"] as? Bool ?? false;self.beganOwnedConnector=data["connector_owned"] as? Bool ?? false;self.monitoringPeer=true;self.noteLabel.stringValue=data["note"] as? String ?? "Par autenticado.";self.refresh()}
         }
     }
     @objc func refresh() {
@@ -189,6 +255,7 @@ final class App: NSObject, NSApplicationDelegate {
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { return true }
     func applicationWillTerminate(_ notification: Notification) {
+        if renderDirectory == nil && beganOwnedLAN { _ = backend(["lan-stop"]) }
         if renderDirectory == nil && beganOwnedConnector { _ = backend(["stop"]) }
     }
     func renderPreviews(_ path: String) {
@@ -217,7 +284,8 @@ final class App: NSObject, NSApplicationDelegate {
 
 let arguments=Array(CommandLine.arguments.dropFirst())
 if !arguments.isEmpty && arguments[0] != "--render-previews" {
-    let (status,data)=backend(arguments);FileHandle.standardOutput.write(data);exit(status)
+    let body=arguments.contains("--pair-code-stdin") ? FileHandle.standardInput.readData(ofLength: 4097) : nil
+    let (status,data)=backend(arguments,input:body);FileHandle.standardOutput.write(data);exit(status)
 }
 let application=NSApplication.shared
 if arguments.first == "--render-previews" { application.appearance=NSAppearance(named: .aqua) }

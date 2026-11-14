@@ -45,7 +45,7 @@ class MCPTests(unittest.TestCase):
         self.assertNotIn('tools', unapproved)
         self.assertNotIn('send_progress', unapproved['enabled_tools'])
         with self.assertRaises(BridgeError):
-            configuration(self.home, 'worker', ['followup_task'])
+            configuration(self.home, 'worker', ['interrupt_agent'])
 
     def test_generated_host_budget_covers_remote_ipc_without_extending_wait(self):
         import tomllib
@@ -62,6 +62,16 @@ class MCPTests(unittest.TestCase):
             self.adapter.call('wait_agent',{})
         self.assertEqual(call.call_args.args[1]['timeout'],20)
         self.assertNotIn('timeout',call.call_args.kwargs)
+
+    def test_optional_delegation_profile_is_exact_explicit_and_cost_labelled(self):
+        import tomllib
+        text=configuration(self.home,'worker',['followup_task','send_message','send_progress'])
+        profile=tomllib.loads(text)['mcp_servers']['csl_bridge']
+        self.assertEqual(set(profile['tools']),{'followup_task','send_message','send_progress'})
+        self.assertEqual(set(profile['enabled_tools']),{'followup_task','send_message','send_progress','wait_agent','list_agents','agent_status','operation_receipt'})
+        self.assertTrue(all(x=={'approval_mode':'approve'} for x in profile['tools'].values()))
+        self.assertNotIn('interrupt_agent',profile['enabled_tools'])
+        self.assertIn('consume model tokens/cost',text)
 
     def test_fixed_identity_and_no_sensitive_surfaces(self):
         with patch('csl_bridge_mcp.local_call', return_value={'state': 'delivered'}) as call:

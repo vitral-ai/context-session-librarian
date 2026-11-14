@@ -64,6 +64,9 @@ def ssh_argv(alias, config=None):
 
 def exchange(config, local_peer, request):
     validate(request)
+    if config['transport'] == 'lan':
+        from csl_bridge_lan import exchange as lan_exchange
+        return lan_exchange(config, local_peer, request)
     if config['transport'] == 'lab':
         # Explicit same-UID laboratory only. This is not SSH authentication evidence.
         return local_call(config['home'], {'local_op': '_incoming', 'trusted_peer': local_peer, 'request': request})

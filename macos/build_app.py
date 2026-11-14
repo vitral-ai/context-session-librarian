@@ -54,7 +54,7 @@ def main():
     shutil.copy2(source/'macos/CSLBridge/ssh_session.py',resources/'ssh_session.py')
     plist={'CFBundleName':'CSL Bridge','CFBundleDisplayName':'CSL Bridge','CFBundleIdentifier':'ai.vitral.cslbridge.private',
            'CFBundleExecutable':'CSLBridge','CFBundlePackageType':'APPL','CFBundleShortVersionString':'0.1.0','CFBundleVersion':'1',
-           'LSMinimumSystemVersion':'13.0','NSHighResolutionCapable':True,'NSPrincipalClass':'NSApplication',
+           'LSMinimumSystemVersion':'13.0','NSHighResolutionCapable':True,'NSLocalNetworkUsageDescription':'Conectar tus agentes seleccionados en la red local mediante un código privado, sin servicio público.','NSPrincipalClass':'NSApplication',
            'CSLSourceRevision':args.source_sha,'CSLPrivateDevelopmentBuild':True}
     with (contents/'Info.plist').open('wb') as file:plistlib.dump(plist,file)
     swift=run(['/usr/bin/xcrun','--find','swiftc'])

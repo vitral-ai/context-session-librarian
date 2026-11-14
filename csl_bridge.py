@@ -176,7 +176,7 @@ def add_commands(subparsers, csl):
         description='Coordinate existing Codex agents through a foreground session connector. '
                     'Followup activates idle; messages/events enter active work automatically. '
                     'No native attach to standalone TUI, no cloning, no automatic approvals. '
-                    'Requires initial endpoint/agent/peer setup. Mac/SSH/accounts integration unverified.')
+                    'Advanced setup uses endpoint/agent/peer. Private csl-pair provides session LAN invitation pairing; real-device pairing is a separate pending gate.')
     parser.add_argument('--home', type=Path, required=True, help='Explicit private bridge home, separate from Codex histories/auth.')
     sub = parser.add_subparsers(dest='action', required=True)
     init = sub.add_parser('init', help='Initialize explicit private state; does not start anything.')
@@ -201,7 +201,7 @@ def add_commands(subparsers, csl):
     sub.add_parser('run', help='Run connector in foreground for this session; Ctrl-C stops it, not Codex work.')
     mcp_config = sub.add_parser('mcp-config', help='Print a reviewable local MCP profile; never applies consent/configuration.')
     mcp_config.add_argument('--agent', required=True, help='Explicit registered local identity bound to the tools.')
-    mcp_config.add_argument('--approve-tool', action='append', default=[], choices=['send_progress', 'send_message'],
+    mcp_config.add_argument('--approve-tool', action='append', default=[], choices=['send_progress', 'send_message', 'followup_task'],
         help='Explicit initial local consent for this message tool only; other side-effecting tools remain unavailable.')
     agents = sub.add_parser('agents', help='List registered local agents, or the agents a peer permits you to inspect.')
     agents.add_argument('--peer')

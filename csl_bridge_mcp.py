@@ -45,17 +45,24 @@ TOOLS = {
 
 def configuration(home, agent, approve_tools=()):
     """Render an explicit local communication grant; never apply configuration."""
-    approved = set(approve_tools)
-    if not approved <= {'send_progress', 'send_message'}:
-        raise BridgeError('Only explicitly selected message tools are eligible for this profile')
     adapter = Adapter(home, agent)  # validate fixed registered identity without contacting runtime
+    return render_profile(adapter.home.expanduser().absolute(), adapter.agent, approve_tools,
+        Path(__file__).resolve().parent / 'csl-bridge-mcp', ['--home', adapter.home.expanduser().absolute(), '--agent', adapter.agent])
+
+
+def render_profile(home, agent, approve_tools, command, arguments):
+    name(agent)
+    approved = set(approve_tools)
+    if not approved <= {'send_progress', 'send_message', 'followup_task'}:
+        raise BridgeError('Only explicitly selected communication tools are eligible for this profile')
     enabled = sorted(approved | {'wait_agent', 'list_agents', 'agent_status', 'operation_receipt'})
     quoted = lambda value: json.dumps(str(value), ensure_ascii=False)
     lines = ['# Review locally before applying; this command changes no configuration.',
-             '# Explicit per-tool consent. Runtime shell/approval policies remain separate.',
+             '# Explicit per-tool consent. followup_task activates idle work and can consume model tokens/cost.',
+             '# Runtime shell, approval, login and model policies remain separate.',
              '[mcp_servers.csl_bridge]',
-             'command = ' + quoted(Path(__file__).resolve().parent / 'csl-bridge-mcp'),
-             'args = [' + ', '.join(map(quoted, ['--home', adapter.home.expanduser().absolute(), '--agent', adapter.agent])) + ']',
+             'command = ' + quoted(command),
+             'args = [' + ', '.join(map(quoted, arguments)) + ']',
              'required = true', 'startup_timeout_sec = 10', 'tool_timeout_sec = ' + str(MCP_TOOL_TIMEOUT),
              'enabled_tools = [' + ', '.join(map(quoted, enabled)) + ']',
              'default_tools_approval_mode = "writes"']

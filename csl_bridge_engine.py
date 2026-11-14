@@ -466,6 +466,22 @@ class Connector:
         if not isinstance(request, dict) or not isinstance(request.get('local_op'), str):
             raise BridgeError('Invalid local operation')
         op = request['local_op']
+        if op == 'pair_peer' and set(request) == {'local_op', 'peer', 'config'}:
+            # Only the owned local IPC admits this initial communication grant.
+            # The network protocol and MCP never expose configuration operations.
+            from csl_bridge_lan import validate_config
+            peer=name(request['peer']); config=validate_config(request['config'])
+            if peer==self.identity or not set(config['allow_agents'])<=set(self.agents):
+                raise BridgeError('Invalid local pairing identity/scope')
+            previous=self.peers.get(peer)
+            if previous is not None and previous!=config and previous.get('transport')!='lan':
+                raise BridgeError('Existing non-LAN peer profile is preserved')
+            if previous!=config:
+                with self.store.transaction() as db:
+                    db.execute('INSERT OR REPLACE INTO peers VALUES(?,?)',(peer,encode(config)))
+                self.peers[peer]=config
+                if previous is None:self.spawn(self.peer_loop,peer)
+            return {'paired':peer,'scope':'communication'}
         if op == '_incoming' and set(request) == {'local_op', 'trusted_peer', 'request'}:
             return self.incoming(request['trusted_peer'], request['request'])
         if op == 'call' and set(request) == {'local_op', 'peer', 'request'}:
