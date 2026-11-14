@@ -140,12 +140,27 @@ class MailboxTests(unittest.TestCase):
         past = (datetime.now(timezone.utc)-timedelta(days=1)).isoformat()
         grant(self.b.store, 'wrong', 'alice', 'different', 'bob', ['work'], 'Never matches')
         grant(self.b.store, 'expired', 'alice', 'alice', 'bob', ['work'], 'Expired scope', expires_at=past)
-        self.send(grant_ref='wrong'); self.send(grant_ref='expired'); self.send(expires_at=past)
+        future = (datetime.now(timezone.utc)+timedelta(days=1)).isoformat()
+        self.send(grant_ref='wrong'); self.send(grant_ref='expired'); self.send(expires_at=future)
         self.flush(self.a, 'bob')
         messages = self.receive()['messages']
         self.assertEqual(messages[0]['authority']['reason'], 'grant_endpoint_mismatch')
         self.assertEqual(messages[1]['authority']['reason'], 'grant_expired')
-        self.assertTrue(messages[2]['expired']); self.assertEqual(len(messages), 3)
+        with patch('csl_bridge_mailbox.now', return_value=(datetime.now(timezone.utc)+timedelta(days=2)).isoformat()):
+            self.assertTrue(self.receive()['messages'][2]['expired'])
+        self.assertEqual(len(messages), 3)
+
+    def test_message_expired_before_delivery_is_not_persisted_and_retries_stop(self):
+        past = (datetime.now(timezone.utc)-timedelta(days=1)).isoformat()
+        original = self.send(expires_at=past)
+        with patch('csl_bridge_transport.exchange', side_effect=AssertionError('Expired mail must not be sent')):
+            self.a.mailbox.flush('bob')
+        view = self.receive(self.a, agent='alice', outbox=True)['messages'][0]
+        self.assertEqual(view['delivery']['state'], 'expired')
+        self.assertFalse(view['facts']['persisted']); self.assertEqual(self.receive()['messages'], [])
+        wire = decode(self.a.store.rows('SELECT request FROM operations WHERE id=?', (original['id'],))[0]['request'])
+        self.assertEqual(self.b.incoming('alice', wire)['state'], 'expired')
+        self.assertEqual(self.receive()['messages'], [])
 
     def test_timeout_pending_uncertain_permanent_and_lost_receipt_are_distinct(self):
         original = self.send()

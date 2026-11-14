@@ -198,6 +198,10 @@ class Mailbox:
             old = db.execute('SELECT * FROM mail_messages WHERE id=?', (request['id'],)).fetchone()
             if old and (old['direction'] != 'in' or old['fingerprint'] != fingerprint):
                 return {'state': 'rejected', 'reason': 'id_collision', 'request_id': request['id']}
+            if not old and envelope['expires_at'] and timestamp(envelope['expires_at']) <= timestamp(now()):
+                result = {'state': 'expired', 'reason': 'message_expired_before_persistence', 'message_id': request['id']}
+                db.execute('UPDATE operations SET state=?,result=? WHERE id=?', ('expired', encode(result), request['id']))
+                return result
             db.execute('INSERT OR IGNORE INTO mail_messages(id,direction,peer,source,target,fingerprint,envelope,persisted_at) VALUES(?,?,?,?,?,?,?,?)',
                        (request['id'], 'in', peer, request['source'], request['target'], fingerprint, encode(envelope), now()))
             row = dict(db.execute('SELECT * FROM mail_messages WHERE id=?', (request['id'],)).fetchone())
@@ -251,6 +255,8 @@ class Mailbox:
                 request = decode(operation['request'])
                 try:
                     result = None
+                    envelope = request.get('envelope', {})
+                    expired = bool(envelope.get('expires_at') and timestamp(envelope['expires_at']) <= timestamp(now()))
                     if operation['state'] == 'uncertain':
                         check = {'version': 1, 'op': 'mail', 'message_version': 1, 'action': 'receipt',
                                  'id': str(uuid.uuid4()), 'source': request['source'], 'target': request['target'],
@@ -266,8 +272,9 @@ class Mailbox:
                             else:
                                 result = None  # recipient explicitly confirms no acknowledgement
                     if result is None:
-                        result = exchange(self.connector.peers[peer], self.connector.identity, request)
-                    if not isinstance(result, dict) or result.get('state') not in ('persisted', 'acknowledged', 'rejected', 'undeliverable'):
+                        result = ({'state': 'expired', 'reason': 'message_expired_before_confirmed_delivery', 'message_id': request['id']}
+                                  if expired else exchange(self.connector.peers[peer], self.connector.identity, request))
+                    if not isinstance(result, dict) or result.get('state') not in ('persisted', 'acknowledged', 'rejected', 'undeliverable', 'expired'):
                         raise BridgeError('Invalid mail receipt')
                     if result['state'] == 'persisted' and (result.get('message_id') != request['id'] or not result.get('persisted_at')):
                         raise BridgeError('Invalid persisted receipt')

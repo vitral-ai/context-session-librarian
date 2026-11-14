@@ -463,8 +463,12 @@ kind, plain-text body, optional `in_reply_to` and `grant_ref`, and bridge-genera
 timestamps. `created_at`/`queued_at` are fixed on first sender acceptance;
 `persisted_at` is set separately by the recipient. Sender time is not evidence of
 recipient delivery or a trustworthy remote clock. Optional timezone-aware
-`--expires-at` marks message expiry without deleting stored evidence; it is
-independent of grant expiry. The usual partial secret scan applies; opaque
+`--expires-at` bounds delivery: expired, not-yet-persisted mail is not newly sent
+or accepted and has delivery state `expired`. An uncertain expired send is queried
+for prior persistence without sending it again. Already-persisted evidence is
+retained and marked expired. Message expiry is independent of grant expiry:
+an expired grant does not prevent admitted information from being stored.
+The usual partial secret scan applies; opaque
 secrets and missed patterns remain the sender's responsibility.
 
 The facts `queued`, `persisted`, `acknowledged` and `replied` are independent.
