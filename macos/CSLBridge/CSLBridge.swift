@@ -192,6 +192,8 @@ final class App: NSObject, NSApplicationDelegate {
         if renderDirectory == nil && beganOwnedConnector { _ = backend(["stop"]) }
     }
     func renderPreviews(_ path: String) {
+        window.contentView!.wantsLayer = true
+        window.contentView!.layer?.backgroundColor = NSColor.white.cgColor
         let directory=URL(fileURLWithPath:path);try? FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true)
         // Render actual AppKit controls without screen-capture or Accessibility permissions.
         let (_,discoveryData)=backend(["discover"])
@@ -218,6 +220,7 @@ if !arguments.isEmpty && arguments[0] != "--render-previews" {
     let (status,data)=backend(arguments);FileHandle.standardOutput.write(data);exit(status)
 }
 let application=NSApplication.shared
+if arguments.first == "--render-previews" { application.appearance=NSAppearance(named: .aqua) }
 let delegate=App()
 if arguments.first == "--render-previews",arguments.count==2{delegate.renderDirectory=arguments[1]}
 application.delegate=delegate;application.setActivationPolicy(.regular);application.run()
