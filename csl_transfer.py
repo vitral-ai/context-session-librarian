@@ -630,10 +630,13 @@ def import_bundle(args, csl):
             if args.open and (len(entries)!=1 or not shutil.which(provider)):
                 raise TransferError('Opening native-file packages requires one session and its installed CLI')
             from csl_provider_bundle import import_native
-            rows=import_native(archive,manifest,cwd,name=args.name)
+            rows=import_native(archive,manifest,cwd,name=args.name,max_context_chars=getattr(args,'max_context_chars',None))
             for row in rows:
                 print(f"imported: {row['id']} (source: {row['source_id']}); native companion files retained")
+                print('continuity: archive checksums verified; identity/cwd/policy rebound; native loading and model recall not tested by this import; history is not execution authority')
                 print('open: '+shlex.join(resume_command(row['id'],cwd,getattr(args,'open_args',()),provider)))
+            if provider=='codex' and getattr(args,'refresh_native_index',True):
+                refresh_native_picker(csl)
             if args.open:
                 raise SystemExit(subprocess.call(resume_command(rows[0]['id'],cwd,getattr(args,'open_args',()),provider),cwd=cwd))
             return [row['id'] for row in rows]

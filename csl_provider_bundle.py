@@ -148,7 +148,7 @@ def _rewrite_paths(value,source_id,new_root,files,key=None):
     return value
 
 
-def import_native(archive,manifest,cwd,*,name=None):
+def import_native(archive,manifest,cwd,*,name=None,max_context_chars=None):
     """Install independent native copies; never overwrite existing source IDs."""
     import csl_claude
     from csl_transfer import read_records,json_line,rewrite_import_record
@@ -243,6 +243,11 @@ def import_native(archive,manifest,cwd,*,name=None):
                     projected=local.with_name('display.jsonl')
                     project_file(local,projected,read_records,json_line,{source_id,sid})
                     local=projected
+                if primary and provider in ('codex','claude'):
+                    from csl_diagnostics import preflight
+                    preflight(local,provider,max_context_chars=max_context_chars)
+                elif primary and max_context_chars is not None:
+                    raise ValueError('Gemini native context-limit analysis is not implemented')
                 plans.append((local,dest,primary))
             installed.append({'provider':provider,'id':sid,'source_id':source_id,'path':str(target),'cwd':str(cwd)})
         # Validate all destinations first; exclusive hard links never overwrite existing files.

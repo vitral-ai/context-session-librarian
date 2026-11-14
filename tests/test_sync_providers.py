@@ -261,6 +261,10 @@ class ProviderTests(unittest.TestCase):
         out=self.root/'valid.zip';bundle.export_native('claude',self.sid,out,home=self.home)
         result=subprocess.run([sys.executable,str(cli),'import',str(out),'--list'],env=env,capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr);self.assertIn(self.sid,result.stdout)
+        original=self.path.read_bytes()
+        result=subprocess.run([sys.executable,str(cli),'import',str(out),'--cwd',str(self.cwd)],env=env,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertIn('continuity:',result.stdout)
+        self.assertIn('history is not execution authority',result.stdout);self.assertEqual(self.path.read_bytes(),original)
 
 
 if __name__=='__main__':unittest.main()
