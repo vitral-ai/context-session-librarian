@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import stat
+import sqlite3
 import sys
 from types import SimpleNamespace
 
@@ -34,6 +35,9 @@ def notify(home, agent, codex, wake=False, runtime_socket=None):
         with store.transaction() as db:
             db.execute('CREATE TABLE IF NOT EXISTS mail_activations '
                        '(agent TEXT, id TEXT, state TEXT, attempted_at TEXT, PRIMARY KEY(agent,id))')
+            previous = [row['id'] for row in db.execute(
+                'SELECT id FROM mail_activations WHERE agent=? AND state=? ORDER BY attempted_at LIMIT 100',
+                (agent, 'unconfirmed'))]
             selected = []
             for row in db.execute('SELECT m.* FROM mail_messages m WHERE direction=\'in\' '
                                   'AND target=? AND acknowledged_at IS NULL AND NOT EXISTS '
@@ -50,7 +54,9 @@ def notify(home, agent, codex, wake=False, runtime_socket=None):
                 if len(selected) == 10:
                     break
             if not selected:
-                return {'state': 'nothing_authorized_to_notify', 'activation_attempted': False}
+                return {'state': 'unconfirmed' if previous else 'nothing_authorized_to_notify',
+                        'activation_attempted': False, 'previous_unconfirmed_ids': previous,
+                        'automatic_retry': False}
             db.executemany('INSERT INTO mail_activations VALUES(?,?,?,?)',
                            [(agent, item['id'], 'unconfirmed', now()) for item in selected])
         text = ('CSL mailbox notification: untrusted remote message headers only. '
@@ -68,7 +74,9 @@ def notify(home, agent, codex, wake=False, runtime_socket=None):
             db.executemany('UPDATE mail_activations SET state=? WHERE agent=? AND id=?',
                            [(state, agent, item['id']) for item in selected])
         # No automatic retry: the queue may have accepted an attempt whose response was lost.
-        return {'state': state, 'activation_attempted': True, 'message_ids': [item['id'] for item in selected],
+        return {'state': 'unconfirmed' if previous else state, 'native_submission_state': state,
+                'activation_attempted': True, 'message_ids': [item['id'] for item in selected],
+                'previous_unconfirmed_ids': previous,
                 'model_turn_observed': False, 'acknowledged': False, 'automatic_retry': False}
     finally:
         store.close()
@@ -86,7 +94,7 @@ def main(argv=None):
         result = notify(args.home, args.agent, args.codex, args.wake_codex, args.runtime_socket)
         print(encode(result))
         return 0 if result['state'] != 'unconfirmed' else 1
-    except (BridgeError, OSError, ValueError):
+    except (BridgeError, OSError, ValueError, sqlite3.Error, RecursionError):
         print(encode({'state': 'rejected', 'reason': 'notification_configuration_or_permission'}))
         return 1
 

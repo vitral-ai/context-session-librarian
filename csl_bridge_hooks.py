@@ -1,6 +1,7 @@
 """Owner-installed boundary notifications. Never ACK, activate or execute mail."""
 import argparse
 import json
+import sqlite3
 import sys
 from types import SimpleNamespace
 
@@ -106,7 +107,7 @@ def main(argv=None):
         if output:
             print(output)
         return 0
-    except (BridgeError, ValueError, UnicodeError, OSError):
+    except (BridgeError, ValueError, UnicodeError, OSError, sqlite3.Error, RecursionError):
         # Do not leak stdin, transcript paths, bodies or authentication into logs.
         print('CSL boundary notification unavailable; inspect inbox explicitly.', file=sys.stderr)
         return 1

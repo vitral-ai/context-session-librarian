@@ -56,7 +56,10 @@ class NotifyTests(unittest.TestCase):
         self.send(grant_ref='wake-test'); self.flush(self.a, 'bob')
         with patch('csl_bridge_notify.subprocess.run', side_effect=OSError('synthetic')) as run:
             self.assertEqual(self.notify(sys.executable)['state'], 'unconfirmed')
-            self.assertFalse(self.notify(sys.executable)['activation_attempted'])
+            retried = self.notify(sys.executable)
+            self.assertFalse(retried['activation_attempted'])
+            self.assertEqual(retried['state'], 'unconfirmed')
+            self.assertEqual(len(retried['previous_unconfirmed_ids']), 1)
             self.assertEqual(run.call_count, 1)
         self.send(grant_ref='wake-test'); self.flush(self.a, 'bob')
         grant(self.b.store, 'wake-test', None, None, None, None, None, revoke=True)
