@@ -58,7 +58,8 @@ def main():
            'CSLSourceRevision':args.source_sha,'CSLPrivateDevelopmentBuild':True}
     with (contents/'Info.plist').open('wb') as file:plistlib.dump(plist,file)
     swift=run(['/usr/bin/xcrun','--find','swiftc'])
-    run([swift,'-O','-swift-version','5','-target',platform.machine()+'-apple-macos13.0','-framework','AppKit','-framework','Foundation',source/'macos/CSLBridge/CSLBridge.swift','-o',macos/'CSLBridge'],timeout=180)
+    sdk=run(['/usr/bin/xcrun','--show-sdk-path'])
+    run([swift,'-sdk',sdk,'-O','-swift-version','5','-target',platform.machine()+'-apple-macosx13.0','-framework','AppKit','-framework','Foundation',source/'macos/CSLBridge/CSLBridge.swift','-o',macos/'CSLBridge'],timeout=180)
     executable=resources/'python-runtime/bin/python3.12'
     # An empty home and minimal environment prevent fallback to uv/user packages.
     isolated=output/'selftest-home';isolated.mkdir(mode=0o700)
@@ -77,7 +78,7 @@ def main():
     run(['/usr/bin/codesign','--force','--sign','-',app],timeout=30)
     run(['/usr/bin/codesign','--verify','--deep','--strict',app],timeout=30)
     manifest={'source_sha':args.source_sha,'verified_source_manifest':source_manifest,'tracked_only':True,'input_manifest_sha256':args.source_manifest_sha256,'architecture':platform.machine(),'build_macos':platform.mac_ver()[0],
-              'app':str(app),'swift':run([swift,'--version']),'python_bundle_selftest':data,'python_linkage':linked,
+              'app':str(app),'swift':run([swift,'--version']),'sdk':sdk,'python_bundle_selftest':data,'python_linkage':linked,
               'runtime_source':'existing private standalone Python, copied fully; original no longer required',
               'signed_objects':len(signed),'codesign':'ad-hoc; verification PASS; no notarization/public release',
               'does_not':'Start/stop existing bridge, Codex, models, login, SSH, tunnels or services',
