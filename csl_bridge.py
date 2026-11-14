@@ -121,6 +121,8 @@ def run(args):
             values = ['--home', str(args.home), '--agent', args.agent, '--event', args.event, '--limit', str(args.limit)]
             if args.include_body:
                 values.append('--include-body')
+            if args.session_binding:
+                values += ['--session-binding', args.session_binding]
             raise SystemExit(hook_main(values))
         if args.action in ('init', 'agent', 'peer', 'grant', 'grant-revoke', 'grant-list', 'grant-show'):
             result = configure(args)
@@ -253,6 +255,7 @@ def add_commands(subparsers, csl):
     hook.add_argument('--agent', required=True)
     hook.add_argument('--event', required=True, choices=['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop'])
     hook.add_argument('--limit', type=int, default=10)
+    hook.add_argument('--session-binding', help='Explicit owner-supplied UUID binding override for isolated tests; never inferred from message contents.')
     hook.add_argument('--include-body', action='store_true', help='Explicit local owner opt-in to surface bounded untrusted message bodies at this turn boundary.')
     for action in ('send', 'receive', 'ack', 'reply'):
         mail = sub.add_parser(action, help='Task-independent mailbox v1 '+action+'; never starts or steers a model.')
