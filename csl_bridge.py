@@ -53,11 +53,17 @@ def configure(args):
     else:
         store = Store(args.home)
     try:
-        if args.action in ('grant', 'grant-revoke'):
-            from csl_bridge_mailbox import grant
-            return grant(store, args.reference, getattr(args, 'peer', None), getattr(args, 'source', None),
-                         getattr(args, 'target', None), getattr(args, 'permission', None), getattr(args, 'scope', None),
-                         getattr(args, 'expires_at', None), revoke=args.action == 'grant-revoke')
+        if args.action in ('grant', 'grant-revoke', 'grant-list', 'grant-show'):
+            from csl_bridge_mailbox import grant, inspect_grants, MailRejected
+            try:
+                if args.action in ('grant-list', 'grant-show'):
+                    return inspect_grants(store, getattr(args, 'reference', None), getattr(args, 'agent', None),
+                                          getattr(args, 'after', ''), getattr(args, 'limit', 20))
+                return grant(store, args.reference, getattr(args, 'peer', None), getattr(args, 'source', None),
+                             getattr(args, 'target', None), getattr(args, 'permission', None), getattr(args, 'scope', None),
+                             getattr(args, 'expires_at', None), revoke=args.action == 'grant-revoke')
+            except MailRejected as exc:
+                return {'state': 'rejected', 'reason': exc.reason}
         # Configuration is offline only. Running connector owns its immutable snapshot.
         lock = os.fdopen(os.open(store.home / 'connector.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), 'a')
         try:
@@ -110,10 +116,10 @@ def configure(args):
 
 def run(args):
     try:
-        if args.action in ('init', 'agent', 'peer', 'grant', 'grant-revoke'):
+        if args.action in ('init', 'agent', 'peer', 'grant', 'grant-revoke', 'grant-list', 'grant-show'):
             result = configure(args)
-        elif args.action in ('send', 'receive', 'ack', 'reply'):
-            request = {'local_op': 'mail_' + args.action, 'agent': args.agent}
+        elif args.action in ('send', 'receive', 'ack', 'reply', 'inbox-status'):
+            request = {'local_op': 'mail_' + args.action.replace('-', '_'), 'agent': args.agent}
             if args.action in ('send', 'reply'):
                 request.update(id=args.message_id or str(uuid.uuid4()), body=reviewed_text(args.text_file, args.scrub_secrets),
                                grant_ref=args.grant_ref, expires_at=args.expires_at)
@@ -123,8 +129,10 @@ def run(args):
                     request['in_reply_to'] = args.in_reply_to
             elif args.action == 'ack':
                 request['message_id'] = args.message_id
-            else:
+            elif args.action == 'receive':
                 request.update(after=args.after, limit=args.limit, outbox=args.outbox)
+            else:
+                request.update(after=args.after, limit=args.limit)
             result = local_call(args.home, request)
         elif args.action == 'run':
             from csl_bridge_engine import Connector
@@ -147,7 +155,7 @@ def run(args):
             return
         elif args.action == 'mcp-config':
             from csl_bridge_mcp import configuration
-            print(configuration(args.home, args.agent, args.approve_tool))
+            print(configuration(args.home, args.agent, args.approve_tool, grant_admin=args.grant_admin))
             return
         elif args.action == 'agents' and not args.peer:
             result = local_call(args.home, {'local_op': 'agents'})
@@ -171,6 +179,11 @@ def run(args):
                 request['request_id'] = args.operation_id
             result = local_call(args.home, {'local_op': 'call', 'peer': args.peer, 'request': request})
         print(encode(result))
+        if args.action in ('send', 'receive', 'ack', 'reply', 'inbox-status', 'grant', 'grant-revoke', 'grant-list', 'grant-show'):
+            if result.get('state') in ('rejected', 'undeliverable', 'expired'):
+                raise SystemExit(1)
+            if args.action in ('send', 'ack', 'reply') and result.get('delivery', {}).get('state') in ('rejected', 'undeliverable', 'expired'):
+                raise SystemExit(1)
     except BridgeError as exc:
         print('Bridge: ' + str(exc), file=sys.stderr)
         raise SystemExit(1)
@@ -219,6 +232,17 @@ def add_commands(subparsers, csl):
     grant.add_argument('--expires-at', help='Optional owner-chosen timezone-aware ISO8601 grant expiry.')
     revoke = sub.add_parser('grant-revoke', help='Owner-only local revocation; stored messages remain intact.')
     revoke.add_argument('reference')
+    grant_list = sub.add_parser('grant-list', help='Inspect local owner grants, including expiry, revocation and descriptive scope.')
+    grant_list.add_argument('--agent', help='Optional recipient endpoint filter.')
+    grant_list.add_argument('--after', default='')
+    grant_list.add_argument('--limit', type=int, default=20)
+    grant_show = sub.add_parser('grant-show', help='Inspect one locally configured owner grant.')
+    grant_show.add_argument('reference')
+    grant_show.add_argument('--agent')
+    status = sub.add_parser('inbox-status', help='Read counts and bounded pending headers only; no bodies, scopes, acknowledgement or wake.')
+    status.add_argument('--agent', required=True)
+    status.add_argument('--after', type=int, default=0)
+    status.add_argument('--limit', type=int, default=20)
     for action in ('send', 'receive', 'ack', 'reply'):
         mail = sub.add_parser(action, help='Task-independent mailbox v1 '+action+'; never starts or steers a model.')
         mail.add_argument('--agent' if action in ('receive', 'ack') else '--from', dest='agent', required=True)
@@ -243,6 +267,7 @@ def add_commands(subparsers, csl):
     sub.add_parser('run', help='Run connector in foreground for this session; Ctrl-C stops it, not Codex work.')
     mcp_config = sub.add_parser('mcp-config', help='Print a reviewable local MCP profile; never applies consent/configuration.')
     mcp_config.add_argument('--agent', required=True, help='Explicit registered local identity bound to the tools.')
+    mcp_config.add_argument('--grant-admin', action='store_true', help='Explicit local owner capability for grant mutation scoped to this bound recipient; does not apply configuration or approve execution.')
     mcp_config.add_argument('--approve-tool', action='append', default=[], choices=['send_progress', 'send_message', 'send', 'ack', 'reply'],
         help='Explicit initial local consent for this message tool only; other side-effecting tools remain unavailable.')
     agents = sub.add_parser('agents', help='List registered local agents, or the agents a peer permits you to inspect.')

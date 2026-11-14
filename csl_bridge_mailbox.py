@@ -103,6 +103,40 @@ def grant(store, ref, peer, source, target, permissions, scope, expires_at=None,
     return {'grant_ref': ref, 'configured': True}
 
 
+def inspect_grants(store, reference=None, target=None, after='', limit=20):
+    """Local registry inspection; a bound MCP adapter supplies its own target."""
+    schema(store)
+    if target is not None:
+        name(target)
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise MailRejected('invalid_grant_limit')
+    if after:
+        name(after)
+    if reference is not None:
+        name(reference)
+    query, values = 'SELECT * FROM mail_grants WHERE ref>?', [after]
+    if target is not None:
+        query += ' AND target=?'; values.append(target)
+    if reference is not None:
+        query += ' AND ref=?'; values.append(reference)
+    query += ' ORDER BY ref LIMIT ?'; values.append(limit)
+    rows = store.rows(query, values)
+    grants = []
+    for row in rows:
+        expired = bool(row['expires_at'] and timestamp(row['expires_at']) <= timestamp(now()))
+        item = {'reference': row['ref'], 'peer': row['peer'], 'source': row['source'],
+                       'target': row['target'], 'permissions': decode(row['permissions']), 'scope': row['scope'],
+                       'scope_semantics': 'descriptive_only; no automatic work or message-scope matching',
+                       'expires_at': row['expires_at'], 'expired': expired, 'revoked': bool(row['revoked']),
+                       'active': not expired and not bool(row['revoked'])}
+        if len(encode({'grants': grants + [item]}).encode()) > 60000:
+            break
+        grants.append(item)
+    if reference is not None:
+        return {'grant': grants[0]} if grants else {'state': 'rejected', 'reason': 'unknown_or_unavailable_grant'}
+    return {'grants': grants, 'cursor': grants[-1]['reference'] if grants else after}
+
+
 class Mailbox:
     def __init__(self, connector):
         self.connector = connector
@@ -309,9 +343,10 @@ class Mailbox:
             common = {'local_op', 'agent'}
             fields = {'mail_send': {'peer', 'target', 'id', 'kind', 'body', 'grant_ref', 'expires_at'},
                       'mail_reply': {'id', 'in_reply_to', 'body', 'grant_ref', 'expires_at'},
-                      'mail_receive': {'after', 'limit', 'outbox'}, 'mail_ack': {'message_id'}}
+                      'mail_receive': {'after', 'limit', 'outbox'}, 'mail_ack': {'message_id'},
+                      'mail_inbox_status': {'after', 'limit'}}
             required = {'mail_send': {'peer', 'target', 'id', 'body'}, 'mail_reply': {'id', 'in_reply_to', 'body'},
-                        'mail_receive': set(), 'mail_ack': {'message_id'}}
+                        'mail_receive': set(), 'mail_ack': {'message_id'}, 'mail_inbox_status': set()}
             if action not in fields or not common | required[action] <= set(request) or not set(request) <= common | fields[action]:
                 raise MailRejected('invalid_mail_fields')
             agent = name(request['agent'])
@@ -342,6 +377,16 @@ class Mailbox:
                         break  # byte-bounded page; the next cursor never skips a message
                     messages.append(view); cursor = row['seq']
                 return {'messages': messages, 'cursor': cursor}
+            if action == 'mail_inbox_status':
+                after, limit = request.get('after', 0), request.get('limit', 20)
+                if type(after) is not int or not 0 <= after <= 2**63-1 or type(limit) is not int or not 1 <= limit <= 100:
+                    raise MailRejected('invalid_mail_cursor_or_limit')
+                counts = self.store.rows("SELECT count(*) AS total,sum(CASE WHEN acknowledged_at IS NULL THEN 1 ELSE 0 END) AS pending FROM mail_messages WHERE direction='in' AND target=?", (agent,))[0]
+                rows = self.store.rows("SELECT seq,id,peer,source,envelope FROM mail_messages WHERE direction='in' AND target=? AND acknowledged_at IS NULL AND seq>? ORDER BY seq LIMIT ?", (agent, after, limit))
+                return {'pending_count': counts['pending'] or 0, 'total_count': counts['total'],
+                        'cursor': rows[-1]['seq'] if rows else after,
+                        'headers': [{'id': row['id'], 'from': {'peer': row['peer'], 'agent': row['source']},
+                                     'kind': decode(row['envelope'])['kind']} for row in rows]}
             if action == 'mail_ack':
                 row = self.message(request['message_id'])
                 if not row or row['direction'] != 'in' or row['target'] != agent:

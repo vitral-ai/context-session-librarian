@@ -98,7 +98,7 @@ class MCPTests(unittest.TestCase):
             serve(self.adapter, stdin, stdout)
         responses = {row['id']: row for row in map(json.loads, stdout.getvalue().splitlines())}
         self.assertEqual(responses[1]['result']['protocolVersion'], '2024-11-05')
-        self.assertEqual(len(responses[2]['result']['tools']), 12)
+        self.assertEqual(len(responses[2]['result']['tools']), 15)
         text = json.loads(responses[3]['result']['content'][0]['text'])
         self.assertEqual(text['bound_agent'], 'worker')
         self.assertEqual(text['data'], {'agents': []})
