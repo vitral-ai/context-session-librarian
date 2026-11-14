@@ -376,3 +376,12 @@ CLI preserves the original request ID and recommends `receipt --peer PEER
 --operation-id ID`, for both a returned uncertain receipt and lost local IPC. Do
 not create another task or blindly replay. Inspect receipt/state using the same
 ID; delivery and task completion remain separate observations.
+
+Generated MCP profiles use a105s host ceiling: caller IPC95s plus an explicit10s
+framing/scheduling margin. Both CLI and Mac app profiles share that value. It is
+a host ceiling, not a wait duration or latency guarantee: wait_agent remains0..20s
+and local IPC25s; startup remains10s. Tool lists, per-tool consent and approval
+modes are unchanged. Existing live profiles are not migrated by generating one.
+The Swift UI backend wrapper has no shorter subprocess deadline; its3s local
+status/process checks and8s local-start readiness probe remain local-only. Build
+and signing timeouts are unrelated to operational remote calls and remain intact.

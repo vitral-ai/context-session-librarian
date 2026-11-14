@@ -23,6 +23,7 @@ sys.path.insert(0, str(SOURCE))
 from csl_bridge_store import Store, BridgeError, encode, decode, name, identifier
 from csl_bridge_transport import local_call, exchange
 from csl_bridge_rpc import Runtime, RuntimeUnavailable, RuntimeRejected
+from csl_bridge_mcp import MCP_TOOL_TIMEOUT
 
 
 class AppError(ValueError):
@@ -207,7 +208,7 @@ class Service:
         return proof
 
     def mcp_profile(self):
-        return '[mcp_servers.csl_bridge]\ncommand = '+json.dumps(sys.executable)+'\nargs = '+json.dumps(['-I','-S','-B',str(SOURCE/'csl-bridge-mcp'),'--home',str(self.home),'--agent','worker'])+'\nrequired = true\nstartup_timeout_sec = 10\ntool_timeout_sec = 25\nenabled_tools = ["send_progress", "wait_agent", "list_agents", "agent_status", "operation_receipt"]\ndefault_tools_approval_mode = "writes"\n[mcp_servers.csl_bridge.tools.send_progress]\napproval_mode = "approve"\n'
+        return '[mcp_servers.csl_bridge]\ncommand = '+json.dumps(sys.executable)+'\nargs = '+json.dumps(['-I','-S','-B',str(SOURCE/'csl-bridge-mcp'),'--home',str(self.home),'--agent','worker'])+'\nrequired = true\nstartup_timeout_sec = 10\ntool_timeout_sec = '+str(MCP_TOOL_TIMEOUT)+'\nenabled_tools = ["send_progress", "wait_agent", "list_agents", "agent_status", "operation_receipt"]\ndefault_tools_approval_mode = "writes"\n[mcp_servers.csl_bridge.tools.send_progress]\napproval_mode = "approve"\n'
 
     @staticmethod
     def replace_owned(text, replacement):

@@ -20,6 +20,12 @@ class AppTests(unittest.TestCase):
   import tomllib
   p=tomllib.loads(self.service.mcp_profile())['mcp_servers']['csl_bridge']
   self.assertEqual(p['command'],sys.executable)
+  from csl_bridge_mcp import MCP_TOOL_TIMEOUT, MCP_HOST_MARGIN
+  from csl_bridge_transport import CALL_TIMEOUT
+  self.assertEqual(p['tool_timeout_sec'],MCP_TOOL_TIMEOUT)
+  self.assertEqual(p['tool_timeout_sec']-CALL_TIMEOUT,MCP_HOST_MARGIN)
+  self.assertEqual(p['startup_timeout_sec'],10)
+  self.assertEqual(set(p['enabled_tools']),{'send_progress','wait_agent','list_agents','agent_status','operation_receipt'})
   self.assertEqual(p['tools'],{'send_progress':{'approval_mode':'approve'}})
   self.assertEqual(p['default_tools_approval_mode'],'writes')
   self.assertNotIn('followup_task',p['enabled_tools'])
