@@ -377,6 +377,10 @@ resume previously authorized pending followups; it does not create new assignmen
 
 ## Task-Independent Mailbox V1 — Development
 
+See the standalone [agent communication specification](AGENT_COMMUNICATION.md)
+for the complete envelope, grants, session-bound hooks, optional native queue
+activation, remote transports, failure semantics and verification limits.
+
 This increment is not in the published v0.3.0 tag. It adds `send`, `receive`, `ack`
 and `reply` independently of delegated tasks. A message is persisted in a private
 inbox even when its recipient is idle or a client-only harness. **No mailbox
@@ -480,7 +484,8 @@ needed to correlate a reply.
 Stable IDs bind the operation, endpoints and content. Repeating identical input
 returns its existing message/receipt and current facts, retaining first timestamps;
 changing content, kind or endpoints under the same ID returns explicit
-`state: rejected, reason: id_collision`, including over MCP. A queued send returns
+`state: rejected, reason: id_collision`, nonzero CLI exit and MCP `isError:true`.
+A queued send returns
 promptly without waiting for a remote network timeout. The outbox exposes later
 delivery facts. A lost transport response is `uncertain`, not permanent failure.
 Recovery first queries the recipient's receipt and resends that same immutable
@@ -514,10 +519,15 @@ An optional grant `--expires-at` is chosen by the owner; expiry is not mandatory
 Registry permissions `communicate`, `activate` and `work` are distinct. `receive`
 recomputes them locally against the authenticated peer and registered endpoints,
 so later revocation/expiry is reflected without erasing the message. Even a valid
-`work` or `activate` grant causes **no execution or model activation** in this
-increment. The local registry, grant contents and operational policy remain in
+`work` or `activate` grant causes **no execution or model activation** through mail
+operations. A separate owner-opted `notify --wake-codex` can submit headers for
+messages carrying a currently resolved activate grant; it never executes work.
+The local registry, grant contents and operational policy remain in
 the private bridge database. They are not transcript authority, public fixtures,
-remote wire operations or MCP administration tools.
+remote wire operations. CLI `grant-list`/`grant-show` inspect status and scope.
+MCP own-endpoint inspection is available; create/revoke additionally require the
+explicit owner `--grant-admin` startup capability and cannot mutate another
+recipient's grant.
 
 ### MCP and harness boundaries
 
@@ -529,7 +539,8 @@ agent is fixed by the adapter's reviewed local registration, never a model field
 The MCP `receive` tool is read-only. Other mailbox tools require the harness's
 ordinary local consent; `mcp-config --approve-tool send --approve-tool ack
 --approve-tool reply` can print a bounded profile for explicit review without
-applying it. No grant administration is exposed through MCP.
+applying it. Owner grant administration is absent unless `--grant-admin` was
+explicitly enabled in that local profile. It grants no native tool permissions.
 
 The wire adds one operation, `op: mail`, with `message_version: 1` and actions
 `send`, `ack`, `receipt`. Existing protocol version and coordination operations
@@ -540,12 +551,13 @@ not process the new queued mailbox operations; use the new connector for them.
 
 | Harness | Mailbox-v1 behavior | Evidence and limits |
 | --- | --- | --- |
-| Codex | Persisted without wake/steer; receive explicitly in a normal turn | Synthetic core/CLI/MCP harnesses; no real mailbox-v1 exchange yet |
-| Claude Code | Shell CLI baseline, or bound MCP where loaded; same durable mailbox | Synthetic adapter checks; no hook, unsolicited context injection or idle wake |
-| Gemini CLI | No adapter | Not implemented or tested |
+| Codex | Durable mail; session-bound hooks; separate opted native queue notification | Real CLI mail exchange; real hook CLI with loopback provider; native queue evidence separately scoped |
+| Claude Code | CLI/MCP mailbox; session-bound boundary hooks | Real CLI exchange and real Claude hook sessions; no arbitrary idle-session wake |
+| Gemini CLI | Adapter specified, not implemented | 0.68.0 installed/help checked; isolated session probe blocked on owner authentication |
 
 Earlier real Codex coordination and a Claude MCP caller reaching a Codex task are
-separate observations; they do not validate unsolicited mailbox-v1 delivery in
-either real harness. Native task outcomes (completed, failed, interrupted) remain
+separate observations. New reciprocal mailbox, scoped agent-action and fault
+tests are described in the standalone specification; they do not establish
+universal OS/runtime support. Native task outcomes (completed, failed, interrupted) remain
 separate from messages; an unobserved cause remains unknown. An agent's prose
 claim such as refusal or need for approval is not a runtime fact or owner grant.

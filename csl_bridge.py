@@ -116,6 +116,13 @@ def configure(args):
 
 def run(args):
     try:
+        if args.action == 'notify':
+            from csl_bridge_notify import main as notify_main
+            values = ['--home', str(args.home), '--agent', args.agent, '--codex', str(args.codex),
+                      '--runtime-socket', str(args.runtime_socket)]
+            if args.wake_codex:
+                values.append('--wake-codex')
+            raise SystemExit(notify_main(values))
         if args.action == 'hook':
             from csl_bridge_hooks import main as hook_main
             values = ['--home', str(args.home), '--agent', args.agent, '--event', args.event, '--limit', str(args.limit)]
@@ -257,6 +264,11 @@ def add_commands(subparsers, csl):
     hook.add_argument('--limit', type=int, default=10)
     hook.add_argument('--session-binding', help='Explicit owner-supplied UUID binding override for isolated tests; never inferred from message contents.')
     hook.add_argument('--include-body', action='store_true', help='Explicit local owner opt-in to surface bounded untrusted message bodies at this turn boundary.')
+    notify = sub.add_parser('notify', help='Owner-run Codex native queue notification; opt-in and local activate grant required, no work execution.')
+    notify.add_argument('--agent', required=True)
+    notify.add_argument('--codex', type=Path, required=True)
+    notify.add_argument('--runtime-socket', type=Path, required=True)
+    notify.add_argument('--wake-codex', action='store_true')
     for action in ('send', 'receive', 'ack', 'reply'):
         mail = sub.add_parser(action, help='Task-independent mailbox v1 '+action+'; never starts or steers a model.')
         mail.add_argument('--agent' if action in ('receive', 'ack') else '--from', dest='agent', required=True)

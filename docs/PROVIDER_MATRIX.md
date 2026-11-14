@@ -1,5 +1,11 @@
 # CLI Coverage And Limits
 
+Experimental development mailbox commands, local grant inspection, own-endpoint
+MCP, session-bound boundary hooks and separately opted Codex queue notifications
+are specified in [agent communication](AGENT_COMMUNICATION.md). These are not in
+the published v0.3.0 baseline. Gemini is specified only, blocked on authentication;
+physical cross-OS mailbox and WAN tests remain distinct from coordination tests.
+
 CSL supports **native Codex -> Codex and Claude Code -> Claude Code handoffs**.
 Explicit experimental conversion in both directions is integrated through
 canonical v2 for text, references, completed tools, embedded images and PDFs. See

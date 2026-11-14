@@ -76,6 +76,16 @@ class HookTests(unittest.TestCase):
         self.assertIn('body_omitted', message)
         self.assertNotIn('body', message)
 
+    def test_page_bound_reports_more_without_consuming_remaining_messages(self):
+        first, second = self.send(), self.send(body='Next page')
+        self.flush(self.a, 'bob')
+        one = json.loads(self.notify(limit=1).split('\n', 1)[1])
+        self.assertTrue(one['more_available'])
+        self.assertEqual([item['id'] for item in one['messages']], [first['id']])
+        two = json.loads(self.notify(limit=1).split('\n', 1)[1])
+        self.assertFalse(two['more_available'])
+        self.assertEqual([item['id'] for item in two['messages']], [second['id']])
+
     def test_boundaries_validate_without_transcript_reads(self):
         self.send(); self.flush(self.a, 'bob')
         output = self.notify(payload={'transcript_path': '/nonexistent/never-read', 'cwd': '/nonexistent'})
