@@ -1,6 +1,7 @@
 """Synthetic durable mailbox checks: no native runtime, credentials or model."""
 from concurrent.futures import ThreadPoolExecutor
 import copy
+import sqlite3
 from datetime import datetime, timedelta, timezone
 import tempfile
 from pathlib import Path
@@ -230,6 +231,34 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(self.a.store.rows("SELECT name FROM sqlite_master WHERE name LIKE 'mail_%'"), [])
         self.receive()
         self.assertEqual(self.b.store.rows("SELECT name FROM sqlite_master WHERE name='mail_messages'")[0]['name'], 'mail_messages')
+
+    def test_failed_outbox_insert_cannot_leave_a_deliverable_orphan_after_restart(self):
+        self.a.mailbox
+        self.a.store.db.execute("CREATE TRIGGER fail_outbox BEFORE INSERT ON mail_messages BEGIN SELECT RAISE(ABORT,'synthetic storage interruption'); END")
+        message_id = uid()
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.send(id=message_id)
+        self.assertEqual(self.a.store.rows('SELECT * FROM operations WHERE id=?', (message_id,)), [])
+        self.a.store.db.execute('DROP TRIGGER fail_outbox')
+        self.a.close(); self.a = self.connectors['alice'] = Connector(self.root/'alice', runtime_factory=self.factory)
+        self.flush(self.a, 'bob')
+        self.assertEqual(self.receive()['messages'], [])
+        self.send(id=message_id); self.flush(self.a, 'bob')
+        self.b.local({'local_op': 'mail_reply', 'agent': 'bob', 'id': uid(), 'in_reply_to': message_id, 'body': 'Reply after committed retry'})
+        self.flush(self.b, 'alice')
+        self.assertTrue(self.receive(self.a, agent='alice', outbox=True)['messages'][0]['facts']['replied'])
+
+    def test_failed_ack_fact_update_rolls_back_its_delivery_operation(self):
+        message = self.send(); self.flush(self.a, 'bob')
+        before = self.b.store.rows('SELECT id FROM operations')
+        self.b.store.db.execute("CREATE TRIGGER fail_ack BEFORE UPDATE OF acknowledged_at ON mail_messages BEGIN SELECT RAISE(ABORT,'synthetic ack interruption'); END")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.b.local({'local_op': 'mail_ack', 'agent': 'bob', 'message_id': message['id']})
+        self.assertEqual(before, self.b.store.rows('SELECT id FROM operations'))
+        self.assertFalse(self.receive()['messages'][0]['facts']['acknowledged'])
+        self.b.store.db.execute('DROP TRIGGER fail_ack')
+        self.b.local({'local_op': 'mail_ack', 'agent': 'bob', 'message_id': message['id']}); self.flush(self.b, 'alice')
+        self.assertTrue(self.receive(self.a, agent='alice', outbox=True)['messages'][0]['facts']['acknowledged'])
 
 
 if __name__ == '__main__':

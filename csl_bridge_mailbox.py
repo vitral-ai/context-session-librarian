@@ -239,11 +239,11 @@ class Mailbox:
             original = self.message(in_reply_to)
             if not original or original['direction'] != 'in' or original['peer'] != peer or (original['target'], original['source']) != (source, target):
                 raise MailRejected('invalid_reply_reference')
-        try:
-            self.store.reserve('mail-out:' + peer, content)
-        except BridgeError:
-            raise MailRejected('id_collision') from None
         with self.store.transaction() as db:
+            try:
+                self.store.reserve('mail-out:' + peer, content, transaction=db)
+            except BridgeError:
+                raise MailRejected('id_collision') from None
             db.execute('INSERT INTO mail_messages(id,direction,peer,source,target,fingerprint,envelope,queued_at) VALUES(?,?,?,?,?,?,?,?)',
                        (message_id, 'out', peer, source, target, fingerprint, encode(content['envelope']), content['envelope']['created_at']))
         return self.view(self.message(message_id))
@@ -351,11 +351,11 @@ class Mailbox:
                     stamp = decode(reserved[0]['request']).get('acknowledged_at', stamp)
                 wire = {'version': 1, 'op': 'mail', 'message_version': 1, 'action': 'ack', 'id': ack_id,
                         'source': agent, 'target': row['source'], 'message_id': row['id'], 'acknowledged_at': stamp}
-                try:
-                    self.store.reserve('mail-out:' + row['peer'], wire)
-                except BridgeError:
-                    raise MailRejected('id_collision') from None
                 with self.store.transaction() as db:
+                    try:
+                        self.store.reserve('mail-out:' + row['peer'], wire, transaction=db)
+                    except BridgeError:
+                        raise MailRejected('id_collision') from None
                     db.execute('UPDATE mail_messages SET acknowledged_at=coalesce(acknowledged_at,?) WHERE id=?', (stamp, row['id']))
                 return self.view(self.message(row['id']))
             raise MailRejected('unknown_mail_operation')
