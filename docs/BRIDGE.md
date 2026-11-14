@@ -515,7 +515,10 @@ csl bridge --home "$BOB_HOME" grant review-only --peer alice-host --from alice \
 csl bridge --home "$BOB_HOME" grant-revoke review-only
 ```
 
-An optional grant `--expires-at` is chosen by the owner; expiry is not mandatory.
+An optional grant `--expires-at` is chosen by the owner and must be in the future;
+expiry is not mandatory. Existing references reject unless the owner explicitly
+uses `grant --replace` or MCP `replace:true`, including re-creation after revoke.
+Replacement is reported and affects locally recomputed authority for old mail.
 Registry permissions `communicate`, `activate` and `work` are distinct. `receive`
 recomputes them locally against the authenticated peer and registered endpoints,
 so later revocation/expiry is reflected without erasing the message. Even a valid

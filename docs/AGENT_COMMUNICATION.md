@@ -150,8 +150,14 @@ csl bridge --home "$MAIL_HOME" grant-show scratch-only --agent assistant
 csl bridge --home "$MAIL_HOME" grant-revoke scratch-only
 ```
 
-`grant --expires-at ISO_TIMESTAMP` selects expiry explicitly; there is no imposed
-default expiry. Inspection includes permissions, descriptive scope, expiry,
+`grant --expires-at ISO_TIMESTAMP` selects future expiry explicitly; an expiry
+already in the past is rejected. There is no imposed default expiry. Creating
+an existing reference rejects as `grant_exists`, including revoked references.
+Replacement requires explicit owner `grant --replace` (or MCP `replace:true`)
+and returns `replaced:true`. Review that change: already received messages
+reference the current registry, so replacing a scope can change their computed
+authority. Historical message text does not freeze or inherit an earlier grant.
+Inspection includes permissions, descriptive scope, expiry,
 revocation and current status. `receive` computes `owner_grant/locally_resolved`
 or `none` with a diagnostic such as no reference, unknown, endpoint mismatch,
 revoked or expired. Missing permissions remain visible; models must not treat a
@@ -344,10 +350,20 @@ bounded evidence, not a universal reliability or correct-work guarantee.
 Claude Code 2.1.325 real sessions also observed header/body hook surfacing,
 PostToolUse mid-turn delivery, resume suppression and bounded Stop continuation,
 without automatic ACK or idle wake. The first hook candidate needed later
-session-binding/expiry/byte-bound corrections, which have separate regressions.
+session-binding/expiry/byte-bound corrections. Real sessions on the corrected
+candidate confirmed matching bindings deliver and mismatched bindings fail
+without consuming mail; body/Stop delivery remained bounded and unACKed.
+An actual Claude MCP session received, ACKed and replied, inspected its grants,
+and executed no body instructions. Direct MCP checks confirmed collision errors
+and the normal versus owner-admin tool catalogs. A newer inbox-status client
+against the old running connector failed: connector code must be upgraded too.
 Codex 0.169.0 real CLI hooks were exercised with an isolated loopback provider:
 headers reached captured requests, PostToolUse context and Stop continuation
 worked, and Stop recursion guarded. That provider was a stand-in, not a model.
+Real SSH mail between two fresh Linux containers passed send, reply-before-ACK,
+ACK, idempotency, conflicting-ID exit, bound-sender spoof rejection and rejection
+of an arbitrary SSH command. These containers shared one host. A current physical
+Mac reachability check timed out, so new mailbox Mac/WAN delivery is not claimed.
 
 Reproduce the synthetic suite with `python3 scripts/run_isolated_tests.py`;
 `--full` requires installed native CLIs, Linux bubblewrap and pinned optional
@@ -364,6 +380,13 @@ old launcher; stop only the selected connector; adopt the pinned candidate;
 configure grants/endpoint-specific hooks deliberately; restart and verify old
 coordination plus new messaging. If tasks remain active, leave this as a prepared
 step. No release depends on interrupting someone else's work to make adoption fit.
+
+Mixed local versions need attention: a new adapter talking to an old running
+connector may have no `inbox_status` operation even if old receive still works.
+An observed invalid-fields rejection of that exact new operation is exposed as
+`connector_does_not_accept_inbox_status`, preserving the observed reason. It is
+not a claim to know the old connector's version. Upgrade its pinned code at a
+safe boundary; changing only the CLI/MCP executable does not upgrade the process.
 
 Before public release: clean-clone full regression and peer verification of the
 exact candidate, public-safe diff review, older-peer negative test, reproducible
