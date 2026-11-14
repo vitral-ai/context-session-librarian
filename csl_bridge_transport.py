@@ -10,9 +10,17 @@ import stat
 from csl_bridge_store import BridgeError, MAX_WIRE, decode, encode, name, private_directory, validate
 
 REMOTE_COMMAND = 'csl-bridge-receiver'
+# Nested budgets leave time to return a committed receipt through both IPC hops.
+# They bound transport waiting, not task execution, and never authorize replay.
+RECEIVER_TIMEOUT = 60
+EXCHANGE_TIMEOUT = 90
+CALL_TIMEOUT = 95
+LOCAL_TIMEOUT = 25
 
 
-def local_call(home, request, timeout=25):
+def local_call(home, request, timeout=None):
+    if timeout is None:
+        timeout = CALL_TIMEOUT if request.get('local_op') == 'call' else (RECEIVER_TIMEOUT if request.get('local_op') == '_incoming' else LOCAL_TIMEOUT)
     home = private_directory(home)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -69,7 +77,7 @@ def exchange(config, local_peer, request):
         argv = ssh_argv(config['alias'], config.get('ssh_config'))
     try:
         result = subprocess.run(argv, input=(encode(request) + '\n').encode(),
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=25, check=False)
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=EXCHANGE_TIMEOUT, check=False)
     except (OSError, subprocess.TimeoutExpired):
         raise BridgeError('SSH outcome uncertain; reconcile receipt before retry') from None
     if result.returncode or len(result.stdout) > MAX_WIRE:

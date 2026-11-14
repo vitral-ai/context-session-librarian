@@ -362,3 +362,17 @@ python3 experiments/bridge/tui_gate.py
 Passing these gates does not complete acceptance with real Codex models or
 establish Mac, SSH or cross-account compatibility. Restarting a connector may
 resume previously authorized pending followups; it does not create new assignments.
+
+### Transport deadlines and uncertain outcomes
+
+Remote operations use nested budgets: receiver-to-connector IPC60s, SSH/operator
+exchange90s, caller-to-origin IPC95s. Local queries and wait retain25s; wait itself
+is bounded to0..20s. These are waiting budgets, not latency targets or cancellation.
+Native runtime deadlines are unchanged. Long queue/native contention can still
+exceed them; increasing budgets does not establish the source of WAN latency.
+
+If the caller disconnects, the receiver may already have committed delivery. The
+CLI preserves the original request ID and recommends `receipt --peer PEER
+--operation-id ID`, for both a returned uncertain receipt and lost local IPC. Do
+not create another task or blindly replay. Inspect receipt/state using the same
+ID; delivery and task completion remain separate observations.

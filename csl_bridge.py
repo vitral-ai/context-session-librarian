@@ -102,7 +102,14 @@ def configure(args):
         store.close()
 
 
+def uncertain_diagnostic(request, peer):
+    print('Outcome uncertain; not cancelled. request_id=' + request['id'] +
+          '. Query receipt --peer ' + peer + ' --operation-id ' + request['id'] +
+          ' before retrying; keep this ID. Do not create a replacement task.', file=sys.stderr)
+
+
 def run(args):
+    request = None
     try:
         if args.action in ('init', 'agent', 'peer'):
             result = configure(args)
@@ -151,8 +158,12 @@ def run(args):
                 request['request_id'] = args.operation_id
             result = local_call(args.home, {'local_op': 'call', 'peer': args.peer, 'request': request})
         print(encode(result))
+        if request and args.action in ('followup', 'send_message', 'interrupt') and result.get('state') == 'uncertain':
+            uncertain_diagnostic(request, args.peer)
     except BridgeError as exc:
         print('Bridge: ' + str(exc), file=sys.stderr)
+        if request and args.action in ('followup', 'send_message', 'interrupt') and 'uncertain' in str(exc).lower():
+            uncertain_diagnostic(request, args.peer)
         raise SystemExit(1)
     except (OSError, ValueError, sqlite3.Error):
         # Do not expose DB/OS/remote errors that may contain text, account or paths.
