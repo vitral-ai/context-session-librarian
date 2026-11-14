@@ -15,6 +15,12 @@ in this public tool, even if a related laboratory experiment has passed.
 
 ## Command Matrix
 
+The development-only `sync` command publishes through the shared provider
+interface for Codex, Claude Code and Gemini. Its protocol client is tested with
+synthetic providers; actual provider integration and native resume evidence are
+tracked separately. This branch retains the existing two-column command registry;
+the provider-adapter branch owns Gemini's full command coverage. See [sync](SYNC.md).
+
 The table is mirrored by `csl capabilities` / `csl capabilities --json`.
 Tests require every registered command to appear and this table to match the
 registry. Update implementation, tests and this document in the same change.
@@ -51,6 +57,7 @@ registry. Update implementation, tests and this document in the same change.
 | `show` | supported | not-integrated |
 | `stats` | supported | not-integrated |
 | `summarize` | supported | not-integrated |
+| `sync` | experimental | experimental |
 | `team` | supported | supported |
 | `timeline` | supported | not-integrated |
 | `verify-live` | experimental | experimental |
