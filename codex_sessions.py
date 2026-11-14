@@ -2941,6 +2941,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_backup_commands(sub, sys.modules[__name__])
     from csl_bridge import add_commands as add_bridge_commands
     add_bridge_commands(sub, sys.modules[__name__])
+    from csl_sync import add_commands as add_sync_commands
+    add_sync_commands(sub, sys.modules[__name__])
 
     p_index = sub.add_parser("index", help="Build or refresh the session index.")
     p_index.add_argument("--sessions-dir", type=Path, default=DEFAULT_SESSIONS_DIR)

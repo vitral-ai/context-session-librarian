@@ -20,6 +20,7 @@ def coverage():
     commands["migrate"] = {"codex": "experimental", "claude": "not-integrated"}
     commands["backup"] = {"codex": "experimental", "claude": "not-integrated"}
     commands["bridge"] = {"codex": "experimental", "claude": "not-integrated"}
+    commands["sync"] = {"codex": "experimental", "claude": "experimental"}
     for name in ("native-cut", "native-clone", "native-sanitize"):
         commands[name]["codex"] = "experimental"
     for status in commands.values():
@@ -28,6 +29,8 @@ def coverage():
     commands['export']['gemini'] = 'experimental'
     commands['import']['gemini'] = 'experimental'
     commands['providers'] = {provider:'experimental' for provider in ('codex','claude','gemini')}
+    # The collector syncs whatever the provider interface inventories, Gemini included.
+    commands['sync']['gemini'] = 'experimental'
     return {"schema_version": 1, "providers": ["codex", "claude", "gemini"], "commands": commands,
             "sync_providers": {"interface_version":1,"module":"csl_sync_providers",
                                "operations":["list_sessions","raw_files","view_records","package_descriptor"],

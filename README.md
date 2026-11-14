@@ -274,6 +274,12 @@ session and checks experimental Claude-to-Codex conversion. See [the demo](demo/
 
 ## Development And Documentation
 
+The development collector adds optional [`csl sync`](docs/SYNC.md) for a registry
+you configure. It needs explicit browser sign-in and a separate run command;
+raw uploads include any secrets in transcripts and companion files. It installs
+no service. Provider integration and real registry/resume validation are separate
+from synthetic client tests; this feature is not in the v0.3.0 release.
+
 CSL reads `$CODEX_HOME` (default `~/.codex`) and keeps its search index at
 `session_librarian.sqlite`. Claude transcripts use `$CLAUDE_CONFIG_DIR/projects`
 (default `~/.claude/projects`). Shared exchange settings and receipts live under
