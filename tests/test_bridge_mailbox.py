@@ -260,6 +260,17 @@ class MailboxTests(unittest.TestCase):
         self.b.local({'local_op': 'mail_ack', 'agent': 'bob', 'message_id': message['id']}); self.flush(self.b, 'alice')
         self.assertTrue(self.receive(self.a, agent='alice', outbox=True)['messages'][0]['facts']['acknowledged'])
 
+    def test_uncertain_mail_with_same_local_remote_agent_name_never_enters_native_recovery(self):
+        self.a.agents['bob'] = uid()
+        self.a.locks['bob'] = self.a.locks['alice']
+        self.send()
+        with patch('csl_bridge_transport.exchange', side_effect=BridgeError('Synthetic offline peer')):
+            self.a.mailbox.flush('bob')
+        self.a.runtime = Mock(connected=True)
+        self.a.runtime.call.side_effect = AssertionError('Mailbox uncertainty must not inspect or steer native history')
+        self.a.reconcile(flush_pending=False)
+        self.a.runtime.call.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

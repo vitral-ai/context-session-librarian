@@ -356,7 +356,8 @@ class Connector:
         # evidence remains uncertain; never auto-repeat an invocation.
         for agent, thread in self.agents.items():
             uncertain_ops = [row for row in self.store.rows("SELECT id,peer,request FROM operations WHERE state='uncertain'")
-                             if not row['peer'].startswith('outbound:') and decode(row['request']).get('target') == agent]
+                             if not row['peer'].startswith('outbound:') and decode(row['request']).get('op') != 'mail'
+                             and decode(row['request']).get('target') == agent]
             uncertain_events = [row for row in self.store.rows("SELECT id,body FROM inbound WHERE delivery='uncertain'")
                                 if decode(row['body'])['target'] == agent]
             # Repair only local crash windows with an already-confirmed native turn.
