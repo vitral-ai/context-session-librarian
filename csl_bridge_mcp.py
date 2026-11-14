@@ -180,7 +180,8 @@ class Adapter:
             if rows and rows[0]['target'] != self.agent:
                 return {'state': 'rejected', 'reason': 'unknown_or_unavailable_grant'}
             return grant(store, arguments['reference'], arguments.get('peer'), arguments.get('source'), self.agent,
-                         arguments.get('permissions'), arguments.get('scope'), arguments.get('expires_at'), revoke=tool == 'grant_revoke')
+                         arguments.get('permissions'), arguments.get('scope'), arguments.get('expires_at'),
+                         revoke=tool == 'grant_revoke', bound_target=self.agent)
         except MailRejected as exc:
             return {'state': 'rejected', 'reason': exc.reason}
         finally:

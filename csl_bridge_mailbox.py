@@ -77,16 +77,23 @@ def schema(store):
         ''')
 
 
-def grant(store, ref, peer, source, target, permissions, scope, expires_at=None, revoke=False):
+def grant(store, ref, peer, source, target, permissions, scope, expires_at=None, revoke=False, *, bound_target=None):
     """Owner/operator configuration only. Deliberately absent from MCP and wire."""
     schema(store); name(ref)
+    if bound_target is not None:
+        name(bound_target)
     if revoke:
         with store.transaction() as db:
-            if not db.execute('SELECT ref FROM mail_grants WHERE ref=?', (ref,)).fetchone():
+            previous = db.execute('SELECT target FROM mail_grants WHERE ref=?', (ref,)).fetchone()
+            if not previous:
                 raise MailRejected('unknown_grant')
+            if bound_target is not None and previous['target'] != bound_target:
+                raise MailRejected('unknown_or_unavailable_grant')
             db.execute('UPDATE mail_grants SET revoked=1 WHERE ref=?', (ref,))
         return {'grant_ref': ref, 'revoked': True}
     name(peer); name(source); name(target)
+    if bound_target is not None and target != bound_target:
+        raise MailRejected('unknown_or_unavailable_grant')
     if peer not in store.peers() or target not in store.agents():
         raise MailRejected('unknown_grant_endpoint')
     if not permissions or not set(permissions) <= {'communicate', 'activate', 'work'}:
@@ -96,6 +103,9 @@ def grant(store, ref, peer, source, target, permissions, scope, expires_at=None,
     if expires_at is not None:
         timestamp(expires_at)
     with store.transaction() as db:
+        previous = db.execute('SELECT target FROM mail_grants WHERE ref=?', (ref,)).fetchone()
+        if bound_target is not None and previous and previous['target'] != bound_target:
+            raise MailRejected('unknown_or_unavailable_grant')
         db.execute('INSERT INTO mail_grants VALUES(?,?,?,?,?,?,?,0) ON CONFLICT(ref) DO UPDATE SET '
                    'peer=excluded.peer,source=excluded.source,target=excluded.target,permissions=excluded.permissions,'
                    'scope=excluded.scope,expires_at=excluded.expires_at,revoked=0',

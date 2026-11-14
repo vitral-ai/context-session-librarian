@@ -1,5 +1,6 @@
 """Communication completion contracts, using only fresh synthetic bridge homes."""
 from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 import os
@@ -10,7 +11,7 @@ import unittest
 
 from csl_bridge_mailbox import grant
 from csl_bridge_mcp import Adapter, configuration, serve
-from csl_bridge_store import BridgeError, encode
+from csl_bridge_store import BridgeError, Store, encode
 import test_bridge_mailbox as helpers
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,6 +119,24 @@ class CompletionTests(unittest.TestCase):
             default.call('grant_create', {**args, 'grant_admin': True})
         profile = configuration(self.b.store.home, 'bob', grant_admin=True)
         self.assertIn('--grant-admin', profile); self.assertNotIn('approval_mode = "approve"', profile)
+
+    def test_concurrent_bound_grant_admins_cannot_overwrite_another_endpoint_reference(self):
+        self.b.mailbox
+        with self.b.store.transaction() as db:
+            db.execute('INSERT INTO agents VALUES(?,?)', ('another', helpers.uid()))
+        def create(target):
+            store = Store(self.b.store.home)
+            try:
+                try:
+                    return grant(store, 'contested', 'alice', 'alice', target, ['work'], 'Synthetic scope', bound_target=target)
+                except BridgeError:
+                    return {'rejected': True}
+            finally:
+                store.close()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(create, ['bob', 'another']))
+        self.assertEqual(sum(bool(result.get('configured')) for result in results), 1)
+        self.assertEqual(sum(bool(result.get('rejected')) for result in results), 1)
 
 
 if __name__ == '__main__':
