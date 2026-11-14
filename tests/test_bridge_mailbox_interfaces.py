@@ -118,6 +118,20 @@ class MailboxInterfaces(unittest.TestCase):
             found.extend(m['id'] for m in result['messages']); cursor = result['cursor']
         self.assertEqual(len(found), 10); self.assertEqual(len(set(found)), 10)
 
+    def test_recipient_sqlite_failure_is_uncertain_and_recovers_over_actual_ipc(self):
+        self.b.mailbox
+        self.b.store.db.execute("CREATE TRIGGER transient_receiver BEFORE INSERT ON mail_messages BEGIN SELECT RAISE(ABORT,'synthetic temporary storage failure'); END")
+        self.b.start()
+        self.send()
+        self.a.mailbox.flush('bob')  # actual lab transport -> private recipient IPC
+        view = self.receive(self.a, agent='alice', outbox=True)['messages'][0]
+        self.assertEqual(view['delivery']['state'], 'uncertain')
+        self.assertEqual(self.receive()['messages'], [])
+        self.b.store.db.execute('DROP TRIGGER transient_receiver')
+        self.a.mailbox.flush('bob')  # receipt says absent, then same immutable send succeeds
+        self.assertEqual(len(self.receive()['messages']), 1)
+        self.assertTrue(self.receive(self.a, agent='alice', outbox=True)['messages'][0]['facts']['persisted'])
+
 
 if __name__ == '__main__':
     unittest.main()

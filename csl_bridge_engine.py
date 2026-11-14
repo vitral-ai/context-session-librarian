@@ -80,6 +80,11 @@ class Connector:
                     request = decode(raw)
                     data = connector.local(request)
                     output = {'ok': True, 'data': data}
+                except sqlite3.Error:
+                    mail = request.get('local_op', '').startswith('mail_') or request.get('request', {}).get('op') == 'mail'
+                    output = ({'ok': True, 'data': {'state': 'uncertain', 'reason': 'mailbox_storage_unavailable',
+                               'request_id': request.get('id', request.get('request', {}).get('id'))}}
+                              if mail else {'ok': False, 'data': {'error': 'Bridge rejected request; inspect receipt/state'}})
                 except (BridgeError, RuntimeUnavailable, RuntimeRejected, sqlite3.Error, OSError, ValueError, KeyError, TypeError):
                     output = {'ok': False, 'data': {'error': 'Bridge rejected request; inspect receipt/state'}}
                 try:
