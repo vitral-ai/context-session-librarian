@@ -28,7 +28,7 @@ def local_call(home, request, timeout=25):
             raise BridgeError('Invalid bridge response; outcome uncertain')
         if not response['ok']:
             if request.get('local_op', '').startswith('mail_') or request.get('request', {}).get('op') == 'mail':
-                return {'state': 'rejected', 'reason': 'peer_rejected_reason_unknown'}
+                return {'state': 'uncertain', 'reason': 'peer_rejected_reason_unknown', 'peer_rejected': True}
             # Never repeat remote-provided error text in logs or terminal diagnostics.
             raise BridgeError('Bridge rejected operation; inspect receipt/state')
         return response['data']
@@ -81,7 +81,7 @@ def exchange(config, local_peer, request):
         raise BridgeError('Invalid SSH response; outcome uncertain')
     if not response['ok']:
         if request['op'] == 'mail':
-            return {'state': 'rejected', 'reason': 'peer_rejected_reason_unknown'}
+            return {'state': 'uncertain', 'reason': 'peer_rejected_reason_unknown', 'peer_rejected': True}
         raise BridgeError('Remote bridge rejected operation; inspect receipt/state')
     return response['data']
 

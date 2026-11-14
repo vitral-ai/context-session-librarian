@@ -489,9 +489,11 @@ An unavailable receipt leaves uncertainty intact. Connector restart preserves
 inboxes, outboxes, acknowledgement timestamps, IDs and queued recovery state.
 
 `undeliverable` requires a confirmed permanent reason, such as a configured inbox
-no longer existing. A confirmed negative older-peer response is `rejected` with
-`peer_rejected_reason_unknown`; it does not prove whether that peer lacks the
-protocol or rejected admission. Timeouts never imply either explanation.
+no longer existing. A generic negative older-peer response records the observed
+fact `peer_rejected: true` and `peer_rejected_reason_unknown`, retaining delivery
+state `uncertain`: that response cannot distinguish unsupported protocol, policy
+rejection or an internal failure. Recovery queries a receipt rather than blindly
+resending the body. Timeouts do not imply a peer rejection or permanent failure.
 
 ### Optional locally resolved owner authority
 

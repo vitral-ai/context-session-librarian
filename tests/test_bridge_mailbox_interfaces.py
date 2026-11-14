@@ -90,13 +90,13 @@ class MailboxInterfaces(unittest.TestCase):
         self.a.start()
         self.assertEqual(len(self.a.threads), 2)  # mailbox delivery and local IPC only
 
-    def test_older_peer_negative_response_is_confirmed_rejection_not_timeout(self):
+    def test_older_peer_negative_response_is_observed_without_inventing_permanent_cause(self):
         original = self.send()
         wire = json.loads(self.a.store.rows('SELECT request FROM operations WHERE id=?', (original['id'],))[0]['request'])
         negative = SimpleNamespace(returncode=1, stdout=b'{"ok":false,"data":{"error":"Bridge receiver rejected request"}}')
         with patch('csl_bridge_transport.subprocess.run', return_value=negative):
             result = exchange({'transport': 'operator', 'helper': '/synthetic/helper'}, 'alice', wire)
-        self.assertEqual(result, {'state': 'rejected', 'reason': 'peer_rejected_reason_unknown'})
+        self.assertEqual(result, {'state': 'uncertain', 'reason': 'peer_rejected_reason_unknown', 'peer_rejected': True})
         fixture = ROOT/'tests/fixtures/bridge_v030_negative_peer.py'
         completed = subprocess.run([sys.executable, str(fixture)], input=encode(wire)+'\n', capture_output=True, text=True)
         self.assertEqual(completed.returncode, 1)

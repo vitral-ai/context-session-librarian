@@ -274,7 +274,7 @@ class Mailbox:
                     if result is None:
                         result = ({'state': 'expired', 'reason': 'message_expired_before_confirmed_delivery', 'message_id': request['id']}
                                   if expired else exchange(self.connector.peers[peer], self.connector.identity, request))
-                    if not isinstance(result, dict) or result.get('state') not in ('persisted', 'acknowledged', 'rejected', 'undeliverable', 'expired'):
+                    if not isinstance(result, dict) or result.get('state') not in ('persisted', 'acknowledged', 'rejected', 'undeliverable', 'expired', 'uncertain'):
                         raise BridgeError('Invalid mail receipt')
                     if result['state'] == 'persisted' and (result.get('message_id') != request['id'] or not result.get('persisted_at')):
                         raise BridgeError('Invalid persisted receipt')
@@ -285,7 +285,9 @@ class Mailbox:
                     if result.get('acknowledged_at'):
                         timestamp(result['acknowledged_at'])
                     result = {key: value for key, value in result.items() if key in
-                              {'state', 'message_id', 'persisted_at', 'acknowledged_at', 'reason'}}
+                              {'state', 'message_id', 'persisted_at', 'acknowledged_at', 'reason', 'peer_rejected'}}
+                    if 'peer_rejected' in result and type(result['peer_rejected']) is not bool:
+                        raise BridgeError('Invalid peer rejection fact')
                     if 'reason' in result and (not isinstance(result['reason'], str) or len(result['reason']) > 128):
                         raise BridgeError('Invalid receipt reason')
                 except BridgeError:
