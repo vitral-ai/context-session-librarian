@@ -59,6 +59,7 @@ def coverage():
                 "notification_metadata": "own-endpoint unacknowledged counts and bounded id/from/kind headers only; no wake or acknowledgement",
                 "grant_inspection": "CLI and own-endpoint MCP list/show include descriptive scope, expiry and revocation",
                 "grant_mutation": "local owner CLI; MCP requires explicit owner --grant-admin startup capability, scoped to bound endpoint",
+                "boundary_hook": "Claude SessionStart/UserPromptSubmit/PostToolUse/Stop adapter; metadata default, body explicit owner opt-in; no acknowledgement or model wake",
                 "delivery": "durable local inbox; explicit receive in the existing session",
                 "model_activation": False, "executes_work": False,
                 "authority": "recipient-owner registry, separate from inbox admission; none without a matching grant",
