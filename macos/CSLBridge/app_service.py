@@ -226,7 +226,9 @@ class Service:
         code,link=invitation_input(invitation)
         connector=self.start(thread,None)
         result=connect_code(self.state/'lan',self.home,code,bind,link)
-        if result.get('state')!='paired':return {**result,'connector_owned':connector.get('started_by_this_call',False)}
+        if result.get('state')!='paired':
+            json_file(self.state/'peer-proof.json',{'ready':False,'phase':'pairing_uncertain','observed_at':time.time(),'note':'Emparejamiento sin confirmar; consulta el recibo antes de repetir.'})
+            return {**result,'connector_owned':connector.get('started_by_this_call',False)}
         self.settings.update(coordinator=result['paired'],remote_agent=result['remote_agent'])
         json_file(self.settings_path,self.settings)
         proof=self.peer_check(result['remote_agent'])
@@ -249,6 +251,7 @@ class Service:
 
     def lan_stop(self):
         from csl_bridge_lan import control
+        json_file(self.state/'peer-proof.json',{'ready':False,'phase':'stopping','observed_at':time.time(),'note':'Desconexión solicitada; no es cancelación del trabajo ya aceptado.'})
         return control(self.state/'lan','stop')
 
     def lan_call(self, action, text_file=None, request_id=None, operation_id=None, after=0, timeout=20):

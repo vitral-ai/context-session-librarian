@@ -198,11 +198,13 @@ final class App: NSObject, NSApplicationDelegate {
         guard let args=lanArguments("lan-share"),communicationConsent() else {return}
         perform(args) { object in
             guard let data=self.unwrap(object),let code=data["code"] as? String else {return}
-            self.beganOwnedLAN=data["lan_session_owned"] as? Bool ?? false
-            self.beganOwnedConnector=data["connector_owned"] as? Bool ?? false
+            self.beganOwnedLAN=self.beganOwnedLAN || (data["lan_session_owned"] as? Bool ?? false)
+            self.beganOwnedConnector=self.beganOwnedConnector || (data["connector_owned"] as? Bool ?? false)
             self.monitoringPeer=true
             let alert=NSAlert();alert.messageText="Código privado: "+code
-            alert.informativeText="Copia y pega el código en la otra utilidad. Caduca en cinco minutos y funciona una vez. Si UDP está bloqueado, copia el enlace privado. Emparejar no demuestra que el modelo haya avanzado."
+            let tools=data["communication_tools"] as? [String:Any]
+            let warning=(tools?["installed"] as? Bool == false) ? "ATENCIÓN: herramientas del agente no instaladas; revisa la configuración local. CLI sigue disponible.\n\n" : ""
+            alert.informativeText=warning+"Copia y pega el código en la otra utilidad. Caduca en cinco minutos y funciona una vez. Si UDP está bloqueado, copia el enlace privado. Emparejar no demuestra que el modelo haya avanzado."
             alert.addButton(withTitle:"Copiar código");alert.addButton(withTitle:"Copiar enlace")
             let response=alert.runModal()
             let selected=response == .alertFirstButtonReturn ? code : data["link"] as? String ?? code
@@ -211,14 +213,14 @@ final class App: NSObject, NSApplicationDelegate {
         }
     }
     @objc func reconcileLAN() {
-        perform(["lan-reconcile"]) { object in if let data=self.unwrap(object) {self.noteLabel.stringValue=data["note"] as? String ?? "Recibo de emparejamiento consultado; no se creó otro permiso."} }
+        perform(["lan-reconcile"]) { object in if let data=self.unwrap(object) {self.noteLabel.stringValue=data["note"] as? String ?? "Recibo de emparejamiento consultado; no se creó otro permiso.";if data["state"] as? String == "paired" {self.monitoringPeer=true;self.refresh()}} }
     }
     @objc func joinLAN() {
         guard let args=lanArguments("lan-connect"),communicationConsent() else {return}
         let invitation=pairCode.stringValue
         pairCode.stringValue=""
         perform(args+["--pair-code-stdin"],input:invitation) { object in
-            if let data=self.unwrap(object) {self.beganOwnedLAN=data["lan_session_owned"] as? Bool ?? false;self.beganOwnedConnector=data["connector_owned"] as? Bool ?? false;if data["state"] as? String != "paired" {self.statusLabel.stringValue="Emparejamiento sin confirmar";self.noteLabel.stringValue=data["note"] as? String ?? "Consulta el recibo antes de reintentar.";return};self.beganOwnedLAN=data["lan_session_owned"] as? Bool ?? false;self.beganOwnedConnector=data["connector_owned"] as? Bool ?? false;self.monitoringPeer=true;self.noteLabel.stringValue=data["note"] as? String ?? "Par autenticado.";self.refresh()}
+            if let data=self.unwrap(object) {self.beganOwnedLAN=self.beganOwnedLAN || (data["lan_session_owned"] as? Bool ?? false);self.beganOwnedConnector=self.beganOwnedConnector || (data["connector_owned"] as? Bool ?? false);if data["state"] as? String != "paired" {self.statusLabel.stringValue="Emparejamiento sin confirmar";self.noteLabel.stringValue=data["note"] as? String ?? "Consulta el recibo antes de reintentar.";return};self.beganOwnedLAN=self.beganOwnedLAN || (data["lan_session_owned"] as? Bool ?? false);self.beganOwnedConnector=self.beganOwnedConnector || (data["connector_owned"] as? Bool ?? false);self.monitoringPeer=true;self.noteLabel.stringValue=data["note"] as? String ?? "Par autenticado.";let tools=data["communication_tools"] as? [String:Any];if tools?["installed"] as? Bool == false {self.statusLabel.stringValue="Par autenticado; herramientas sin instalar";self.noteLabel.stringValue="Revisa configuración/política local. Pairing no acredita coordinación automática."} else {self.refresh()}}
         }
     }
     @objc func refresh() {
