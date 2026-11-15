@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-No unreleased changes.
+- Bind sync snapshot IDs to the complete metadata/inventory/view/package request,
+  so metadata-only changes cannot reuse a registry snapshot identity. Canonicalize
+  JSON requests for stable replay after lost responses or process restart.
 
 ## 0.4.0 — 2026-11-15
 
