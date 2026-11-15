@@ -1,9 +1,9 @@
 # CLI Coverage And Limits
 
-Experimental development mailbox commands, local grant inspection, own-endpoint
+Experimental mailbox commands, local grant inspection, own-endpoint
 MCP, session-bound boundary hooks and separately opted Codex queue notifications
-are specified in [agent communication](AGENT_COMMUNICATION.md). These are not in
-the published v0.3.0 baseline. Gemini is specified only, blocked on authentication;
+are included in CSL 0.4.0 and specified in [agent communication](AGENT_COMMUNICATION.md).
+The Gemini messaging adapter is specified only, separately from native file reads;
 physical cross-OS mailbox and WAN tests remain distinct from coordination tests.
 
 CSL supports **native Codex -> Codex and Claude Code -> Claude Code handoffs**.
@@ -103,7 +103,7 @@ bounded real CLI exchanges and Claude hook/MCP sessions have been exercised.
 The separate owner-opted Codex notifier requires a local activate grant and an
 existing owned runtime. Claude support does not imply arbitrary idle wake,
 search or conversion guarantees. See the [communication specification](AGENT_COMMUNICATION.md)
-for evidence boundaries. Published v0.3.0 predates this development increment.
+for evidence boundaries. Earlier v0.3.0 predates this capability, included in 0.4.0.
 
 `backup` is included in the
 [v0.3.0 release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.3.0)
@@ -289,7 +289,7 @@ and [Claude CLI flags](https://code.claude.com/docs/en/cli-reference). Local CLI
 `--help` is authoritative for the installed version's argument set.
 
 
-## Provider reads and native-file packages — development
+## Provider reads and native-file packages — experimental, included in 0.4.0
 
 `csl providers list|files|view|package --provider codex|claude|gemini|antigravity` exposes the
 local collector interface in [SYNC_PROVIDERS.md](SYNC_PROVIDERS.md). Claude and

@@ -27,11 +27,11 @@ reproducible comparison and the distinction between migration and a new copy.
 
 Requires Linux and Python 3.11+. The core CLI uses only the Python standard
 library; no virtualenv or pip installation is needed. Confirm tag availability in
-the [v0.3.0 Release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.3.0)
+the [v0.4.0 Release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.4.0)
 before using the tagged installation below.
 
 ```bash
-git clone --branch v0.3.0 https://github.com/vitral-ai/context-session-librarian.git context-session-librarian
+git clone --branch v0.4.0 https://github.com/vitral-ai/context-session-librarian.git context-session-librarian
 cd context-session-librarian
 ./install.sh
 csl --version
@@ -47,7 +47,7 @@ Context Session Librarian was previously named Codex Session Librarian; the
 Opening a conversation requires its native CLI and your own authentication.
 Local search and ZIP transfers need no GitHub account or paid model calls.
 Team exchange additionally requires [GitHub CLI](https://cli.github.com/).
-For development, clone without `--branch v0.3.0` in a separate directory;
+For development, clone without `--branch v0.4.0` in a separate directory;
 see [release history](CHANGELOG.md) for published changes.
 
 ## Find And Reopen A Conversation
@@ -201,12 +201,29 @@ A [native macOS app source prototype](macos/README.md) is included for developme
 There is no validated downloadable app bundle yet; the CLI bridge is the tested
 Mac path. The prototype does not provide automatic pairing or configure networking.
 
-Development checkouts also include [task-independent mailbox messaging](docs/BRIDGE.md#task-independent-mailbox-v1--development)
+Version 0.4.0 also includes [task-independent mailbox messaging](docs/BRIDGE.md#task-independent-mailbox-v1--development)
 for registered Codex/Claude sessions, with durable inboxes, explicit acknowledgement
 and correlated replies. Optional hooks surface messages at session boundaries;
 mail itself grants no permission to act or wake a model. These experimental
-commands are not part of published v0.3.0. See the [communication guide](docs/AGENT_COMMUNICATION.md)
+commands require explicit setup. See the [communication guide](docs/AGENT_COMMUNICATION.md)
 for setup, tested interfaces and limits.
+
+## Optional Raw Session Sync — Experimental
+
+Use `csl providers --help` to inspect local Codex, Claude Code, Gemini CLI and
+Antigravity CLI files through the documented native profiles. These reads do not
+need a registry. Advanced indexed library commands remain Codex-oriented.
+
+`csl sync` can publish selected sessions to a registry you explicitly configure;
+installation starts no upload or background service. **Raw sync uploads secrets
+in transcripts and supported companion files unchanged.** It does not scrub them
+or encrypt them as a backup. Choose the destination and scope deliberately;
+see [setup and privacy](docs/SYNC.md).
+
+Gemini native resume remains unverified; Antigravity evidence is bounded to its
+tested CLI/profile. Imported Codex history-base graphs can require an explicit
+native activation before a cold-home read works. File preservation does not
+guarantee model recall. See [native provider limits](docs/SYNC_PROVIDERS.md).
 
 ## Experimental Encrypted Backup
 

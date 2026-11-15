@@ -1,7 +1,7 @@
 # Agent communication: mailbox v1 and harness integration
 
-Status: experimental development, separate from the published v0.3.0 coordination
-baseline. This document specifies implemented behavior, optional owner adapters,
+Status: experimental, included in CSL 0.4.0 and separate from the earlier v0.3.0
+coordination baseline. This document specifies implemented behavior, optional owner adapters,
 and deliberately unimplemented integrations. It does not claim universal harness
 compatibility or turn a message into an authorization.
 

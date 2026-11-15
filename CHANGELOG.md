@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+No unreleased changes.
+
+## 0.4.0 — 2026-11-15
+
+Mailbox, raw sync and the added native provider profiles are experimental.
+Raw sync uploads transcript bytes and supported companions **including secrets,
+unchanged**; it does not scrub them or apply encrypted-backup protection.
+
 - Avoid repeated parsing, hashing, view rendering and per-session requests for
   unchanged Codex/Claude sync inputs. Add private incremental views, periodic full
   prefix verification and early foreground wakeup for changed histories, while
@@ -18,12 +26,13 @@
 - Expose the same mailbox through CLI and fixed-agent MCP tools for Codex/Claude
   clients; bounded real exchanges, Claude hook/MCP sessions and isolated SSH
   container transport have been exercised. Physical cross-OS/WAN mailbox delivery
-  remains unverified. Legacy coordination is unchanged; v0.3.0 is the published baseline.
+  remains unverified. Legacy coordination behavior is retained.
 - Add explicit grant replacement, inspection, expiry and optional endpoint-bound
   owner-admin MCP tools; logical CLI rejection exits nonzero and MCP reports errors.
 - Add session-bound, bounded boundary hooks and a separately opted Codex native
   queue notifier requiring a local activate grant and an existing owned runtime.
-  Gemini is specified only; arbitrary idle Claude activation is not implemented.
+  The Gemini messaging adapter is specified only; arbitrary idle Claude activation
+  is not implemented. This is separate from Gemini's local file/provider support.
 - Add an isolated full synthetic test runner with a tested native-version floor;
   actual native hook/queue gates use fabricated loopback provider responses.
 - Add an explicit, configurable raw session collector: browser PKCE, private
@@ -42,6 +51,8 @@
   while retaining paginated references; unsupported/missing ancestry rejects.
   Native read evidence requires Codex's projection-cache reconstruction; import
   itself does not activate threads or claim model recall.
+  A cold-home native `thread/read` still needs an explicit owner-selected activation
+  to reconstruct Codex's projection cache; installing files alone is insufficient.
 - Add synthetic HTTP, credential, crash/recovery and privacy tests. Real identity,
   registry, native resume and remote-environment validation remain separate.
 
