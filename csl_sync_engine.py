@@ -205,7 +205,7 @@ class Collector:
                         snapshots.get(anchor.get('file_key')) != anchor):
                     raise SyncError('source_changed')
                 keys.add(anchor['file_key'])
-            if provider == 'antigravity' and ('source_files' not in page or keys != set(snapshots)):
+            if (provider == 'antigravity' or provider == 'codex' and len(files)>1) and ('source_files' not in page or keys != set(snapshots)):
                 raise SyncError('source_changed')
             if page.get('source_file') is not None and page['source_file'] not in anchors:
                 raise SyncError('source_changed')

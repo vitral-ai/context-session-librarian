@@ -362,6 +362,16 @@ def export_bundle(args, csl, *, quiet=False, scan_secrets=True, extra_metadata=N
     review = SecretReview(args) if scan_secrets else None
     sources = resolve_sources(args.sessions, csl, args.db, getattr(args, "provider", None))
     provider = selected_provider([header for _, header in sources])
+    if provider=='codex':
+        import csl_codex_history
+        if any(csl_codex_history.has_base(path) for path,_ in sources):
+            if not args.raw or len(sources)!=1:
+                raise TransferError('Referenced Codex history requires a single-session --raw export; portable or batch export would omit its base')
+            if getattr(args,'scrub_secrets',False):raise TransferError('Native raw history bases cannot be scrubbed without changing their byte coordinates')
+            from csl_provider_bundle import export_native
+            result=export_native('codex',sources[0][1]['id'],args.to,allow_secrets=getattr(args,'allow_secrets',False))
+            if not quiet:print('exported: native Codex raw package with bounded history bases')
+            return result.resolve()
     if provider == 'claude' and args.raw and len(sources)==1 and sources[0][0].with_suffix('').is_dir():
         from csl_provider_bundle import export_native
         result=export_native('claude',sources[0][1]['id'],args.to,allow_secrets=getattr(args,'allow_secrets',False))

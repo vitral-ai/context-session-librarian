@@ -12,6 +12,7 @@ from urllib.parse import urlsplit, urlunsplit
 from csl_canonical import strict_json
 import csl_gemini
 import csl_antigravity
+import csl_codex_history
 
 PROVIDERS = ('codex', 'claude', 'gemini', 'antigravity')
 API_VERSION = 1
@@ -95,7 +96,7 @@ def _paths(provider, root):
     if provider == 'antigravity':
         return sorted((root/'conversations').glob('*.db'))
     if provider == 'codex':
-        return sorted([*root.glob('sessions/**/*.jsonl'), *root.glob('archived_sessions/**/*.jsonl')])
+        return csl_codex_history.current_paths(root,[*root.glob('sessions/**/*.jsonl'), *root.glob('archived_sessions/**/*.jsonl')])
     if provider == 'claude':
         return sorted((root/'projects').glob('*/*.jsonl'))
     journals = list(root.glob('tmp/*/chats/session-*.jsonl'))
@@ -161,7 +162,7 @@ def _repository(cwd):
     return {'remote_url': remote, 'branch': git('symbolic-ref', '--short', 'HEAD')}
 
 
-def _metadata(provider, path, root, active_seconds):
+def _metadata(provider, path, root, active_seconds, files=None):
     if provider == 'antigravity':
         try:
             with csl_antigravity.snapshot(root,path.stem) as (db,files):
@@ -175,8 +176,10 @@ def _metadata(provider, path, root, active_seconds):
     sid = title = cwd = created = updated = model = parent = None
     if provider=='claude':sid=path.stem
     if provider=='codex':
+        ids=csl_codex_history.identity(path)
         match=re.search(r'([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$',path.stem)
-        if match:sid=match.group(1)
+        if ids:sid=ids[0]
+        elif match:sid=match.group(1)
     origin, count = 'native', 0
     if provider == 'gemini':
         meta, records = _gemini(path)
@@ -245,7 +248,7 @@ def _metadata(provider, path, root, active_seconds):
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',sid):raise ProviderError('invalid_native_id')
     if any(v is not None and not isinstance(v,str) for v in (title,cwd,model,parent)):
         raise ProviderError('invalid_metadata_field')
-    files = _files(provider, path, root)
+    files = _files(provider, path, root) if files is None else files
     modified = max((Path(f['path']).stat().st_mtime for f in files), default=path.stat().st_mtime)
     state = 'archived' if 'archived_sessions' in path.relative_to(root).parts else (
         'active' if datetime.now(timezone.utc).timestamp() - modified <= active_seconds else 'idle')
@@ -292,6 +295,12 @@ def _descriptor(path, root, relative, role):
 
 
 def _files(provider, path, root):
+    if provider=='codex':
+        try:
+            if csl_codex_history.has_base(path):
+                return csl_codex_history.inventory(csl_codex_history.lineage(root,path))
+        except csl_codex_history.HistoryError as error:
+            raise ProviderError(str(error)) from None
     if provider == 'antigravity':
         try:return csl_antigravity.inventory(root,path.stem)
         except (csl_antigravity.FormatError,OSError) as error:
@@ -330,8 +339,9 @@ def _resolve(provider, native_id, home):
         elif provider in ('claude','antigravity'):
             sid = path.stem
         else:
+            ids=csl_codex_history.identity(path)
             match=re.search(r'([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$',path.stem)
-            sid=match.group(1) if match else next((r.get('payload', {}).get('id') for r, _ in _lines(path) if r.get('type') == 'session_meta'), None)
+            sid=ids[0] if ids else match.group(1) if match else next((r.get('payload', {}).get('id') for r, _ in _lines(path) if r.get('type') == 'session_meta'), None)
         if sid == native_id:
             matches.append(path)
     if len(matches) != 1:
@@ -386,9 +396,9 @@ def _blocks(provider, record):
     return role, blocks
 
 
-def _view(provider, path, text_limit, max_bytes=None):
-    records = _gemini(path,max_bytes)[1] if provider == 'gemini' else _lines(path,max_bytes)
-    tools={}
+def _view(provider, path, text_limit, max_bytes=None, records=None, tools=None):
+    records = records if records is not None else _gemini(path,max_bytes)[1] if provider == 'gemini' else _lines(path,max_bytes)
+    tools={} if tools is None else tools
     for record_index, (record, offset) in enumerate(records):
         role, blocks = _blocks(provider, record)
         if role is None:
@@ -435,6 +445,13 @@ def view_records(provider, native_id, *, position=None, limit=500, text_limit=16
     root, path = _resolve(provider,native_id,home)
     if provider=='antigravity':
         return _antigravity_view(root,native_id,position,limit,text_limit)
+    if provider=='codex':
+        try:
+            if csl_codex_history.has_base(path):
+                nodes=csl_codex_history.lineage(root,path)
+                return _codex_lineage_view(nodes,native_id,position,limit,text_limit)
+        except csl_codex_history.HistoryError as error:
+            raise ProviderError(str(error)) from None
     primary=_descriptor(path,root,'session'+path.suffix,'transcript')
     seq=1; digest=hashlib.sha256();page=[]
     if position is not None and not isinstance(position,dict):
@@ -472,7 +489,14 @@ def view_records(provider, native_id, *, position=None, limit=500, text_limit=16
 
 def package_descriptor(provider, native_id, *, home=None):
     root,path=_resolve(provider,native_id,home)
-    meta=_metadata(provider,path,root,300);files=_files(provider,path,root)
+    nodes=None
+    if provider=='codex':
+        try:
+            if csl_codex_history.has_base(path):nodes=csl_codex_history.lineage(root,path)
+        except csl_codex_history.HistoryError as error:
+            return {'available':False,'reason':str(error),'descriptor_version':1,'manifest':None,'members':[]}
+    files=csl_codex_history.inventory(nodes) if nodes else _files(provider,path,root)
+    meta=_metadata(provider,path,root,300,files=files)
     if provider=='antigravity':
         try:
             with csl_antigravity.snapshot(root,native_id) as (db,files):
@@ -480,19 +504,64 @@ def package_descriptor(provider, native_id, *, home=None):
             if reason:return {'available':False,'reason':reason,'descriptor_version':1,'manifest':None,'members':[]}
         except csl_antigravity.FormatError as error:
             raise ProviderError(str(error)) from None
-    elif not any(event['kind'] in ('text','tool_call','tool_result','image','document') for event in _view(provider,path,16000,files[0]['complete_length'])):
+    elif not any(event['kind'] in ('text','tool_call','tool_result','image','document') for event in (_codex_lineage_events(nodes,16000) if nodes else _view(provider,path,16000,files[0]['complete_length']))):
         return {'available':False,'reason':'no_conversation','descriptor_version':1,'manifest':None,'members':[]}
-    if provider=='codex' and any(r.get('type')=='session_meta' and isinstance(r.get('payload'),dict) and r['payload'].get('history_base') for r,_ in _lines(path,files[0]['complete_length'])):
-        return {'available':False,'reason':'external_history_base_not_packaged','descriptor_version':1,'manifest':None,'members':[]}
     members=[];entries=[]
     for f in files:
         member=f'sessions/{native_id}/'+('main'+path.suffix if f['file_key']=='main' else 'files/'+f['relative_path'])
         members.append({'file_key':f['file_key'],'member':member})
         entries.append({'file_key':f['file_key'],'file':member,'relative_path':f['relative_path'],'role':f['role']})
     entry={'id':native_id,'provider':provider,'title':meta['title'],'cwd':meta['cwd'],'primary':members[0]['member'],'files':entries}
+    if nodes:
+        csl_codex_history.verify(nodes)
+        entry['codex_history']=csl_codex_history.graph_manifest(nodes)
     return {'available':True,'reason':None,'descriptor_version':1,
             'manifest':{'format':'codex-session-librarian','version':3,'mode':'raw','created_at':meta['updated_at'] or meta['created_at'] or '1970-01-01T00:00:00+00:00','sessions':[entry]},
             'members':members}
+
+
+def _codex_lineage_events(nodes,text_limit):
+    tools={}
+    for node in nodes:
+        records=((r,start) for r,start,_,_ in csl_codex_history.lines(node.path,node.length))
+        for event in _view('codex',node.path,text_limit,records=records,tools=tools):
+            offset=event['raw_offset']['offset']
+            event['raw_offset']['file_key']=node.descriptor['file_key']
+            event['inherited']=node is not nodes[-1]
+            if str(node.path).endswith('.zst'):
+                event['raw_offset']['offset']=0
+                event['native_pointer']='/decoded_jsonl/'+str(offset)
+            yield event
+
+
+def _codex_lineage_view(nodes,native_id,position,limit,text_limit):
+    if position is not None and (not isinstance(position,dict) or
+            position.get('version')!=1 or position.get('provider')!='codex' or
+            position.get('native_id')!=native_id or type(position.get('next_seq')) is not int or
+            position['next_seq']<1 or position.get('text_limit')!=text_limit):
+        raise ProviderError('invalid_view_position')
+    target=position['next_seq'] if position else 1
+    page=[];seq=1;digest=hashlib.sha256();verified=position is None
+    def result(reset=False,complete=False):
+        csl_codex_history.verify(nodes)
+        anchors=[{'file_key':f['file_key'],'length':f['complete_length'],'sha256':f['sha256']} for f in csl_codex_history.inventory(nodes)]
+        return {'records':[] if reset else page,'reset_required':reset,
+                'reason':'view_prefix_changed' if reset else None,'complete':False if reset else complete,
+                'position':{'version':1,'provider':'codex','native_id':native_id,
+                            'next_seq':1 if reset else seq,'text_limit':text_limit,
+                            'prefix_sha256':hashlib.sha256().hexdigest() if reset else digest.hexdigest()},
+                'source_file':anchors[0],'source_files':anchors}
+    for event in _codex_lineage_events(nodes,text_limit):
+        if seq==target:
+            if position is not None and digest.hexdigest()!=position.get('prefix_sha256'):
+                return result(reset=True)
+            verified=True
+        if seq>=target and len(page)>=limit:return result()
+        row={'seq':seq,**event}
+        if seq>=target:page.append(row)
+        digest.update(json.dumps(row,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()+b'\n');seq+=1
+    if not verified and seq==target and digest.hexdigest()==position.get('prefix_sha256'):verified=True
+    return result(reset=not verified,complete=True)
 
 
 def _antigravity_view(root,native_id,position,limit,text_limit):
