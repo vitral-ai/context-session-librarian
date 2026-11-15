@@ -15,7 +15,7 @@ from csl_version import __version__
 
 CHUNK = 8 * 1024 * 1024
 EMPTY_HASH = hashlib.sha256(b'').hexdigest()
-PROVIDERS = ('codex', 'claude', 'gemini', 'antigravity')
+PROVIDERS = ('codex', 'claude', 'antigravity')
 
 
 def digest(value):
@@ -109,6 +109,9 @@ class Collector:
             return False  # Unknown age requires explicit inclusion, not an invented timestamp.
 
     def run(self, *, days=30, providers=PROVIDERS):
+        providers = tuple(providers)
+        if any(provider not in PROVIDERS for provider in providers):
+            raise SyncError('unsupported_provider')
         # Called under the collector lock; only our private orphaned snapshots are removed.
         for path in self.spool.iterdir():
             if path.is_file() and not path.is_symlink():

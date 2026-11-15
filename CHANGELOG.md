@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Removed `gemini` CLI support. Antigravity CLI remains the supported Google
+  harness. Commands naming the removed provider and existing v3 packages that
+  name it are rejected with an unsupported-provider error; no automatic conversion
+  or replacement is attempted. Existing release history and tags are unchanged.
+
 ## 0.4.1 — 2026-11-15
 
 - Bind sync snapshot IDs to the complete metadata/inventory/view/package request,

@@ -49,8 +49,6 @@ def resume_command(sid, cwd, open_args=(), provider="codex"):
         return ['agy','--mode','plan','--conversation',sid,*open_args]
     if provider == "claude":
         return ["claude", "--resume", sid, *open_args]
-    if provider == "gemini":
-        return ["gemini", "--resume", sid, *open_args]
     if provider != "codex":
         raise TransferError(f"Unsupported provider: {provider}")
     return ["codex", "-C", str(cwd), "resume", "--all", sid, *open_args]
@@ -60,7 +58,7 @@ def selected_provider(entries, requested=None):
     providers = set()
     for entry in entries:
         provider = entry.get("provider", "codex") if isinstance(entry, dict) else None
-        if provider not in ("codex", "claude", "gemini", "antigravity"):
+        if provider not in ("codex", "claude", "antigravity"):
             raise TransferError(f"Unsupported session provider: {provider}")
         providers.add(provider)
     if len(providers) != 1:
@@ -344,7 +342,7 @@ def export_bundle(args, csl, *, quiet=False, scan_secrets=True, extra_metadata=N
             result=export_native('claude',sid,args.to,allow_secrets=getattr(args,'allow_secrets',False))
             if not quiet:print('exported: native Claude raw package including session companions')
             return result.resolve()
-    if getattr(args, 'provider', None) in ('gemini','antigravity'):
+    if getattr(args, 'provider', None) == 'antigravity':
         source_provider=args.provider
         if not args.raw:
             raise TransferError(source_provider+' native export currently requires --raw; portable conversion is not implemented')
@@ -801,7 +799,7 @@ def add_commands(subparsers, csl):
     export.add_argument("--raw", action="store_true", help="Preserve encrypted reasoning instead of portable cleanup.")
     export.add_argument("--repair-legacy-compaction", action="store_true",
                         help="Explicit recovery of recognized orphaned summary metadata in old portable Codex copies; originals unchanged.")
-    export.add_argument("--provider", choices=("codex", "claude", "gemini", "antigravity"), help="Limit source lookup; Gemini/Antigravity require explicit selection and --raw.")
+    export.add_argument("--provider", choices=("codex", "claude", "antigravity"), help="Limit source lookup; Antigravity requires explicit selection and --raw.")
     from csl_secrets import add_options
     add_options(export)
     export.set_defaults(func=lambda args: run_transfer(args, csl))
@@ -812,7 +810,7 @@ def add_commands(subparsers, csl):
     add_open_argument(mode)
     mode.add_argument("--list", action="store_true", help="Validate and list contents without installing.")
     imp.add_argument("--name", help="Rename a single imported session.")
-    imp.add_argument("--provider", choices=("codex", "claude", "gemini", "antigravity"), help="Require this native CLI; defaults to the package provider, not conversion.")
+    imp.add_argument("--provider", choices=("codex", "claude", "antigravity"), help="Require this native CLI; defaults to the package provider, not conversion.")
     from csl_conversion import add_conversion_options
     add_conversion_options(imp)
     imp.set_defaults(func=lambda args: run_transfer(args, csl))

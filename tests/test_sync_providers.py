@@ -75,25 +75,7 @@ class ProviderTests(unittest.TestCase):
         external=self.root/'credential';external.write_text('DO-NOT-COLLECT');child.symlink_to(external)
         with self.assertRaisesRegex(p.ProviderError,'symlink_source'):p.raw_files('claude',self.sid,home=self.home)
 
-    def test_gemini_legacy_snapshot_and_journal_patch_rewind(self):
-        path=self.home/'tmp/hash/chats/session-synthetic.json'
-        meta={'sessionId':self.sid,'projectHash':'hash','startTime':'2026-01-01T00:00:00Z','lastUpdated':'2026-01-02T00:00:00Z','messages':[{'id':'u1','type':'user','content':'one','timestamp':'2026-01-01T00:00:00Z'},{'id':'a1','type':'gemini','model':'test-model','content':[{'text':'two'}],'toolCalls':[{'id':'c1','name':'read','args':{},'result':[{'text':'tool value'}]}]}]}
-        path.parent.mkdir(parents=True);path.write_text(json.dumps(meta))
-        r=p.list_sessions('gemini',home=self.home)[0];self.assertEqual(r['record_count'],2);self.assertEqual(r['model'],'test-model')
-        self.assertEqual(p.raw_files('gemini',self.sid,home=self.home)[0]['mode'],'rewrite')
-        views=p.view_records('gemini',self.sid,home=self.home)['records'];self.assertEqual(views[-1]['kind'],'tool_result')
-        path.unlink();journal=path.with_suffix('.jsonl')
-        self.write(journal,[{k:v for k,v in meta.items() if k!='messages'},*meta['messages']])
-        before=p.view_records('gemini',self.sid,home=self.home)
-        with journal.open('ab') as f:f.write((json.dumps({'$patch':{'id':'a1','content':[{'text':'patched'}]}})+'\n').encode())
-        self.assertTrue(p.view_records('gemini',self.sid,home=self.home,position=before['position'])['reset_required'])
-        with journal.open('ab') as f:f.write((json.dumps({'$rewindTo':'a1'})+'\n').encode())
-        self.assertEqual(p.list_sessions('gemini',home=self.home)[0]['record_count'],1)
-        self.assertEqual(p.raw_files('gemini',self.sid,home=self.home)[0]['mode'],'append')
 
-    def test_gemini_incomplete_rewrite_is_explicit(self):
-        path=self.home/'tmp/hash/chats/session-bad.json';path.parent.mkdir(parents=True);path.write_text('{"sessionId":')
-        with self.assertRaisesRegex(p.ProviderError,'incomplete_json_snapshot'):p.list_sessions('gemini',home=self.home)
 
     def test_codex_metadata_and_views(self):
         path=self.home/'sessions/2026/01/rollout-test-'/f'{self.sid}.jsonl'
@@ -186,43 +168,8 @@ class ProviderTests(unittest.TestCase):
         items=read_native_items(self,self.root,env,installed['id'])
         self.assertIn('NATIVE-RAW-USER',json.dumps(items));self.assertIn('NATIVE-RAW-ANSWER',json.dumps(items))
 
-    def test_gemini_completed_tool_patch_appends_view_without_reset(self):
-        path=self.home/'tmp/hash/chats/session-native.jsonl'
-        rows=[{'sessionId':self.sid,'projectHash':'hash'},
-              {'id':'a','type':'gemini','content':'checking','toolCalls':[{'id':'c','name':'read','args':{}}]}]
-        self.write(path,rows)
-        before=p.view_records('gemini',self.sid,home=self.home)
-        offset=path.stat().st_size
-        with path.open('ab') as f:f.write((json.dumps({'$patch':{'id':'a','toolCalls':[{'id':'c','result':[{'text':'value'}]}]}})+'\n').encode())
-        after=p.view_records('gemini',self.sid,home=self.home,position=before['position'])
-        self.assertFalse(after['reset_required']);self.assertEqual(len(after['records']),1)
-        self.assertEqual(after['records'][0]['kind'],'tool_result')
-        self.assertEqual(after['records'][0]['raw_offset']['offset'],offset)
 
-    def test_gemini_migration_prefers_journal_and_project_marker(self):
-        path=self.home/'tmp/slug/chats/session-native.json'
-        path.parent.mkdir(parents=True)
-        meta={'sessionId':self.sid,'projectHash':'hash','messages':[{'id':'u','type':'user','content':'legacy'}]}
-        path.write_text(json.dumps(meta))
-        self.write(path.with_suffix('.jsonl'),[{k:v for k,v in meta.items() if k!='messages'},{'id':'u','type':'user','content':'new'}])
-        (path.parent.parent/'.project_root').write_text(str(self.cwd))
-        result=p.list_sessions('gemini',home=self.home)
-        self.assertEqual(len(result),1);self.assertEqual(result[0]['cwd'],str(self.cwd))
-        self.assertEqual(result[0]['title'],'new')
 
-    def test_gemini_raw_roundtrip_and_imported_origin(self):
-        path=self.home/'tmp/hash/chats/session-native.jsonl'
-        self.write(path,[{'sessionId':self.sid,'projectHash':'hash'},{'id':'u','type':'user','content':'decision'}])
-        companion=path.parent/self.sid/'sub-one.jsonl'
-        self.write(companion,[{'sessionId':'child','projectHash':'hash'},{'id':'child-u','type':'user','content':'sub context'}])
-        out=self.root/'gemini.zip';bundle.export_native('gemini',self.sid,out,home=self.home)
-        target=self.root/'gemini-target'
-        with zipfile.ZipFile(out) as z,patch.dict(os.environ,{'CSL_GEMINI_HOME':str(target)}):
-            installed=bundle.import_native(z,bundle.validate(z),self.cwd,name='Imported')[0]
-            row=p.list_sessions('gemini',home=target)[0]
-        self.assertEqual(row['origin'],'imported');self.assertEqual(row['parent']['native_id'],self.sid)
-        self.assertEqual(row['title'],'Imported');self.assertNotEqual(row['native_id'],self.sid)
-        self.assertTrue((Path(installed['path']).parent/installed['id']/'sub-one.jsonl').exists())
 
     def test_v3_tampering_and_traversal_rejected_before_install(self):
         out=self.root/'valid.zip';bundle.export_native('claude',self.sid,out,home=self.home)

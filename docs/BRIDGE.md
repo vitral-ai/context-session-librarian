@@ -556,7 +556,6 @@ not process the new queued mailbox operations; use the new connector for them.
 | --- | --- | --- |
 | Codex | Durable mail; session-bound hooks; separate opted native queue notification | Real CLI mail exchange; real hook CLI with loopback provider; native queue evidence separately scoped |
 | Claude Code | CLI/MCP mailbox; session-bound boundary hooks | Real CLI exchange and real Claude hook sessions; no arbitrary idle-session wake |
-| Gemini CLI | Adapter specified, not implemented | 0.68.0 installed/help checked; isolated session probe blocked on owner authentication |
 
 Earlier real Codex coordination and a Claude MCP caller reaching a Codex task are
 separate observations. New reciprocal mailbox, scoped agent-action and fault

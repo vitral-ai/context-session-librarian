@@ -2,7 +2,7 @@
 
 `csl sync` publishes selected local sessions to a registry implementing the sync
 protocol. It is opt-in, separate from ZIP export, encrypted backup and agent
-messaging. It reads Codex, Claude Code, Gemini CLI and Antigravity CLI through
+messaging. It reads Codex, Claude Code and Antigravity CLI through
 local provider adapters. These commands are included in CSL 0.4.0; earlier
 v0.3.0 does not include `csl sync`.
 
@@ -116,7 +116,7 @@ under the selected sync state directory. Unchanged files are checked by inventor
 device/inode, size, nanosecond modification time and change time. They do not
 repeat transcript parsing, view rendering or per-session HTTP calls. This reuses
 the previous acknowledged snapshot; it **does not advance its completeness time**.
-Gemini and Antigravity retain the full provider verification path.
+Antigravity retains the full provider verification path.
 
 The metadata hint is not an integrity proof. Every five minutes, or when the
 clock goes backwards, cached complete prefixes are fully hashed and incomplete
@@ -241,7 +241,7 @@ not establish it.
 The repository tests use synthetic providers and in-test HTTP peers; no real
 accounts or model calls. Actual registry/identity deployments and remote-environment
 acceptance need their own checks. Provider-native fidelity has separate, bounded
-evidence: Gemini native loading remains unverified; Codex supports bounded raw
+evidence: Codex supports bounded raw
 history-base graphs while missing or unsupported dependencies are rejected. See
 [provider coverage](PROVIDER_MATRIX.md) and [Antigravity evidence](ANTIGRAVITY.md).
 Raw sync success does not prove model recall. Public v0.3.0 cannot import native

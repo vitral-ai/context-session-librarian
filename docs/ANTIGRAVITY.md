@@ -2,7 +2,7 @@
 
 The observed profile is **Antigravity CLI 1.5.9 on Linux x64**. App, IDE,
 remote-agent histories, other versions and operating systems are not verified.
-Gemini CLI remains a separate provider.
+Antigravity CLI is the Google harness supported by CSL.
 
 ## Operations
 
@@ -19,7 +19,8 @@ agy --mode plan --conversation NEW_UUID
 ```
 
 Storage defaults to `~/.gemini/antigravity-cli`. `CSL_ANTIGRAVITY_HOME` or the
-provider API/CLI's `home`/`--home` overrides that storage root directly. Reading
+provider API/CLI's `home`/`--home` overrides that storage root directly.
+That native directory name does not enable another CSL provider. Reading
 requires neither authentication nor an installed native executable. Opening
 requires `agy` and the user's authentication. The provider layer never makes
 network calls, logs transcripts or invokes a model.
@@ -74,7 +75,7 @@ Portable conversion, team exchange, backup and bridge integration are not added.
 
 ## Verification and limitations
 
-The real CLI created a small session using a localhost Gemini-compatible fixture,
+The real CLI created a small session using a localhost Google-model API fixture,
 then resumed an independent CSL-imported copy and sent prior user/assistant
 content in its next request. Against a source-copy baseline, the two historical
 messages match after excluding the known synthetic `USER_SETTINGS_CHANGE`
@@ -91,8 +92,8 @@ auxiliary reads, large DBs and cross-platform restoration remain unverified.
 
 ### Authenticated owner round trip (2026-11-15)
 
-A separate manual check used CLI 1.5.9 with an existing sign-in and requested
-`gemini-3.8-flash-low`. Two short real model turns were made. The first recorded
+A separate manual check used CLI 1.5.9 with an existing sign-in and its configured
+Google model. Two short real model turns were made. The first recorded
 a random verification tag and a port. CSL listed, viewed, exported and imported
 that native session with a new UUID in another disposable home. The resumed
 model returned both earlier values correctly although neither was in the new

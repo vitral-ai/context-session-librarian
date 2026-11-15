@@ -32,7 +32,7 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(clean['PATH'], os.defpath)
             for key in ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_USE_VERTEX', 'GOOGLE_APPLICATION_CREDENTIALS', 'GH_TOKEN', 'PYTHONPATH', 'PIP_INDEX_URL'):
                 self.assertNotIn(key, clean)
-            for key in ('HOME', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'CSL_GEMINI_HOME', 'CSL_ANTIGRAVITY_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR'):
+            for key in ('HOME', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'CSL_ANTIGRAVITY_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR'):
                 path = Path(clean[key]); self.assertTrue(path.is_relative_to(Path(directory)))
                 self.assertEqual(path.stat().st_mode & 0o777, 0o700)
             self.assertEqual(clean['PIP_CONFIG_FILE'], os.devnull)

@@ -2,7 +2,7 @@
 
 Module: `csl_sync_providers.py`. Standard library only. No network, login, model
 calls or transcript logging. This interface is provider-local and independent of
-Vitral. Providers are `codex`, `claude`, `gemini` and `antigravity`.
+Vitral. Providers are `codex`, `claude` and `antigravity`.
 
 ```python
 list_sessions(provider, *, home=None, active_seconds=300) -> list[dict]
@@ -13,10 +13,8 @@ package_descriptor(provider, native_id, *, home=None) -> dict
 ```
 
 `home` explicitly overrides that provider's root, including in tests. Defaults
-use CODEX_HOME, CLAUDE_CONFIG_DIR and the Gemini user directory respectively.
-For Gemini, `GEMINI_CLI_HOME` is the harness's **parent home**; its storage is
-`.gemini` below it (or `.cache/.gemini` in its macOS seatbelt mode).
-`CSL_GEMINI_HOME` or the API's `home` overrides the storage directory directly.
+use CODEX_HOME, CLAUDE_CONFIG_DIR and CSL_ANTIGRAVITY_HOME respectively; the
+Antigravity storage default is described below.
 Errors are `ProviderError` with a stable `code`; exception messages never include
 transcript contents. An uninstalled CLI does not prevent reading known formats.
 
@@ -29,7 +27,7 @@ Every row has `provider`, `native_id`, `title`, `cwd`, `repository` (null or
 Unknown values are null, not invented. Repository reads are local Git operations;
 embedded HTTP credentials/query parameters are not returned. Titles are bounded.
 `byte_count` is the sum of complete raw lengths, `record_count` is the number of
-complete native primary records (JSONL lines; Gemini message objects).
+complete native primary records (JSONL lines or native database steps).
 
 `state=active` means a source was recently written, not that a process/model was
 observed running. `updated_at` uses the last recorded timestamp where available.
@@ -59,17 +57,15 @@ the complete prefix, never the incomplete suffix. Recheck prefix/hash while
 reading before upload; a descriptor is not an atomic snapshot lease.
 
 For JSONL, only complete newline-terminated records are in `complete_length`;
-invalid complete records raise an error. For a rewritten JSON document, the
-whole stable parseable document is the complete unit; an in-progress invalid
-document reports an incomplete snapshot, never a fabricated partial JSON file.
+invalid complete records raise an error. Antigravity uses a bounded database/WAL
+snapshot as described below.
 
 Claude companions (subagent JSONLs and persisted tool-result files) are separate
 descriptors rooted under its session directory, with `role` `subagent` or
 `tool_result`; subagent metadata is `context`. No credentials, project files, arbitrary referenced paths or
 symlinks are followed. File keys are `main`, or `f-` plus SHA-256 of the
 normalized relative path. The relative paths, not local absolute paths, are used
-to reconstruct a native package. Gemini legacy JSON is rewritten; newer native JSONL journals are append-oriented
-and may include patches/rewinds. The descriptor reports the actual format.
+to reconstruct a native package. The descriptor reports the actual format.
 
 ## Incremental view
 
@@ -92,8 +88,8 @@ used to render that page. Bind it to the raw snapshot inventory; if they differ,
 refresh the inventory before publishing a completeness claim. View rendering is
 bounded to that prefix and rechecks its hash; `source_changing` asks for a retry.
 `seq` starts at one, matching the wire contract. Continuation verifies the already-emitted **normalized view
-prefix**, so rewriting a Gemini JSON document only to append messages does not
-force a view reset. If prior view records change/disappear, return no records,
+prefix**. Appending new messages does not force a view reset. If prior view
+records change/disappear, return no records,
 `reset_required=true`, `reason="view_prefix_changed"`; do not append contradictory
 records under existing sequence numbers. The returned reset position starts at
 sequence 1 with an empty prefix, and `complete=false`. Start a new view generation
@@ -107,9 +103,9 @@ Each record has `seq`, `time`, `role` (`user`, `assistant`, `system`, `tool`),
 {"file_key":"main","offset":123}
 ```
 
-JSONL offsets identify the beginning of a native record. Gemini legacy JSON uses offset zero
-for the complete document, with a separate optional `native_pointer` field
-(`/messages/N/...`) and `block_index` on the view record. `truncated`
+JSONL offsets identify the beginning of a native record. Antigravity uses offset
+zero for the database plus a `native_pointer` for its step. `block_index`
+identifies a content block within a native JSONL record. `truncated`
 flags view-only truncation. Raw content is never truncated to fit the view.
 The initial view renders the primary conversation; subagent transcripts remain
 raw companions, not interleaved into a guessed chronology. Unsupported blocks
@@ -149,7 +145,7 @@ companion paths use `files/<normalized-relative-path>`.
 The registry must refuse an incomplete snapshot or unavailable descriptor. Format
 V3 import support is included in CSL 0.4.0; earlier v0.3.0
 only accepts v1/v2. Do not assume a v3 package is loadable by old CSL. Availability
-will be true only for profiles the new importer implements; native Gemini loader
+will be true only for profiles the importer implements; native loader
 verification is separately reported, not implied by byte packaging.
 
 `available=false, reason=no_conversation` rejects metadata-only histories.
@@ -175,22 +171,22 @@ csl providers list --provider claude --home /isolated/claude
 csl providers files --provider claude --session UUID --home /isolated/claude
 csl providers view --provider claude --session UUID --home /isolated/claude
 csl providers package --provider claude --session UUID --home /isolated/claude
-csl sessions --provider gemini --json
-csl export GEMINI_UUID --provider gemini --raw --to /private/session.csl.zip
+csl sessions --provider antigravity --json
+csl export SESSION_UUID --provider antigravity --raw --to /private/session.csl.zip
 csl import /private/session.csl.zip --list
 csl import /private/session.csl.zip --cwd /local/project
 ```
 
-Gemini must be explicitly selected for export; automatic source selection,
+Antigravity must be explicitly selected for export; automatic source selection,
 portable conversion and team sharing remain Codex/Claude only. Native imports
 create a new session ID and rebind local paths/policy; the archive's raw bytes
 stay unchanged. They do not execute historical tool calls.
 
 ## Antigravity CLI extension
 
-`provider=antigravity` uses the same four functions. Storage defaults to
-`~/.gemini/antigravity-cli`, overridden directly by `CSL_ANTIGRAVITY_HOME`/`home`.
-Gemini CLI remains separate. See [Antigravity profile](ANTIGRAVITY.md).
+`provider=antigravity` uses the same four functions. Storage defaults to the native
+CLI directory, overridden directly by `CSL_ANTIGRAVITY_HOME`/`home`.
+See the exact default in the [Antigravity profile](ANTIGRAVITY.md).
 
 Inventory: `main` -> `session.db` (`transcript`), optional `sqlite-wal` ->
 `session/session.db-wal` (`context`); both `mode=rewrite`. WAL includes only the
@@ -211,5 +207,5 @@ and rebinds local policy. CLI 1.5.9 has localhost reconstruction and a bounded
 authenticated owner text-recall check; other profiles are not implied supported.
 
 Wire/collector/panel must admit the distinct provider value `antigravity`; never
-alias it to `gemini`. CLI export requires `--provider antigravity --raw`;
+alias it to a different harness. CLI export requires `--provider antigravity --raw`;
 portable/team/cross-harness routes are unchanged.
