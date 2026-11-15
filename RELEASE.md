@@ -2,6 +2,21 @@
 
 ## Version records
 
+### v0.4.1
+
+Patch release for raw-sync snapshot identity: metadata-only changes now receive
+distinct identities, and canonical JSON requests support stable retries after
+lost responses or process restart. Provider coverage and communication transports
+are unchanged. The experimental status and privacy limits of v0.4.0 still apply:
+raw sync uploads selected bytes, including secrets, unchanged.
+
+Validate the fixed candidate with the full isolated suite and available offline
+native gates, isolated installation and synthetic demo. Publication is established
+by the annotated tag and [v0.4.1 Release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.4.1),
+not by this preparation record. No historical tag or Release is changed.
+Updating the backup producer version starts a fresh capture; finish pending runs
+with their original producer and retain historical recovery keys.
+
 ### v0.4.0
 
 This version packages task-independent agent messaging, opt-in raw session sync,
