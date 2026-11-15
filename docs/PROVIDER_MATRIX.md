@@ -5,7 +5,7 @@ Explicit experimental conversion in both directions is integrated through
 canonical v2 for text, references, completed tools, embedded images and PDFs. See
 [conversion and continuity](CONVERSION.md) for the exact profile and commands.
 "Provider" in CSL means the transcript/CLI adapter (`codex`, `claude`, or the
-experimental local `gemini` adapter), not
+experimental local `gemini` and `antigravity` adapters), not
 the model vendor, API endpoint, subscription or billing account.
 
 This matrix describes commands in this checkout, not capabilities that exist only
@@ -16,47 +16,51 @@ in this public tool, even if a related laboratory experiment has passed.
 
 ## Command Matrix
 
+Antigravity CLI is a distinct experimental SQLite/protobuf provider. Its bounded
+loader evidence uses CLI 1.5.9 with a localhost fixture, not commercial model
+recall or authenticated Google access. See [scope and limitations](ANTIGRAVITY.md).
+
 The table is mirrored by `csl capabilities` / `csl capabilities --json`.
 Tests require every registered command to appear and this table to match the
 registry. Update implementation, tests and this document in the same change.
 
-| Command | Codex | Claude Code | Gemini CLI |
-| --- | --- | --- | --- |
-| `annotate` | supported | not-integrated | not-integrated |
-| `backup` | experimental | not-integrated | not-integrated |
-| `bridge` | experimental | not-integrated | not-integrated |
-| `capabilities` | supported | supported | not-integrated |
-| `cockpit` | supported | not-integrated | not-integrated |
-| `convert` | experimental | experimental | not-integrated |
-| `cut` | supported | not-integrated | not-integrated |
-| `doctor` | supported | supported | not-integrated |
-| `export` | supported | supported | experimental |
-| `find-work` | supported | not-integrated | not-integrated |
-| `import` | supported | supported | experimental |
-| `inbox` | supported | supported | not-integrated |
-| `index` | supported | not-integrated | not-integrated |
-| `migrate` | experimental | not-integrated | not-integrated |
-| `native-clone` | experimental | not-integrated | not-integrated |
-| `native-cut` | experimental | not-integrated | not-integrated |
-| `native-sanitize` | experimental | not-integrated | not-integrated |
-| `patches` | supported | not-integrated | not-integrated |
-| `pinpoint` | supported | not-integrated | not-integrated |
-| `providers` | experimental | experimental | experimental |
-| `queue` | supported | not-integrated | not-integrated |
-| `recall` | supported | not-integrated | not-integrated |
-| `receive` | supported | supported | not-integrated |
-| `recent` | supported | not-integrated | not-integrated |
-| `related` | supported | not-integrated | not-integrated |
-| `search` | supported | not-integrated | not-integrated |
-| `sessions` | supported | supported | experimental |
-| `share` | supported | supported | not-integrated |
-| `show` | supported | not-integrated | not-integrated |
-| `stats` | supported | not-integrated | not-integrated |
-| `summarize` | supported | not-integrated | not-integrated |
-| `team` | supported | supported | not-integrated |
-| `timeline` | supported | not-integrated | not-integrated |
-| `verify-live` | experimental | experimental | not-integrated |
-| `why` | supported | not-integrated | not-integrated |
+| Command | Codex | Claude Code | Gemini CLI | Antigravity CLI |
+| --- | --- | --- | --- | --- |
+| `annotate` | supported | not-integrated | not-integrated | not-integrated |
+| `backup` | experimental | not-integrated | not-integrated | not-integrated |
+| `bridge` | experimental | not-integrated | not-integrated | not-integrated |
+| `capabilities` | supported | supported | not-integrated | not-integrated |
+| `cockpit` | supported | not-integrated | not-integrated | not-integrated |
+| `convert` | experimental | experimental | not-integrated | not-integrated |
+| `cut` | supported | not-integrated | not-integrated | not-integrated |
+| `doctor` | supported | supported | not-integrated | not-integrated |
+| `export` | supported | supported | experimental | experimental |
+| `find-work` | supported | not-integrated | not-integrated | not-integrated |
+| `import` | supported | supported | experimental | experimental |
+| `inbox` | supported | supported | not-integrated | not-integrated |
+| `index` | supported | not-integrated | not-integrated | not-integrated |
+| `migrate` | experimental | not-integrated | not-integrated | not-integrated |
+| `native-clone` | experimental | not-integrated | not-integrated | not-integrated |
+| `native-cut` | experimental | not-integrated | not-integrated | not-integrated |
+| `native-sanitize` | experimental | not-integrated | not-integrated | not-integrated |
+| `patches` | supported | not-integrated | not-integrated | not-integrated |
+| `pinpoint` | supported | not-integrated | not-integrated | not-integrated |
+| `providers` | experimental | experimental | experimental | experimental |
+| `queue` | supported | not-integrated | not-integrated | not-integrated |
+| `recall` | supported | not-integrated | not-integrated | not-integrated |
+| `receive` | supported | supported | not-integrated | not-integrated |
+| `recent` | supported | not-integrated | not-integrated | not-integrated |
+| `related` | supported | not-integrated | not-integrated | not-integrated |
+| `search` | supported | not-integrated | not-integrated | not-integrated |
+| `sessions` | supported | supported | experimental | experimental |
+| `share` | supported | supported | not-integrated | not-integrated |
+| `show` | supported | not-integrated | not-integrated | not-integrated |
+| `stats` | supported | not-integrated | not-integrated | not-integrated |
+| `summarize` | supported | not-integrated | not-integrated | not-integrated |
+| `team` | supported | supported | not-integrated | not-integrated |
+| `timeline` | supported | not-integrated | not-integrated | not-integrated |
+| `verify-live` | experimental | experimental | not-integrated | not-integrated |
+| `why` | supported | not-integrated | not-integrated | not-integrated |
 
 `convert` is an experimental, fail-closed adapter rather than a universal format
 translator. `doctor` reports structural/static/native evidence separately and

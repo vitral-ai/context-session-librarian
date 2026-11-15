@@ -27,12 +27,17 @@ def coverage():
     commands['sessions']['gemini'] = 'experimental'
     commands['export']['gemini'] = 'experimental'
     commands['import']['gemini'] = 'experimental'
-    commands['providers'] = {provider:'experimental' for provider in ('codex','claude','gemini')}
-    return {"schema_version": 1, "providers": ["codex", "claude", "gemini"], "commands": commands,
+    for status in commands.values():
+        status['antigravity']='not-integrated'
+    for name in ('sessions','export','import'):
+        commands[name]['antigravity']='experimental'
+    commands['providers'] = {provider:'experimental' for provider in ('codex','claude','gemini','antigravity')}
+    return {"schema_version": 1, "providers": ["codex", "claude", "gemini", "antigravity"], "commands": commands,
             "sync_providers": {"interface_version":1,"module":"csl_sync_providers",
                                "operations":["list_sessions","raw_files","view_records","package_descriptor"],
                                "network":False,"model_calls":False,"native_package_version":3,
-                               "gemini_native_resume":"unverified; CLI unavailable at implementation start"},
+                               "gemini_native_resume":"format-tested; native loader and continuation unverified",
+                               "antigravity_native_resume":"CLI 1.5.9; synthetic localhost endpoint, not live model recall"},
             "source_lookup": {"default": "auto", "commands": ["export", "share", "convert", "doctor"],
                               "cross_cli_ambiguity": "require --provider codex or --provider claude",
                               "within_cli_ambiguity": "require a more specific UUID or file path"},
@@ -68,9 +73,9 @@ def coverage():
 
 
 def markdown():
-    lines = ["| Command | Codex | Claude Code | Gemini CLI |", "| --- | --- | --- | --- |"]
+    lines = ["| Command | Codex | Claude Code | Gemini CLI | Antigravity CLI |", "| --- | --- | --- | --- | --- |"]
     for name, status in sorted(coverage()["commands"].items()):
-        lines.append(f"| `{name}` | {status['codex']} | {status['claude']} | {status['gemini']} |")
+        lines.append(f"| `{name}` | {status['codex']} | {status['claude']} | {status['gemini']} | {status['antigravity']} |")
     return "\n".join(lines)
 
 
@@ -80,7 +85,7 @@ def capabilities(args):
 
 def sessions(args, csl):
     from csl_transfer import read_records, safe_text
-    if args.provider in ("claude", "gemini"):
+    if args.provider in ("claude", "gemini", "antigravity"):
         from csl_sync_providers import list_sessions, raw_files
         rows=[]
         for entry in list_sessions(args.provider):
@@ -117,14 +122,14 @@ def add_commands(subparsers, csl):
     caps.add_argument("--json", action="store_true", help="Machine-readable command and transfer-route coverage.")
     caps.set_defaults(func=capabilities)
     listing = subparsers.add_parser("sessions", help="List sessions for one CLI; Codex uses its index, Claude reads transcripts.")
-    listing.add_argument("--provider", choices=("codex", "claude", "gemini"), default="codex")
+    listing.add_argument("--provider", choices=("codex", "claude", "gemini", "antigravity"), default="codex")
     listing.add_argument("--limit", type=positive_limit, default=20)
     listing.add_argument("--query", help="Filter session title or UUID; not full-history search.")
     listing.add_argument("--json", action="store_true")
     listing.set_defaults(func=lambda args: sessions(args, csl))
     provider = subparsers.add_parser('providers',help='Read local provider metadata, raw-file inventory and incremental views; no network.')
     provider.add_argument('operation',choices=('list','files','view','package'))
-    provider.add_argument('--provider',choices=('codex','claude','gemini'),required=True)
+    provider.add_argument('--provider',choices=('codex','claude','gemini','antigravity'),required=True)
     provider.add_argument('--session')
     provider.add_argument('--home',type=__import__('pathlib').Path)
     provider.add_argument('--position',help='Opaque JSON position returned by a previous view page.')

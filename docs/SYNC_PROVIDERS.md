@@ -175,3 +175,31 @@ Gemini must be explicitly selected for export; automatic source selection,
 portable conversion and team sharing remain Codex/Claude only. Native imports
 create a new session ID and rebind local paths/policy; the archive's raw bytes
 stay unchanged. They do not execute historical tool calls.
+
+## Antigravity CLI extension
+
+`provider=antigravity` uses the same four functions. Storage defaults to
+`~/.gemini/antigravity-cli`, overridden directly by `CSL_ANTIGRAVITY_HOME`/`home`.
+Gemini CLI remains separate. See [Antigravity profile](ANTIGRAVITY.md).
+
+Inventory: `main` -> `session.db` (`transcript`), optional `sqlite-wal` ->
+`session/session.db-wal` (`context`); both `mode=rewrite`. WAL includes only the
+complete committed prefix. Global indexes, authentication and settings are
+excluded. SQL operates on private copies, never the origin.
+
+View results additionally include `source_files: [{file_key,length,sha256},...]`
+for all DB/WAL inputs. The collector must bind **each** to its raw snapshot;
+`source_file` alone cannot express a WAL-only change. This is additive; existing
+providers retain their prior shape. `raw_offset.offset=0` means the whole DB,
+with `native_pointer=/steps/N` for logical provenance, not a physical byte offset.
+
+V3's primary member is `sessions/ID/main.db`, `relative_path=session.db`; WAL
+uses the normal `files/` member rule. Registry assembly remains opaque. Active,
+external-parent and subtrajectory-dependent sessions have an unavailable
+descriptor; raw collection remains available. Native import creates fresh IDs
+and rebinds local policy. Loader reconstruction was verified only on CLI 1.5.9
+with a localhost fixture, not a commercial model or real auth.
+
+Wire/collector/panel must admit the distinct provider value `antigravity`; never
+alias it to `gemini`. CLI export requires `--provider antigravity --raw`;
+portable/team/cross-harness routes are unchanged.
