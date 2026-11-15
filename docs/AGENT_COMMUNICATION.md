@@ -285,40 +285,6 @@ evidence does not automatically validate this newer mail protocol. Windows
 native sockets/locking, physical cross-OS mailbox delivery and independent-network
 availability require their own evidence. Container tests cannot establish those.
 
-## Gemini CLI adapter contract — specified, not implemented
-
-Official Gemini CLI 0.68.0 was privately installed and version/help/MCP/hooks
-surfaces checked. The first isolated `--list-sessions` command exited 41 asking
-for authentication. No login or model run was performed. A real adapter remains
-blocked on owner-selected authentication and an authorized synthetic session;
-there is no placeholder command pretending to support it.
-
-Required contract after that decision:
-
-1. Register the actual project/session UUID, not list position or model name.
-2. Bind a reviewed stdio MCP profile to that endpoint; reuse the existing tools
-   without changing mail semantics or sharing native credentials.
-3. Validate hook stdin `session_id` and the appropriate Gemini event output
-   (`hookSpecificOutput.additionalContext` where supported) before surfacing.
-   Gemini hook names are not assumed equivalent to Claude's event names.
-4. Derive the UUID from a validated harness field; `GEMINI_SESSION_ID` exists in
-   hook children, not as a guaranteed external process-discovery API.
-5. Subagents may share the parent's Config/session/MCP. Default to one endpoint
-   for that session unless independent tool binding and identity are demonstrated.
-6. Do not claim arbitrary external resume/wake. An owner-managed single writer
-   and tested native boundary/activation interface are prerequisites.
-7. Preserve grants, failure states, ACK separation, bounded output and private
-   settings. No auto-login, copied auth or silent Vertex/API account selection.
-8. Test real session identity, boundary delivery, MCP source binding, restart,
-   revocation and no unauthorized execution before marking supported.
-9. Publish exact native version and failures; unsupported/untested is distinct
-   from a broken function advertised as supported.
-
-Official references: [Gemini hooks](https://geminicli.com/docs/hooks/reference/),
-[MCP](https://geminicli.com/docs/tools/mcp-server/),
-[sessions](https://geminicli.com/docs/cli/session-management/),
-[authentication at inspected source](https://github.com/google-gemini/gemini-cli/blob/5a5c7180ff3f0a02511f54b54db7f228d4982a30/docs/get-started/authentication.mdx).
-
 ## Service-hosted sessions — specification only
 
 A service-managed session is a stable endpoint owned by the responsible tenant,

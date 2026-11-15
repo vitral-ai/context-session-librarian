@@ -40,7 +40,7 @@ def validate(archive):
             raise ValueError('invalid_native_source_id')
         ids.add(sid)
         if entry.get('provider') not in providers.PROVIDERS:
-            raise ValueError('unsupported_native_provider')
+            raise ValueError('Unsupported native provider; supported providers: '+', '.join(providers.PROVIDERS))
         files=entry.get('files')
         if not isinstance(files,list) or not files:
             raise ValueError('missing_native_files')
@@ -59,7 +59,7 @@ def validate(archive):
                 raise ValueError('invalid_native_file_role')
             if item['role']=='transcript':
                 primary+=1
-                allowed_primary=('session.db',) if entry['provider']=='antigravity' else ('session.jsonl','session.json')
+                allowed_primary=('session.db',) if entry['provider']=='antigravity' else ('session.jsonl',)
                 if rel not in allowed_primary or key!='main' or member!=f'sessions/{sid}/main'+Path(rel).suffix:
                     raise ValueError('invalid_native_primary')
             elif not rel.startswith('session/') or member!=f'sessions/{sid}/files/{rel}':
@@ -211,9 +211,7 @@ def import_native(archive,manifest,cwd,*,name=None,max_context_chars=None):
                 stamp=datetime_now()
                 target=providers.provider_home('codex')/'sessions'/stamp[:4]/stamp[5:7]/stamp[8:10]/('rollout-'+stamp.replace(':','-')+'-'+sid+'.jsonl')
             else:
-                project=hashlib.sha256(str(cwd).encode()).hexdigest()
-                suffix=Path(entry['primary']).suffix
-                target=providers.provider_home('gemini')/'tmp'/project/'chats'/('session-'+sid+suffix)
+                raise ValueError('Unsupported native provider')
             companion=target.with_suffix('') if provider=='claude' else target.parent/sid
             stage=Path(tmp)/sid;stage.mkdir(mode=0o700)
             for item in entry['files']:
@@ -226,20 +224,15 @@ def import_native(archive,manifest,cwd,*,name=None,max_context_chars=None):
                 if hashlib.sha256(body).hexdigest()!=item['sha256']:raise ValueError('native_checksum_mismatch')
                 if primary:
                     import io
-                    if provider=='gemini':
-                        if target.suffix=='.json':meta=json.loads(body);messages=meta.get('messages',[])
-                        else:meta,messages=__import__('csl_gemini').replay((r,0) for r in read_records(io.BytesIO(body)))
-                        if meta.get('sessionId')!=source_id or not messages:raise ValueError('invalid_native_primary_content')
-                    else:
-                        rows=list(read_records(io.BytesIO(body)))
-                        if provider=='claude' and (not any(r.get('type') in ('user','assistant') for r in rows) or any(r.get('sessionId') not in (None,source_id) for r in rows)):
-                            raise ValueError('invalid_native_primary_content')
-                        if provider=='claude' and any(not isinstance(r.get('message'),dict) or r['message'].get('role')!=r['type'] or not isinstance(r.get('uuid'),str) for r in rows if r.get('type') in ('user','assistant')):
-                            raise ValueError('invalid_native_primary_content')
-                        if provider=='codex' and not any(r.get('type')=='session_meta' and r.get('payload',{}).get('id')==source_id for r in rows):
-                            raise ValueError('invalid_native_primary_content')
-                        if provider=='codex' and any(r.get('type')=='session_meta' and isinstance(r.get('payload'),dict) and r['payload'].get('history_base') for r in rows):
-                            raise ValueError('external_history_base_not_packaged')
+                    rows=list(read_records(io.BytesIO(body)))
+                    if provider=='claude' and (not any(r.get('type') in ('user','assistant') for r in rows) or any(r.get('sessionId') not in (None,source_id) for r in rows)):
+                        raise ValueError('invalid_native_primary_content')
+                    if provider=='claude' and any(not isinstance(r.get('message'),dict) or r['message'].get('role')!=r['type'] or not isinstance(r.get('uuid'),str) for r in rows if r.get('type') in ('user','assistant')):
+                        raise ValueError('invalid_native_primary_content')
+                    if provider=='codex' and not any(r.get('type')=='session_meta' and r.get('payload',{}).get('id')==source_id for r in rows):
+                        raise ValueError('invalid_native_primary_content')
+                    if provider=='codex' and any(r.get('type')=='session_meta' and isinstance(r.get('payload'),dict) and r['payload'].get('history_base') for r in rows):
+                        raise ValueError('external_history_base_not_packaged')
                 if provider=='claude' and item['role'] in ('transcript','subagent') and item['file'].endswith('.jsonl'):
                     import io
                     records=[]
@@ -262,24 +255,6 @@ def import_native(archive,manifest,cwd,*,name=None,max_context_chars=None):
                         if rewritten.get('type')=='session_meta':rewritten['csl_source_session_id']=source_id
                         rows.append(rewritten)
                     body=b''.join(json_line(r) for r in rows)
-                elif provider=='gemini' and primary:
-                    import io
-                    if target.suffix=='.json':
-                        r=json.loads(body);r.update(sessionId=sid,projectHash=hashlib.sha256(str(cwd).encode()).hexdigest(),csl_source_session_id=source_id,cwd=str(cwd),directories=[str(cwd)])
-                        if name:r['summary']=name
-                        body=json.dumps(r,ensure_ascii=False).encode()
-                    else:
-                        rows=[]
-                        for r in read_records(io.BytesIO(body)):
-                            if 'sessionId' in r:r.update(sessionId=sid,projectHash=hashlib.sha256(str(cwd).encode()).hexdigest(),cwd=str(cwd),csl_source_session_id=source_id,directories=[str(cwd)])
-                            if isinstance(r.get('$set'),dict):
-                                update=r['$set']
-                                if 'sessionId' in update:update['sessionId']=sid
-                                if 'projectHash' in update:update['projectHash']=hashlib.sha256(str(cwd).encode()).hexdigest()
-                                if 'directories' in update:update['directories']=[str(cwd)]
-                            rows.append(r)
-                        if name:rows.append({'$set':{'summary':name}})
-                        body=b''.join(json_line(r) for r in rows)
                 if primary and name:
                     if provider=='claude':body+=json_line({'type':'custom-title','sessionId':sid,'customTitle':name})
                     elif provider=='codex':body+=json_line({'type':'event_msg','timestamp':datetime_now(),'payload':{'type':'thread_name_updated','thread_name':name}})
@@ -289,11 +264,9 @@ def import_native(archive,manifest,cwd,*,name=None,max_context_chars=None):
                     projected=local.with_name('display.jsonl')
                     project_file(local,projected,read_records,json_line,{source_id,sid})
                     local=projected
-                if primary and provider in ('codex','claude'):
+                if primary:
                     from csl_diagnostics import preflight
                     preflight(local,provider,max_context_chars=max_context_chars)
-                elif primary and max_context_chars is not None:
-                    raise ValueError('Gemini native context-limit analysis is not implemented')
                 plans.append((local,dest,primary))
             installed.append({'provider':provider,'id':sid,'source_id':source_id,'path':str(target),'cwd':str(cwd)})
         # Validate all destinations first; exclusive hard links never overwrite existing files.

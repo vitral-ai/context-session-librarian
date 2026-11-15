@@ -29,7 +29,7 @@ import reads files on that server's machine. Check the
 [CLI commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli)
 for your installed version.
 
-Claude documents `/import [codex|gemini|cursor] [--dry-run] [--yes]` and the shell
+Claude documents `/import codex [--dry-run] [--yes]` and the shell
 entry `claude import codex --dry-run` (v2.1.213 or later). Availability depends on
 backend and feature-flag fetching. In the dated environment, the command reported
 unavailable; the cause was not established. That is neither a failed chat

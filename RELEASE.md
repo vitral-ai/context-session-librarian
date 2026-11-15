@@ -1,5 +1,11 @@
 # Release operation and published state
 
+## Unreleased
+
+The current provider set is Codex, Claude Code and Antigravity CLI. Removed
+providers are rejected, including in existing v3 packages; see [CHANGELOG](CHANGELOG.md).
+The version records below refer to their original published tags, which are unchanged.
+
 ## Version records
 
 ### v0.4.1
@@ -32,8 +38,9 @@ their secrets, unchanged**. It does not scrub them or apply backup encryption.
 Incremental reuse and crash-contained foreground watch passes do not constitute
 a durability SLA or model-continuity guarantee.
 
-Local provider reads and raw v3 packages cover Codex, Claude Code, Gemini CLI and
-Antigravity CLI within documented profiles. Gemini native resume is unverified;
+Local provider reads and raw v3 packages were added in this release. See the
+[tagged provider matrix](https://github.com/vitral-ai/context-session-librarian/blob/v0.4.0/docs/PROVIDER_MATRIX.md)
+for its historical provider set and limits.
 Antigravity has bounded CLI 1.5.9 reconstruction and text-recall evidence, not
 universal compatibility. Codex 0.169.0 bounded history-base import preserves
 references, but cold-home `thread/read` needs explicit activation to reconstruct

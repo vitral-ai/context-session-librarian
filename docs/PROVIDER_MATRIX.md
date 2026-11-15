@@ -3,15 +3,14 @@
 Experimental mailbox commands, local grant inspection, own-endpoint
 MCP, session-bound boundary hooks and separately opted Codex queue notifications
 are included in CSL 0.4.0 and specified in [agent communication](AGENT_COMMUNICATION.md).
-The Gemini messaging adapter is specified only, separately from native file reads;
-physical cross-OS mailbox and WAN tests remain distinct from coordination tests.
+Physical cross-OS mailbox and WAN tests remain distinct from coordination tests.
 
 CSL supports **native Codex -> Codex and Claude Code -> Claude Code handoffs**.
 Explicit experimental conversion in both directions is integrated through
 canonical v2 for text, references, completed tools, embedded images and PDFs. See
 [conversion and continuity](CONVERSION.md) for the exact profile and commands.
 "Provider" in CSL means the transcript/CLI adapter (`codex`, `claude`, or the
-experimental local `gemini` and `antigravity` adapters), not
+experimental local `antigravity` adapter), not
 the model vendor, API endpoint, subscription or billing account.
 
 This matrix describes commands in this checkout, not capabilities that exist only
@@ -23,7 +22,7 @@ in this public tool, even if a related laboratory experiment has passed.
 ## Command Matrix
 
 The experimental `sync` command publishes through the local provider interface
-for Codex, Claude Code, Gemini CLI and Antigravity CLI to a registry you configure.
+for Codex, Claude Code and Antigravity CLI to a registry you configure.
 Raw sync uploads transcripts including any secrets they contain. See [sync](SYNC.md)
 and [Antigravity scope and limitations](ANTIGRAVITY.md).
 Codex 0.169.0 external `history_base` chains are included in raw v3 snapshots and
@@ -39,44 +38,44 @@ The table is mirrored by `csl capabilities` / `csl capabilities --json`.
 Tests require every registered command to appear and this table to match the
 registry. Update implementation, tests and this document in the same change.
 
-| Command | Codex | Claude Code | Gemini CLI | Antigravity CLI |
-| --- | --- | --- | --- | --- |
-| `annotate` | supported | not-integrated | not-integrated | not-integrated |
-| `backup` | experimental | not-integrated | not-integrated | not-integrated |
-| `bridge` | experimental | experimental | not-integrated | not-integrated |
-| `capabilities` | supported | supported | not-integrated | not-integrated |
-| `cockpit` | supported | not-integrated | not-integrated | not-integrated |
-| `convert` | experimental | experimental | not-integrated | not-integrated |
-| `cut` | supported | not-integrated | not-integrated | not-integrated |
-| `doctor` | supported | supported | not-integrated | not-integrated |
-| `export` | supported | supported | experimental | experimental |
-| `find-work` | supported | not-integrated | not-integrated | not-integrated |
-| `import` | supported | supported | experimental | experimental |
-| `inbox` | supported | supported | not-integrated | not-integrated |
-| `index` | supported | not-integrated | not-integrated | not-integrated |
-| `migrate` | experimental | not-integrated | not-integrated | not-integrated |
-| `native-clone` | experimental | not-integrated | not-integrated | not-integrated |
-| `native-cut` | experimental | not-integrated | not-integrated | not-integrated |
-| `native-sanitize` | experimental | not-integrated | not-integrated | not-integrated |
-| `patches` | supported | not-integrated | not-integrated | not-integrated |
-| `pinpoint` | supported | not-integrated | not-integrated | not-integrated |
-| `providers` | experimental | experimental | experimental | experimental |
-| `queue` | supported | not-integrated | not-integrated | not-integrated |
-| `recall` | supported | not-integrated | not-integrated | not-integrated |
-| `receive` | supported | supported | not-integrated | not-integrated |
-| `recent` | supported | not-integrated | not-integrated | not-integrated |
-| `related` | supported | not-integrated | not-integrated | not-integrated |
-| `search` | supported | not-integrated | not-integrated | not-integrated |
-| `sessions` | supported | supported | experimental | experimental |
-| `share` | supported | supported | not-integrated | not-integrated |
-| `show` | supported | not-integrated | not-integrated | not-integrated |
-| `stats` | supported | not-integrated | not-integrated | not-integrated |
-| `summarize` | supported | not-integrated | not-integrated | not-integrated |
-| `sync` | experimental | experimental | experimental | experimental |
-| `team` | supported | supported | not-integrated | not-integrated |
-| `timeline` | supported | not-integrated | not-integrated | not-integrated |
-| `verify-live` | experimental | experimental | not-integrated | not-integrated |
-| `why` | supported | not-integrated | not-integrated | not-integrated |
+| Command | Codex | Claude Code | Antigravity CLI |
+| --- | --- | --- | --- |
+| `annotate` | supported | not-integrated | not-integrated |
+| `backup` | experimental | not-integrated | not-integrated |
+| `bridge` | experimental | experimental | not-integrated |
+| `capabilities` | supported | supported | not-integrated |
+| `cockpit` | supported | not-integrated | not-integrated |
+| `convert` | experimental | experimental | not-integrated |
+| `cut` | supported | not-integrated | not-integrated |
+| `doctor` | supported | supported | not-integrated |
+| `export` | supported | supported | experimental |
+| `find-work` | supported | not-integrated | not-integrated |
+| `import` | supported | supported | experimental |
+| `inbox` | supported | supported | not-integrated |
+| `index` | supported | not-integrated | not-integrated |
+| `migrate` | experimental | not-integrated | not-integrated |
+| `native-clone` | experimental | not-integrated | not-integrated |
+| `native-cut` | experimental | not-integrated | not-integrated |
+| `native-sanitize` | experimental | not-integrated | not-integrated |
+| `patches` | supported | not-integrated | not-integrated |
+| `pinpoint` | supported | not-integrated | not-integrated |
+| `providers` | experimental | experimental | experimental |
+| `queue` | supported | not-integrated | not-integrated |
+| `recall` | supported | not-integrated | not-integrated |
+| `receive` | supported | supported | not-integrated |
+| `recent` | supported | not-integrated | not-integrated |
+| `related` | supported | not-integrated | not-integrated |
+| `search` | supported | not-integrated | not-integrated |
+| `sessions` | supported | supported | experimental |
+| `share` | supported | supported | not-integrated |
+| `show` | supported | not-integrated | not-integrated |
+| `stats` | supported | not-integrated | not-integrated |
+| `summarize` | supported | not-integrated | not-integrated |
+| `sync` | experimental | experimental | experimental |
+| `team` | supported | supported | not-integrated |
+| `timeline` | supported | not-integrated | not-integrated |
+| `verify-live` | experimental | experimental | not-integrated |
+| `why` | supported | not-integrated | not-integrated |
 
 `convert` is an experimental, fail-closed adapter rather than a universal format
 translator. `doctor` reports structural/static/native evidence separately and
@@ -291,15 +290,14 @@ and [Claude CLI flags](https://code.claude.com/docs/en/cli-reference). Local CLI
 
 ## Provider reads and native-file packages — experimental, included in 0.4.0
 
-`csl providers list|files|view|package --provider codex|claude|gemini|antigravity` exposes the
-local collector interface in [SYNC_PROVIDERS.md](SYNC_PROVIDERS.md). Claude and
-Gemini session listing includes the shared metadata fields; primary views include
+`csl providers list|files|view|package --provider codex|claude|antigravity` exposes the
+local collector interface in [SYNC_PROVIDERS.md](SYNC_PROVIDERS.md). Claude
+session listing includes the shared metadata fields; primary views include
 text, correlated tool blocks and raw offsets. Subagents are preserved as raw
 companions rather than merged into an invented chronology.
 
 Native-file package v3 preserves raw byte prefixes and companions. New CSL can
 inspect/import it; published v0.3.0 cannot. Claude raw export includes its sibling
-session directory when present. Gemini export is explicit `--provider gemini
---raw`; portable Gemini conversion and sharing are not integrated. Gemini native
-loader acceptance is not established merely by file installation. No network,
+session directory when present. Native loader acceptance is not established
+merely by file installation. No network,
 credentials, model calls, or Vitral dependency exist in the provider layer.

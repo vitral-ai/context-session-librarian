@@ -10,11 +10,10 @@ import subprocess
 from urllib.parse import urlsplit, urlunsplit
 
 from csl_canonical import strict_json
-import csl_gemini
 import csl_antigravity
 import csl_codex_history
 
-PROVIDERS = ('codex', 'claude', 'gemini', 'antigravity')
+PROVIDERS = ('codex', 'claude', 'antigravity')
 API_VERSION = 1
 
 
@@ -29,7 +28,6 @@ def provider_home(provider, home=None):
         raise ProviderError('unsupported_provider')
     default = {'codex': os.environ.get('CODEX_HOME', '~/.codex'),
                'claude': os.environ.get('CLAUDE_CONFIG_DIR', '~/.claude'),
-               'gemini': os.environ.get('CSL_GEMINI_HOME') or str(Path(os.environ.get('GEMINI_CLI_HOME',str(Path.home()))) / ('.cache/.gemini' if os.environ.get('SANDBOX')=='sandbox-exec' else '.gemini')),
                'antigravity': os.environ.get('CSL_ANTIGRAVITY_HOME', '~/.gemini/antigravity-cli')}[provider]
     return Path(home if home is not None else default).expanduser().resolve()
 
@@ -76,24 +74,6 @@ def _lines(path, max_bytes=None, start_offset=0):
         raise ProviderError('source_unavailable') from None
 
 
-def _json(path):
-    try:
-        with path.open('rb') as stream:
-            before = os.fstat(stream.fileno())
-            body = stream.read(before.st_size)
-            after = os.fstat(stream.fileno())
-        if (before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns):
-            raise ProviderError('source_changing')
-        record = strict_json(body)
-        if not isinstance(record, dict):
-            raise ValueError()
-        return record
-    except (ValueError, UnicodeError):
-        raise ProviderError('incomplete_json_snapshot') from None
-    except OSError:
-        raise ProviderError('source_unavailable') from None
-
-
 def _paths(provider, root):
     if provider == 'antigravity':
         return sorted((root/'conversations').glob('*.db'))
@@ -101,21 +81,7 @@ def _paths(provider, root):
         return csl_codex_history.current_paths(root,[*root.glob('sessions/**/*.jsonl'), *root.glob('archived_sessions/**/*.jsonl')])
     if provider == 'claude':
         return sorted((root/'projects').glob('*/*.jsonl'))
-    journals = list(root.glob('tmp/*/chats/session-*.jsonl'))
-    # Native migration can leave the old JSON next to its authoritative journal.
-    return sorted(journals + [p for p in root.glob('tmp/*/chats/session-*.json') if p.with_suffix('.jsonl') not in journals])
-
-
-def _gemini(path, max_bytes=None):
-    try:
-        if path.suffix == '.json':
-            record = _json(path)
-            return record, [(r, 0) for r in record.get('messages', [])]
-        return csl_gemini.replay(_lines(path,max_bytes))
-    except ValueError as e:
-        if isinstance(e, ProviderError):
-            raise
-        raise ProviderError('invalid_gemini_journal') from None
+    raise ProviderError('unsupported_provider')
 
 
 def _stamp(value):
@@ -183,69 +149,46 @@ def _metadata(provider, path, root, active_seconds, files=None, *, evidence=None
         if ids:sid=ids[0]
         elif match:sid=match.group(1)
     origin, count = 'native', 0
-    if provider == 'gemini':
-        meta, records = _gemini(path)
-        sid = meta.get('sessionId'); title = meta.get('summary')
-        if meta.get('csl_source_session_id'):
-            parent = meta['csl_source_session_id']; origin = 'imported'
-        created = _stamp(meta.get('startTime')); updated = _stamp(meta.get('lastUpdated'))
-        dirs = meta.get('directories', [])
-        cwd = meta.get('cwd') or (dirs[0] if dirs and isinstance(dirs[0], str) else None)
-        if not cwd:
-            marker=path.parent.parent/'.project_root'
-            if marker.is_file():
-                _safe(marker,root)
-                if marker.stat().st_size<=16384:cwd=marker.read_text(encoding='utf-8').strip() or None
-        if not cwd and (root/'projects.json').is_file():
-            _safe(root/'projects.json',root)
-            registry=_json(root/'projects.json').get('projects',{})
-            if isinstance(registry,dict):cwd=next((k for k,v in registry.items() if v==path.parent.parent.name),None)
-        for record, _ in records:
-            count += 1
-            if not title and record.get('type') == 'user':
-                title = _text(record.get('content'))[:200]
-            model = record.get('model') or model
-    else:
-        for record, _ in _lines(path):
-            count += 1
-            stamp = _stamp(record.get('timestamp'))
-            created = created or stamp; updated = stamp or updated
-            if provider == 'codex':
-                payload = record.get('payload', {})
-                if not isinstance(payload, dict):
-                    raise ProviderError('invalid_codex_payload')
-                if record.get('type') == 'session_meta':
-                    if evidence is not None and payload.get('history_base'): evidence['external_history_base'] = True
-                    sid = sid or payload.get('id') or payload.get('session_id')
-                    cwd = payload.get('cwd') or cwd
-                    parent = payload.get('forked_from_id') or parent
-                if record.get('type') == 'turn_context':
-                    model = payload.get('model') or model
-                if record.get('type') == 'event_msg' and payload.get('type') == 'thread_name_updated':
-                    title = payload.get('thread_name') or title
-                if not title and payload.get('type') == 'message' and payload.get('role') == 'user':
-                    title = _text(payload.get('content'))[:200]
-                source = record.get('csl_source_session_id') or payload.get('csl_source_session_id')
-            else:
-                candidate = record.get('sessionId') or record.get('session_id')
-                sid = sid or candidate; cwd = record.get('cwd') or cwd
-                if record.get('type') == 'custom-title':
-                    title = record.get('customTitle') or title
-                message = record.get('message', {})
-                if isinstance(message, dict):
-                    model = message.get('model') or model
-                    if not title and record.get('type') == 'user':
-                        title = _text(message.get('content'))[:200]
-                source = record.get('csl_source_session_id')
-                fork = record.get('forkedFrom')
-                if isinstance(fork, dict):
-                    parent = fork.get('sessionId') or fork.get('session_id') or parent
-                elif isinstance(fork, str):
-                    parent = fork
-            if source:
-                parent = source; origin = 'imported'
-            if record.get('csl_conversion') or record.get('csl_source_provider'):
-                origin = 'converted'
+    for record, _ in _lines(path):
+        count += 1
+        stamp = _stamp(record.get('timestamp'))
+        created = created or stamp; updated = stamp or updated
+        if provider == 'codex':
+            payload = record.get('payload', {})
+            if not isinstance(payload, dict):
+                raise ProviderError('invalid_codex_payload')
+            if record.get('type') == 'session_meta':
+                if evidence is not None and payload.get('history_base'): evidence['external_history_base'] = True
+                sid = sid or payload.get('id') or payload.get('session_id')
+                cwd = payload.get('cwd') or cwd
+                parent = payload.get('forked_from_id') or parent
+            if record.get('type') == 'turn_context':
+                model = payload.get('model') or model
+            if record.get('type') == 'event_msg' and payload.get('type') == 'thread_name_updated':
+                title = payload.get('thread_name') or title
+            if not title and payload.get('type') == 'message' and payload.get('role') == 'user':
+                title = _text(payload.get('content'))[:200]
+            source = record.get('csl_source_session_id') or payload.get('csl_source_session_id')
+        else:
+            candidate = record.get('sessionId') or record.get('session_id')
+            sid = sid or candidate; cwd = record.get('cwd') or cwd
+            if record.get('type') == 'custom-title':
+                title = record.get('customTitle') or title
+            message = record.get('message', {})
+            if isinstance(message, dict):
+                model = message.get('model') or model
+                if not title and record.get('type') == 'user':
+                    title = _text(message.get('content'))[:200]
+            source = record.get('csl_source_session_id')
+            fork = record.get('forkedFrom')
+            if isinstance(fork, dict):
+                parent = fork.get('sessionId') or fork.get('session_id') or parent
+            elif isinstance(fork, str):
+                parent = fork
+        if source:
+            parent = source; origin = 'imported'
+        if record.get('csl_conversion') or record.get('csl_source_provider'):
+            origin = 'converted'
     if not isinstance(sid, str) or not sid:
         raise ProviderError('missing_native_id')
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',sid):raise ProviderError('invalid_native_id')
@@ -278,8 +221,6 @@ def _descriptor(path, root, relative, role):
                     break
                 digest.update(line); complete += len(line)
         else:
-            if path.suffix == '.json' and role in ('transcript', 'subagent'):
-                _json(path)
             while complete < size:
                 chunk = stream.read(min(1024*1024, size-complete))
                 if not chunk:
@@ -310,13 +251,7 @@ def _files(provider, path, root):
             raise ProviderError(str(error) if isinstance(error,csl_antigravity.FormatError) else 'source_unavailable') from None
     suffix = path.suffix
     result = [_descriptor(path, root, 'session'+suffix, 'transcript')]
-    companion = path.with_suffix('') if provider == 'claude' else path.parent/path.stem if provider == 'gemini' else None
-    if provider == 'gemini':
-        meta, _ = _gemini(path)
-        sid=meta.get('sessionId')
-        if not isinstance(sid,str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',sid):
-            raise ProviderError('invalid_native_id')
-        companion = path.parent / sid
+    companion = path.with_suffix('') if provider == 'claude' else None
     if companion and companion.is_dir():
         for child in sorted(companion.rglob('*')):
             if child.is_symlink():
@@ -337,9 +272,7 @@ def _resolve(provider, native_id, home):
     matches = []
     for path in _paths(provider, root):
         _safe(path, root)
-        if provider == 'gemini':
-            sid = _gemini(path)[0].get('sessionId')
-        elif provider in ('claude','antigravity'):
+        if provider in ('claude','antigravity'):
             sid = path.stem
         else:
             ids=csl_codex_history.identity(path)
@@ -389,20 +322,13 @@ def _blocks(provider, record):
         if not isinstance(m, dict):
             raise ProviderError('invalid_claude_message')
         return m.get('role',record['type']), m.get('content', [])
-    role = {'gemini':'assistant','user':'user'}.get(record.get('type'),'system')
-    content=record.get('content', [])
-    blocks=[{'type':'text','text':content}] if isinstance(content,str) else [content] if isinstance(content,dict) else list(content or [])
-    for tool in record.get('toolCalls', []):
-        blocks.append({'type':'tool_use','name':tool.get('name'),'id':tool.get('id'),'input':tool.get('args')})
-        if 'result' in tool and tool['result'] is not None:
-            blocks.append({'type':'tool_result','tool_use_id':tool.get('id'),'name':tool.get('name'),'content':tool['result']})
-    return role, blocks
+    raise ProviderError('unsupported_provider')
 
 
 def _view(provider, path, text_limit, max_bytes=None, records=None, tools=None, *, start_offset=0):
-    records = records if records is not None else _gemini(path,max_bytes)[1] if provider == 'gemini' else _lines(path,max_bytes,start_offset)
+    records = records if records is not None else _lines(path,max_bytes,start_offset)
     tools={} if tools is None else tools
-    for record_index, (record, offset) in enumerate(records):
+    for record, offset in records:
         role, blocks = _blocks(provider, record)
         if role is None:
             continue
@@ -418,27 +344,23 @@ def _view(provider, path, text_limit, max_bytes=None, records=None, tools=None, 
                 continue
             if kind in ('text','input_text','output_text') or 'text' in block:
                 kind='text'; text=_text(block.get('text'))
-            elif kind=='tool_use' or 'functionCall' in block:
-                b=block.get('functionCall',block); kind='tool_call';tool=b.get('name');call=b.get('id');text=_text(b.get('input',b.get('args')))
+            elif kind=='tool_use':
+                b=block; kind='tool_call';tool=b.get('name');call=b.get('id');text=_text(b.get('input'))
                 if call and tool:tools[call]=tool
-            elif kind=='tool_result' or 'functionResponse' in block:
-                b=block.get('functionResponse',block);kind='tool_result';tool=b.get('name');call=b.get('tool_use_id',b.get('id'));text=_text(b.get('content',b.get('response')))
+            elif kind=='tool_result':
+                b=block;kind='tool_result';tool=b.get('name');call=b.get('tool_use_id',b.get('id'));text=_text(b.get('content'))
                 tool=tool or tools.get(call)
-            elif kind in ('image','input_image') or 'inlineData' in block:
-                data=block.get('inlineData',block.get('source',{}));mime=data.get('mimeType',data.get('media_type','image')) if isinstance(data,dict) else 'image'
+            elif kind in ('image','input_image'):
+                data=block.get('source',{});mime=data.get('media_type','image') if isinstance(data,dict) else 'image'
                 kind='document' if mime=='application/pdf' else 'image';text='Embedded '+kind+' reference; see raw record.'
-            elif kind=='document' or 'fileData' in block:
+            elif kind=='document':
                 kind='document';text='Document reference; see raw record.'
             else:
                 kind='notice';text='Unsupported native block retained in raw record.'
-            native_offset=offset
-            if provider=='gemini' and path.suffix=='.jsonl':
-                if kind=='tool_result':native_offset=record.get('_csl_tool_result_offsets',{}).get(call,offset)
-                elif kind not in ('tool_call',):native_offset=record.get('_csl_content_offset',offset)
             yield {'time':_stamp(record.get('timestamp')), 'role':'tool' if kind=='tool_result' else role if role in ('user','assistant','system','tool') else 'system',
                    'kind':kind,'text':text[:text_limit],'tool':tool,'call_id':call,
-                   'truncated':len(text)>text_limit,'raw_offset':{'file_key':'main','offset':native_offset},
-                   'native_pointer':f'/messages/{record_index}' if provider=='gemini' and path.suffix=='.json' else None,
+                   'truncated':len(text)>text_limit,'raw_offset':{'file_key':'main','offset':offset},
+                   'native_pointer':None,
                    'block_index':index}
 
 

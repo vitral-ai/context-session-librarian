@@ -222,6 +222,9 @@ class AntigravityTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get('CSL_RUN_ANTIGRAVITY_NATIVE_TESTS')=='1' and os.environ.get('CSL_ANTIGRAVITY_BINARY'),'Opt in with a private Antigravity CLI binary; localhost only')
 class NativeAntigravityTests(unittest.TestCase):
     def test_native_package_resume_reconstructs_same_messages_without_model(self):
+        # Native Antigravity storage and model API identifiers are required by
+        # this executable. They do not register another CSL session provider.
+        native_storage=Path('.gemini/antigravity-cli')
         captured=[]
         class Handler(BaseHTTPRequestHandler):
             def log_message(self,*args):pass
@@ -237,7 +240,7 @@ class NativeAntigravityTests(unittest.TestCase):
             server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
             thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
             def run(home,*args):
-                settings=home/'.gemini/antigravity-cli';settings.mkdir(parents=True,exist_ok=True)
+                settings=home/native_storage;settings.mkdir(parents=True,exist_ok=True)
                 (settings/'settings.json').write_text(json.dumps({'modelProvider':'gemini','enableTelemetry':False}))
                 env={'PATH':os.environ['PATH'],'HOME':str(home),'XDG_CONFIG_HOME':str(home/'.config'),
                     'XDG_DATA_HOME':str(home/'.local/share'),'XDG_CACHE_HOME':str(home/'.cache'),
@@ -247,14 +250,14 @@ class NativeAntigravityTests(unittest.TestCase):
                 self.assertEqual(result.returncode,0,result.stderr[:500]);return json.loads(result.stdout)
             try:
                 source_home=root/'source';native=run(source_home,'-p','Remember SYNTHETIC-USER-4827. Do not use tools. Reply ACK.')
-                sid=native['conversation_id'];provider_root=source_home/'.gemini/antigravity-cli'
+                sid=native['conversation_id'];provider_root=source_home/native_storage
                 before=providers.raw_files('antigravity',sid,home=provider_root)
                 archive=root/'raw.zip';bundle.export_native('antigravity',sid,archive,home=provider_root,allow_secrets=True)
-                baseline=root/'baseline';baseline_root=baseline/'.gemini/antigravity-cli'
+                baseline=root/'baseline';baseline_root=baseline/native_storage
                 for f in before:
                     dest=baseline_root/'conversations'/(sid+'.db'+('-wal' if f['file_key']=='sqlite-wal' else ''))
                     dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(Path(f['path']).read_bytes()[:f['complete_length']])
-                restored=root/'restored';restored_root=restored/'.gemini/antigravity-cli'
+                restored=root/'restored';restored_root=restored/native_storage
                 with zipfile.ZipFile(archive) as z,patch.dict(os.environ,{'CSL_ANTIGRAVITY_HOME':str(restored_root)}):
                     imported=bundle.import_native(z,bundle.validate(z),cwd)[0]
                 captured.clear();run(baseline,'--conversation',sid,'-p','What code appeared earlier? Do not use tools.')

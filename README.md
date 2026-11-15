@@ -210,7 +210,7 @@ for setup, tested interfaces and limits.
 
 ## Optional Raw Session Sync — Experimental
 
-Use `csl providers --help` to inspect local Codex, Claude Code, Gemini CLI and
+Use `csl providers --help` to inspect local Codex, Claude Code and
 Antigravity CLI files through the documented native profiles. These reads do not
 need a registry. Advanced indexed library commands remain Codex-oriented.
 
@@ -220,7 +220,7 @@ in transcripts and supported companion files unchanged.** It does not scrub them
 or encrypt them as a backup. Choose the destination and scope deliberately;
 see [setup and privacy](docs/SYNC.md).
 
-Gemini native resume remains unverified; Antigravity evidence is bounded to its
+Antigravity evidence is bounded to its
 tested CLI/profile. Imported Codex history-base graphs can require an explicit
 native activation before a cold-home read works. File preservation does not
 guarantee model recall. See [native provider limits](docs/SYNC_PROVIDERS.md).
