@@ -73,7 +73,7 @@ def coverage():
                 "commands": ["export", "share", "migrate upload"], "mode": "portable-only",
                 "scope": "explicit recognized orphaned-summary-metadata recovery; exact hidden context not restored"},
             "authentication": "Recipient CLI owns authentication; CSL never copies credentials or selects billing accounts.",
-            "bridge_messaging": {"status": "experimental-development", "message_version": 1,
+            "bridge_messaging": {"status": "experimental", "message_version": 1,
                 "providers": ["codex", "claude"], "operations": ["send", "receive", "ack", "reply", "inbox-status"],
                 "notification_metadata": "own-endpoint unacknowledged counts and bounded id/from/kind headers only; no wake or acknowledgement",
                 "grant_inspection": "CLI and own-endpoint MCP list/show include descriptive scope, expiry and revocation",

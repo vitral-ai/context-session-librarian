@@ -1,10 +1,10 @@
-# Optional raw session sync — development
+# Optional raw session sync — experimental
 
 `csl sync` publishes selected local sessions to a registry implementing the sync
 protocol. It is opt-in, separate from ZIP export, encrypted backup and agent
 messaging. It reads Codex, Claude Code, Gemini CLI and Antigravity CLI through
-local provider adapters. These commands are not in the published v0.3.0 tag;
-use a development checkout that includes `csl sync`.
+local provider adapters. These commands are included in CSL 0.4.0; earlier
+v0.3.0 does not include `csl sync`.
 
 **Raw sync uploads the complete transcript bytes and supported companion files,
 including any secrets they contain.** It does not scrub them or apply backup
