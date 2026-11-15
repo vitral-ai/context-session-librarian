@@ -21,8 +21,13 @@
   rotating credentials, device registration, local scope/status, one-pass and
   foreground sync. No registry defaults or automatic services are installed.
 - Preserve raw snapshots with resumable byte ranges, stable revisions, prefix
-  hashes, view generations and restart checkpoints. Provider parsing remains in
-  the separately owned sync-provider interface.
+  hashes, view generations and restart checkpoints. Bind all SQLite DB/WAL
+  inputs to a single captured inventory and retry changing sources.
+- Add local metadata/inventory/view adapters and raw native-file v3 packages for
+  Codex, Claude Code, Gemini CLI and Antigravity CLI. Gemini native resume remains
+  unverified; Antigravity has bounded CLI 1.5.9 reconstruction and owner text-recall
+  evidence. Codex external-history-base packages remain unavailable. Public
+  v0.3.0 cannot import v3 packages.
 - Add synthetic HTTP, credential, crash/recovery and privacy tests. Real identity,
   registry, native resume and remote-environment validation remain separate.
 

@@ -2,7 +2,7 @@
 
 Module: `csl_sync_providers.py`. Standard library only. No network, login, model
 calls or transcript logging. This interface is provider-local and independent of
-Vitral. The initial providers are `codex`, `claude`, `gemini`.
+Vitral. Providers are `codex`, `claude`, `gemini` and `antigravity`.
 
 ```python
 list_sessions(provider, *, home=None, active_seconds=300) -> list[dict]
