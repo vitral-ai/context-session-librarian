@@ -37,6 +37,7 @@ def isolated_environment(root, source=None):
            'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONNOUSERSITE': '1',
            'PIP_CONFIG_FILE': os.devnull, 'PIP_DISABLE_PIP_VERSION_CHECK': '1'}
     for key, folder in {'HOME': 'home', 'CODEX_HOME': 'codex', 'CLAUDE_CONFIG_DIR': 'claude',
+                        'CSL_GEMINI_HOME': 'gemini', 'CSL_ANTIGRAVITY_HOME': 'antigravity',
                         'XDG_CONFIG_HOME': 'xdg-config', 'XDG_DATA_HOME': 'xdg-data',
                         'XDG_CACHE_HOME': 'xdg-cache', 'XDG_STATE_HOME': 'xdg-state',
                         'XDG_RUNTIME_DIR': 'xdg-runtime', 'TMPDIR': 'tmp'}.items():

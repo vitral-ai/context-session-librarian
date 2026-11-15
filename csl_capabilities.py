@@ -20,9 +20,27 @@ def coverage():
     commands["migrate"] = {"codex": "experimental", "claude": "not-integrated"}
     commands["backup"] = {"codex": "experimental", "claude": "not-integrated"}
     commands["bridge"] = {"codex": "experimental", "claude": "experimental"}
+    commands["sync"] = {"codex": "experimental", "claude": "experimental"}
     for name in ("native-cut", "native-clone", "native-sanitize"):
         commands[name]["codex"] = "experimental"
-    return {"schema_version": 1, "providers": ["codex", "claude"], "commands": commands,
+    for status in commands.values():
+        status['gemini'] = 'not-integrated'
+    commands['sessions']['gemini'] = 'experimental'
+    commands['export']['gemini'] = 'experimental'
+    commands['import']['gemini'] = 'experimental'
+    for status in commands.values():
+        status['antigravity']='not-integrated'
+    for name in ('sessions','export','import'):
+        commands[name]['antigravity']='experimental'
+    commands['providers'] = {provider:'experimental' for provider in ('codex','claude','gemini','antigravity')}
+    commands['sync']['gemini'] = 'experimental'
+    commands['sync']['antigravity'] = 'experimental'
+    return {"schema_version": 1, "providers": ["codex", "claude", "gemini", "antigravity"], "commands": commands,
+            "sync_providers": {"interface_version":1,"module":"csl_sync_providers",
+                               "operations":["list_sessions","raw_files","view_records","package_descriptor"],
+                               "network":False,"model_calls":False,"native_package_version":3,
+                               "gemini_native_resume":"format-tested; native loader and continuation unverified",
+                               "antigravity_native_resume":"CLI 1.5.9; basic authenticated owner recall and isolated localhost reconstruction verified; not universal"},
             "source_lookup": {"default": "auto", "commands": ["export", "share", "convert", "doctor"],
                               "cross_cli_ambiguity": "require --provider codex or --provider claude",
                               "within_cli_ambiguity": "require a more specific UUID or file path"},
@@ -71,9 +89,9 @@ def coverage():
 
 
 def markdown():
-    lines = ["| Command | Codex | Claude Code |", "| --- | --- | --- |"]
+    lines = ["| Command | Codex | Claude Code | Gemini CLI | Antigravity CLI |", "| --- | --- | --- | --- | --- |"]
     for name, status in sorted(coverage()["commands"].items()):
-        lines.append(f"| `{name}` | {status['codex']} | {status['claude']} |")
+        lines.append(f"| `{name}` | {status['codex']} | {status['claude']} | {status['gemini']} | {status['antigravity']} |")
     return "\n".join(lines)
 
 
@@ -83,18 +101,12 @@ def capabilities(args):
 
 def sessions(args, csl):
     from csl_transfer import read_records, safe_text
-    if args.provider == "claude":
-        rows = []
-        for path in csl_claude.paths():
-            try:
-                info = csl_claude.header(path, read_records)
-            except (ValueError, OSError, TypeError, AttributeError) as exc:
-                # One broken transcript must not hide other sessions.
-                import sys
-                print(f"Skipping {path.name}: {exc}", file=sys.stderr)
-                continue
-            rows.append({**info, "path": str(path), "modified": path.stat().st_mtime})
-        rows.sort(key=lambda row: row["modified"], reverse=True)
+    if args.provider in ("claude", "gemini", "antigravity"):
+        from csl_sync_providers import list_sessions, raw_files
+        rows=[]
+        for entry in list_sessions(args.provider):
+            paths=raw_files(args.provider,entry['native_id'])
+            rows.append({**entry,'id':entry['native_id'],'path':paths[0]['path']})
     else:
         conn = csl.init_db(args.db.expanduser())
         try:
@@ -126,8 +138,27 @@ def add_commands(subparsers, csl):
     caps.add_argument("--json", action="store_true", help="Machine-readable command and transfer-route coverage.")
     caps.set_defaults(func=capabilities)
     listing = subparsers.add_parser("sessions", help="List sessions for one CLI; Codex uses its index, Claude reads transcripts.")
-    listing.add_argument("--provider", choices=("codex", "claude"), default="codex")
+    listing.add_argument("--provider", choices=("codex", "claude", "gemini", "antigravity"), default="codex")
     listing.add_argument("--limit", type=positive_limit, default=20)
     listing.add_argument("--query", help="Filter session title or UUID; not full-history search.")
     listing.add_argument("--json", action="store_true")
     listing.set_defaults(func=lambda args: sessions(args, csl))
+    provider = subparsers.add_parser('providers',help='Read local provider metadata, raw-file inventory and incremental views; no network.')
+    provider.add_argument('operation',choices=('list','files','view','package'))
+    provider.add_argument('--provider',choices=('codex','claude','gemini','antigravity'),required=True)
+    provider.add_argument('--session')
+    provider.add_argument('--home',type=__import__('pathlib').Path)
+    provider.add_argument('--position',help='Opaque JSON position returned by a previous view page.')
+    provider.add_argument('--limit',type=positive_limit,default=500)
+    provider.set_defaults(func=provider_command)
+
+
+def provider_command(args):
+    import csl_sync_providers as p
+    if args.operation=='list': result=p.list_sessions(args.provider,home=args.home)
+    else:
+        if not args.session:raise ValueError('Specify --session for this provider operation')
+        if args.operation=='files': result=p.raw_files(args.provider,args.session,home=args.home)
+        elif args.operation=='package':result=p.package_descriptor(args.provider,args.session,home=args.home)
+        else:result=p.view_records(args.provider,args.session,position=json.loads(args.position) if args.position else None,limit=args.limit,home=args.home)
+    print(json.dumps(result,ensure_ascii=False))
