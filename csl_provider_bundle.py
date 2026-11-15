@@ -78,6 +78,10 @@ def validate(archive):
             expected.add(member);relative.add(rel);keys.add(key);total+=info.file_size
         if primary!=1 or entry.get('primary') not in {f['file'] for f in files if f['role']=='transcript'}:
             raise ValueError('invalid_native_primary')
+        if 'codex_history' in entry:
+            if entry['provider']!='codex':raise ValueError('invalid_codex_history_provider')
+            import csl_codex_history
+            csl_codex_history.validate_graph(entry)
     if set(names)!=expected or total>MAX_TOTAL:
         raise ValueError('unexpected_or_oversized_native_package')
     # Inspection validates every checksum, not only names or a sender manifest.
@@ -118,8 +122,16 @@ def export_native(provider,native_id,destination,*,home=None,allow_secrets=False
                     digest.update(chunk);target.write(chunk);left-=len(chunk)
             if digest.hexdigest()!=f['sha256']:raise ValueError('native_source_changed')
             # Scan selected readable files; raw cannot silently scrub/rewrite them.
-            with local.open('rb') as scan:
-                for line in scan:
+            # A compressed base is retained byte-for-byte. Review its entire
+            # decoded stream, including any post-cutoff bytes carried in it.
+            import csl_codex_history
+            compressed_base = provider=='codex' and f['relative_path'].endswith('.zst')
+            if compressed_base:
+                compressed_path=local.with_suffix('.zst')
+                local.rename(compressed_path);local=compressed_path
+            scan_context = csl_codex_history.decoded(local) if compressed_base else local.open('rb')
+            with scan_context as scan:
+                for line in iter(scan.readline,b''):
                     try:text=line.decode('utf-8',errors='replace' if provider=='antigravity' else 'strict')
                     except UnicodeError:continue
                     review.scan(text,'native selected file')
@@ -162,6 +174,17 @@ def import_native(archive,manifest,cwd,*,name=None,max_context_chars=None):
     with tempfile.TemporaryDirectory(prefix='csl-native-import-') as tmp:
         for entry in manifest['sessions']:
             sid=str(uuid.uuid4());provider=entry['provider'];source_id=entry['id']
+            if provider=='codex' and 'codex_history' in entry:
+                import csl_codex_history
+                if name or max_context_chars is not None:
+                    raise ValueError('Codex referenced history does not support title override or static context limits')
+                stage=Path(tmp)/sid;stage.mkdir(mode=0o700)
+                nodes=csl_codex_history.unpack(archive,entry,stage)
+                rewritten=csl_codex_history.restore(nodes,cwd,sid,stage,providers.provider_home('codex'))
+                plans.extend(rewritten)
+                installed.append({'provider':provider,'id':sid,'source_id':source_id,'path':str(rewritten[-1][1]),'cwd':str(cwd)})
+                print('continuity: native history_base graph and bounded prefixes verified; identity/byte coordinates rebound; native/live not tested by import')
+                continue
             if provider=='antigravity':
                 import csl_antigravity
                 if name or max_context_chars is not None:

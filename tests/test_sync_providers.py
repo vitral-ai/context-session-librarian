@@ -138,16 +138,18 @@ class ProviderTests(unittest.TestCase):
         main=p.raw_files('claude',self.sid,home=self.home)[0]
         self.assertEqual(result['source_file'],{'file_key':'main','length':main['complete_length'],'sha256':main['sha256']})
 
-    def test_package_unavailable_for_metadata_only_and_external_codex_base(self):
+    def test_package_unavailable_for_metadata_only_and_missing_codex_base(self):
         path=self.home/'sessions'/f'{self.sid}.jsonl'
         rows=[{'type':'session_meta','payload':{'id':self.sid,'cwd':str(self.cwd)}}]
         self.write(path,rows)
         self.assertEqual(p.package_descriptor('codex',self.sid,home=self.home)['reason'],'no_conversation')
-        rows[0]['payload']['history_base']={'thread_id':'external'}
-        rows.append({'type':'response_item','payload':{'type':'message','role':'user','content':[{'type':'input_text','text':'visible only'}]}})
+        rows[0]['payload'].update(history_mode='paginated',history_base={'thread_id':str(uuid.uuid4()),'end_ordinal_exclusive':1,'end_byte_offset':100})
+        rows[0]['ordinal']=1
+        rows.append({'type':'response_item','ordinal':2,'payload':{'type':'message','role':'user','content':[{'type':'input_text','text':'visible only'}]}})
+        path.unlink();path=self.home/'sessions'/f'rollout-2026-01-01T00-00-00-{self.sid}.jsonl'
         self.write(path,rows)
-        self.assertEqual(p.package_descriptor('codex',self.sid,home=self.home)['reason'],'external_history_base_not_packaged')
-        self.assertTrue(p.raw_files('codex',self.sid,home=self.home))
+        self.assertEqual(p.package_descriptor('codex',self.sid,home=self.home)['reason'],'history_base_missing')
+        with self.assertRaisesRegex(p.ProviderError,'history_base_missing'):p.raw_files('codex',self.sid,home=self.home)
 
     def codex_roundtrip(self):
         source=self.home/'sessions/2026/01/01'/f'rollout-2026-01-01T00-00-00-{self.sid}.jsonl'

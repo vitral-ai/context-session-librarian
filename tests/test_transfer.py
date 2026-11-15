@@ -36,8 +36,7 @@ class TransferTests(unittest.TestCase):
     def records(self, sid):
         return [
             {"type": "session_meta", "payload": {"id": sid, "session_id": sid,
-             "cwd": "/source/project", "history_mode": "paginated",
-             "history_base": {"thread_id": "unavailable-parent", "end_ordinal_exclusive": 10},
+             "cwd": "/source/project", "history_mode": "legacy",
              "forked_from_ordinal_exclusive": 10,
              "creator_account_id": "old-account", "context_window": {"window_id": "old"}}},
             {"type": "turn_context", "payload": {"cwd": "/source/project"}},

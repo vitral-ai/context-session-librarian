@@ -26,8 +26,13 @@
 - Add local metadata/inventory/view adapters and raw native-file v3 packages for
   Codex, Claude Code, Gemini CLI and Antigravity CLI. Gemini native resume remains
   unverified; Antigravity has bounded CLI 1.5.9 reconstruction and owner text-recall
-  evidence. Codex external-history-base packages remain unavailable. Public
+  evidence. Public
   v0.3.0 cannot import v3 packages.
+- Include bounded Codex 0.169.0 external history-base chains in raw inventories,
+  inherited views and v3 packages. Import rebinds identities and byte coordinates
+  while retaining paginated references; unsupported/missing ancestry rejects.
+  Native read evidence requires Codex's projection-cache reconstruction; import
+  itself does not activate threads or claim model recall.
 - Add synthetic HTTP, credential, crash/recovery and privacy tests. Real identity,
   registry, native resume and remote-environment validation remain separate.
 

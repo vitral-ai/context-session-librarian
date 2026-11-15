@@ -152,11 +152,21 @@ only accepts v1/v2. Do not assume a v3 package is loadable by old CSL. Availabil
 will be true only for profiles the new importer implements; native Gemini loader
 verification is separately reported, not implied by byte packaging.
 
-`available=false, reason=no_conversation` rejects metadata-only histories. Codex
-sessions referencing an external `history_base` are still collectible byte for
-byte but return `external_history_base_not_packaged`: this increment cannot
-claim a self-contained native package for those sessions. Raw bytes alone are
-not a proof of same-context resume. The registry must keep that distinction.
+`available=false, reason=no_conversation` rejects metadata-only histories.
+Codex 0.169.0 paginated sessions with `history_base` include the bounded ancestor
+chain. Missing, ambiguous or unsupported ancestors fail explicitly; they are not
+uploaded as a complete snapshot. The v3 entry carries `codex_history` version 1:
+`primary_rollout_id` and ancestor-first `nodes`, each containing `rollout_id`,
+`owner_id`, `file_key`, `file_name` (canonical basename only) and `decoded_length`.
+The primary key remains `main`; base keys are `base-<physical-rollout-UUID>`, role
+`context`, path `session/history/<physical-rollout-UUID>.jsonl[.zst]`.
+Plain bases use append mode and only their referenced complete prefix; compressed
+bases use rewrite mode and retain the complete encoded file. A view page includes
+`source_files` binding **every** graph input to its length/hash, and `inherited`
+on records from bases. Compressed offsets are zero in the physical file with a
+decoded JSONL position in `native_pointer`. No registry wire change is required.
+See [Codex lineage scope and native-cache caveat](CODEX_HISTORY_BASE.md). Raw
+conservation is not a proof of universal model continuity.
 
 For development checks (explicit roots avoid personal histories):
 

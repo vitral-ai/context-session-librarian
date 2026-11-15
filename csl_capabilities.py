@@ -39,6 +39,7 @@ def coverage():
             "sync_providers": {"interface_version":1,"module":"csl_sync_providers",
                                "operations":["list_sessions","raw_files","view_records","package_descriptor"],
                                "network":False,"model_calls":False,"native_package_version":3,
+                               "codex_history_base":"0.169.0 paginated raw v3; bounded ancestry; native read verified after native projection-cache rebuild; no model recall claim",
                                "gemini_native_resume":"format-tested; native loader and continuation unverified",
                                "antigravity_native_resume":"CLI 1.5.9; basic authenticated owner recall and isolated localhost reconstruction verified; not universal"},
             "source_lookup": {"default": "auto", "commands": ["export", "share", "convert", "doctor"],

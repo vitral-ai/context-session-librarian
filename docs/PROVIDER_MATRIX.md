@@ -26,6 +26,11 @@ The experimental `sync` command publishes through the local provider interface
 for Codex, Claude Code, Gemini CLI and Antigravity CLI to a registry you configure.
 Raw sync uploads transcripts including any secrets they contain. See [sync](SYNC.md)
 and [Antigravity scope and limitations](ANTIGRAVITY.md).
+Codex 0.169.0 external `history_base` chains are included in raw v3 snapshots and
+single-session `export --raw`. Portable/batch export of referenced histories
+rejects rather than omitting ancestors. Native `thread/read` requires rebuilt
+projection caches in a fresh home; import does not activate threads or rebuild
+those caches. See [Codex lineage profile](CODEX_HISTORY_BASE.md).
 Antigravity CLI is a distinct experimental SQLite/protobuf provider. CLI 1.5.9
 has localhost reconstruction evidence and a bounded authenticated owner recall
 check; broader profiles remain unverified. See [scope and limitations](ANTIGRAVITY.md).

@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: sudo apt-get update && sudo apt-get install -y bubblewrap python3-venv
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap python3-venv zstd
       - name: Verify required namespace support on the disposable runner
         run: |
           if ! bwrap --unshare-net --ro-bind / / -- /usr/bin/true; then
@@ -28,7 +28,7 @@ jobs:
           fi
       - name: Install fixed native CLIs and optional test decoders
         run: |
-          npm install --prefix "$RUNNER_TEMP/csl-native" @openai/codex@0.166.0 @anthropic-ai/claude-code@2.1.308
+          npm install --prefix "$RUNNER_TEMP/csl-native" @openai/codex@0.169.0 @anthropic-ai/claude-code@2.1.308
           echo "$RUNNER_TEMP/csl-native/node_modules/.bin" >> "$GITHUB_PATH"
           # Migration's isolated PATH has no hosted-toolcache Node interpreter.
           # Expose the installed ELF directly instead of the npm JS wrapper.
