@@ -111,6 +111,23 @@ class CachedProviders:
                 except (OSError, SyncError, ValueError): return True
         return False
 
+    def load_hints(self, providers=('codex', 'claude')):
+        """Supervisor-only: small metadata files, never transcript parsing."""
+        self.entries, self.listed = {}, {}
+        for provider in providers:
+            if provider in ('codex', 'claude'):
+                home = self.module.provider_home(provider)
+                self.listed[provider] = (home, self.module._paths(provider, home))
+        for path in self.root.glob('*/entry.json'):
+            entry = read_private_json(path)
+            provider = entry.get('metadata', {}).get('provider') if entry else None
+            if provider not in self.listed or not entry.get('inventory'): continue
+            home = self.listed[provider][0]
+            primary = Path(entry['inventory'][0]['path'])
+            if not primary.is_relative_to(home) or not primary.is_file(): continue
+            sources = [Path(item['path']) for item in entry['inventory']]
+            self.entries[(provider, entry['metadata']['native_id'])] = (path.parent, entry, sources, home)
+
     def verify_entry(self, entry):
         try:
             for item in entry['inventory']:

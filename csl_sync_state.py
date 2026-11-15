@@ -98,7 +98,7 @@ def exclusive(root, name='collector.lock'):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise SyncError('collector_busy') from None
-        yield
+        yield fd
     finally:
         os.close(fd)
 

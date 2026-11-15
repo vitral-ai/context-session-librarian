@@ -11,6 +11,7 @@ from csl_sync_auth import Tokens, discover
 from csl_sync_engine import Collector, PROVIDERS, Providers
 from csl_sync_http import Registry, checked_url
 from csl_sync_state import State, SyncError, exclusive, now, private_json
+from csl_sync_watch import pass_lock
 
 WARNING = ('Raw sync uploads the complete transcript bytes and supported companion files, '
            'including any secrets they contain. It does not scrub or encrypt them for the registry. '
@@ -29,7 +30,16 @@ def command(args, csl):
             result['enabled'] = bool(settings.get('enabled'))
             print(json.dumps(result, separators=(',', ':')))
             return
-        with exclusive(state.root):
+        if action == 'watch':
+            settings = state.get('settings', {})
+            if not settings.get('enabled') or not Tokens(state.root, settings).status()['signed_in']:
+                raise SyncError('sign_in_required')
+            from csl_sync_cache import CachedProviders
+            from csl_sync_watch import watch
+            import csl_sync_providers
+            watch(args, state, CachedProviders(csl_sync_providers, state.root))
+            return
+        with pass_lock(state.root):
             if action in ('include', 'exclude'):
                 state.select(args.provider, args.native_id, action == 'include')
                 print(json.dumps({'provider': args.provider, 'included': action == 'include', 'remote_deleted': False}))
@@ -84,31 +94,9 @@ def command(args, csl):
                 return
             providers = Providers(state.root)
             collector = Collector(state, registry, providers)
-            backoff = 1
-            while True:
-                pass_started = time.monotonic()
-                try:
-                    result = collector.run(days=None if args.all else args.days, providers=args.providers or PROVIDERS)
-                    backoff = 1
-                except SyncError as error:
-                    if action != 'watch' or not error.retryable:
-                        raise
-                    state.set('last_error', error.code)
-                    delay = error.retry_after if error.retry_after is not None else backoff
-                    print(json.dumps({'state': 'waiting', 'error': error.code, 'retry_in_seconds': delay}), flush=True)
-                    time.sleep(delay)
-                    backoff = min(backoff * 2, 60)
-                    continue
-                print(json.dumps(result, separators=(',', ':')), flush=True)
-                if action == 'run':
-                    if result['pending']: raise SystemExit(2)
-                    return
-                deadline = pass_started + args.interval
-                while True:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0: break
-                    time.sleep(min(1, remaining))
-                    if providers.changed() is True: break
+            result = collector.run(days=None if args.all else args.days, providers=args.providers or PROVIDERS)
+            print(json.dumps(result, separators=(',', ':')), flush=True)
+            if result['pending']: raise SystemExit(2)
     except SyncError as error:
         if state is not None: state.set('last_error', error.code)
         print(json.dumps({'state': 'stopped', 'error': error.code, 'retryable': error.retryable}), file=sys.stderr)
