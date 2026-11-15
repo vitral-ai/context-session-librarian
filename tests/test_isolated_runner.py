@@ -15,6 +15,12 @@ runner = importlib.util.module_from_spec(spec); spec.loader.exec_module(runner)
 
 
 class RunnerTests(unittest.TestCase):
+    def test_full_profile_rejects_observed_old_native_cli_before_running_suite(self):
+        self.assertIn('PATH', runner.codex_validation_error('codex-cli 0.118.0'))
+        self.assertIsNone(runner.codex_validation_error('codex-cli 0.169.0'))
+        self.assertIsNone(runner.codex_validation_error('codex-cli 0.170.0'))
+        self.assertIsNotNone(runner.codex_validation_error('unknown native build'))
+
     def test_allowlisted_environment_has_fresh_private_homes_and_no_provider_auth(self):
         with tempfile.TemporaryDirectory() as directory:
             inherited = {'PATH': os.defpath, 'HOME': '/never-real-home', 'CODEX_HOME': '/never-codex',

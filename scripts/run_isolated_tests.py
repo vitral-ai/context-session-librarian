@@ -8,6 +8,7 @@ No paid generation or login is performed. This is isolation, not an OS sandbox.
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -19,6 +20,14 @@ ROOT = Path(__file__).resolve().parents[1]
 FULL_FLAGS = {'CSL_RUN_MEDIA_TESTS': '1', 'CSL_RUN_CODEX_NATIVE_TESTS': '1',
               'CSL_RUN_CLAUDE_NATIVE_TESTS': '1', 'CSL_RUN_MIGRATION_E2E_TESTS': '1',
               'CSL_MEDIA_SANDBOX': 'required'}
+CODEX_VALIDATION_FLOOR = (0, 169, 0)
+
+
+def codex_validation_error(version):
+    match = re.search(r'codex-cli (\d+)\.(\d+)\.(\d+)', version)
+    if not match or tuple(map(int, match.groups())) < CODEX_VALIDATION_FLOOR:
+        return 'Full native validation requires Codex CLI 0.169.0 or newer; check PATH order. This is a test-profile prerequisite, not a minimum for all CSL operations.'
+    return None
 
 
 def isolated_environment(root, source=None):
@@ -53,6 +62,11 @@ def prerequisites(env, full):
             result[name] = {'version': run.stdout.strip()[:300], 'version_exit': run.returncode}
             if run.returncode:
                 errors.append('Version check failed: '+name)
+            elif name == 'codex':
+                result[name]['minimum_tested_version'] = '0.169.0'
+                problem = codex_validation_error(run.stdout)
+                if problem:
+                    errors.append(problem)
         except (OSError, subprocess.TimeoutExpired):
             errors.append('Version check unavailable: '+name)
     if 'bwrap' in result and sys.platform.startswith('linux'):

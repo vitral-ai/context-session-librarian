@@ -20,8 +20,14 @@ python3 scripts/run_isolated_tests.py --full --check
 python3 scripts/run_isolated_tests.py --full
 ```
 
-Full mode requires working bubblewrap network/user namespaces and records the
-installed CLI versions. It does not change host namespace policy or authenticate
+Full mode requires **Codex CLI 0.169.0 or newer** for this native validation
+profile, plus working bubblewrap network/user namespaces, and records installed
+CLI versions. Confirm `codex --version` and PATH order: an independent run with
+0.118.0 first on PATH failed native checks; the same candidate with 0.169.0 passed.
+`--full --check` rejects the older CLI before running tests. This test-profile
+floor is not a minimum version claim for all CSL operations; newer native versions
+still require compatibility checks. Claude Code 2.1.325 was used in validation.
+The runner does not change host namespace policy or authenticate
 either CLI. It creates a temporary test virtualenv and installs the directly pinned
 requirements from `scripts/isolated-test-requirements.txt`; dependency installation
 uses network access but makes no model calls. `--wheelhouse /path/to/wheels` selects
