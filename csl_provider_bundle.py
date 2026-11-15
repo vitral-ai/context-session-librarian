@@ -59,10 +59,13 @@ def validate(archive):
                 raise ValueError('invalid_native_file_role')
             if item['role']=='transcript':
                 primary+=1
-                if rel not in ('session.jsonl','session.json') or key!='main' or member!=f'sessions/{sid}/main'+Path(rel).suffix:
+                allowed_primary=('session.db',) if entry['provider']=='antigravity' else ('session.jsonl','session.json')
+                if rel not in allowed_primary or key!='main' or member!=f'sessions/{sid}/main'+Path(rel).suffix:
                     raise ValueError('invalid_native_primary')
             elif not rel.startswith('session/') or member!=f'sessions/{sid}/files/{rel}':
                 raise ValueError('invalid_native_companion')
+            if entry['provider']=='antigravity' and item['role']!='transcript' and (rel!='session/session.db-wal' or key!='sqlite-wal' or item['role']!='context'):
+                raise ValueError('unsupported_antigravity_companion')
             if member in expected or member not in names:
                 raise ValueError('duplicate_or_missing_native_member')
             info=archive.getinfo(member)
@@ -117,7 +120,7 @@ def export_native(provider,native_id,destination,*,home=None,allow_secrets=False
             # Scan selected readable files; raw cannot silently scrub/rewrite them.
             with local.open('rb') as scan:
                 for line in scan:
-                    try:text=line.decode('utf-8')
+                    try:text=line.decode('utf-8',errors='replace' if provider=='antigravity' else 'strict')
                     except UnicodeError:continue
                     review.scan(text,'native selected file')
             item.update(bytes=f['complete_length'],sha256=digest.hexdigest())
@@ -159,6 +162,26 @@ def import_native(archive,manifest,cwd,*,name=None,max_context_chars=None):
     with tempfile.TemporaryDirectory(prefix='csl-native-import-') as tmp:
         for entry in manifest['sessions']:
             sid=str(uuid.uuid4());provider=entry['provider'];source_id=entry['id']
+            if provider=='antigravity':
+                import csl_antigravity
+                if name or max_context_chars is not None:
+                    raise ValueError('Antigravity title override and static context-limit analysis are not implemented')
+                stage=Path(tmp)/sid;stage.mkdir(mode=0o700)
+                original=stage/'session.db'
+                for item in entry['files']:
+                    selected=original if item['role']=='transcript' else Path(str(original)+'-wal')
+                    digest=hashlib.sha256()
+                    with archive.open(item['file']) as source,selected.open('xb') as output:
+                        os.chmod(selected,0o600)
+                        for chunk in iter(lambda:source.read(1024*1024),b''):
+                            digest.update(chunk);output.write(chunk)
+                    if digest.hexdigest()!=item['sha256']:raise ValueError('native_checksum_mismatch')
+                local=stage/'imported.db'
+                csl_antigravity.rewrite_copy(original,local,source_id,sid,cwd)
+                target=providers.provider_home('antigravity')/'conversations'/(sid+'.db')
+                plans.append((local,target,True))
+                installed.append({'provider':provider,'id':sid,'source_id':source_id,'path':str(target),'cwd':str(cwd)})
+                continue
             if provider=='claude':
                 target=csl_claude.target_path(sid,cwd)
             elif provider=='codex':

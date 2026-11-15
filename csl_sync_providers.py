@@ -11,8 +11,9 @@ from urllib.parse import urlsplit, urlunsplit
 
 from csl_canonical import strict_json
 import csl_gemini
+import csl_antigravity
 
-PROVIDERS = ('codex', 'claude', 'gemini')
+PROVIDERS = ('codex', 'claude', 'gemini', 'antigravity')
 API_VERSION = 1
 
 
@@ -27,7 +28,8 @@ def provider_home(provider, home=None):
         raise ProviderError('unsupported_provider')
     default = {'codex': os.environ.get('CODEX_HOME', '~/.codex'),
                'claude': os.environ.get('CLAUDE_CONFIG_DIR', '~/.claude'),
-               'gemini': os.environ.get('CSL_GEMINI_HOME') or str(Path(os.environ.get('GEMINI_CLI_HOME',str(Path.home()))) / ('.cache/.gemini' if os.environ.get('SANDBOX')=='sandbox-exec' else '.gemini'))}[provider]
+               'gemini': os.environ.get('CSL_GEMINI_HOME') or str(Path(os.environ.get('GEMINI_CLI_HOME',str(Path.home()))) / ('.cache/.gemini' if os.environ.get('SANDBOX')=='sandbox-exec' else '.gemini')),
+               'antigravity': os.environ.get('CSL_ANTIGRAVITY_HOME', '~/.gemini/antigravity-cli')}[provider]
     return Path(home if home is not None else default).expanduser().resolve()
 
 
@@ -90,6 +92,8 @@ def _json(path):
 
 
 def _paths(provider, root):
+    if provider == 'antigravity':
+        return sorted((root/'conversations').glob('*.db'))
     if provider == 'codex':
         return sorted([*root.glob('sessions/**/*.jsonl'), *root.glob('archived_sessions/**/*.jsonl')])
     if provider == 'claude':
@@ -158,6 +162,16 @@ def _repository(cwd):
 
 
 def _metadata(provider, path, root, active_seconds):
+    if provider == 'antigravity':
+        try:
+            with csl_antigravity.snapshot(root,path.stem) as (db,files):
+                row=csl_antigravity.metadata(db,path.stem)
+            modified=max(Path(f['path']).stat().st_mtime for f in files)
+            return {**row,'repository':_repository(row['cwd']),
+                    'byte_count':sum(f['complete_length'] for f in files),
+                    'state':'active' if datetime.now(timezone.utc).timestamp()-modified<=active_seconds else 'idle'}
+        except (csl_antigravity.FormatError,OSError) as error:
+            raise ProviderError(str(error) if isinstance(error,csl_antigravity.FormatError) else 'source_unavailable') from None
     sid = title = cwd = created = updated = model = parent = None
     if provider=='claude':sid=path.stem
     if provider=='codex':
@@ -278,6 +292,10 @@ def _descriptor(path, root, relative, role):
 
 
 def _files(provider, path, root):
+    if provider == 'antigravity':
+        try:return csl_antigravity.inventory(root,path.stem)
+        except (csl_antigravity.FormatError,OSError) as error:
+            raise ProviderError(str(error) if isinstance(error,csl_antigravity.FormatError) else 'source_unavailable') from None
     suffix = path.suffix
     result = [_descriptor(path, root, 'session'+suffix, 'transcript')]
     companion = path.with_suffix('') if provider == 'claude' else path.parent/path.stem if provider == 'gemini' else None
@@ -309,7 +327,7 @@ def _resolve(provider, native_id, home):
         _safe(path, root)
         if provider == 'gemini':
             sid = _gemini(path)[0].get('sessionId')
-        elif provider == 'claude':
+        elif provider in ('claude','antigravity'):
             sid = path.stem
         else:
             match=re.search(r'([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$',path.stem)
@@ -415,6 +433,8 @@ def view_records(provider, native_id, *, position=None, limit=500, text_limit=16
     if type(limit) is not int or not 1 <= limit <= 1000 or type(text_limit) is not int or not 1 <= text_limit <= 64000:
         raise ProviderError('invalid_view_limit')
     root, path = _resolve(provider,native_id,home)
+    if provider=='antigravity':
+        return _antigravity_view(root,native_id,position,limit,text_limit)
     primary=_descriptor(path,root,'session'+path.suffix,'transcript')
     seq=1; digest=hashlib.sha256();page=[]
     if position is not None and not isinstance(position,dict):
@@ -453,7 +473,14 @@ def view_records(provider, native_id, *, position=None, limit=500, text_limit=16
 def package_descriptor(provider, native_id, *, home=None):
     root,path=_resolve(provider,native_id,home)
     meta=_metadata(provider,path,root,300);files=_files(provider,path,root)
-    if not any(event['kind'] in ('text','tool_call','tool_result','image','document') for event in _view(provider,path,16000,files[0]['complete_length'])):
+    if provider=='antigravity':
+        try:
+            with csl_antigravity.snapshot(root,native_id) as (db,files):
+                reason=csl_antigravity.package_reason(db)
+            if reason:return {'available':False,'reason':reason,'descriptor_version':1,'manifest':None,'members':[]}
+        except csl_antigravity.FormatError as error:
+            raise ProviderError(str(error)) from None
+    elif not any(event['kind'] in ('text','tool_call','tool_result','image','document') for event in _view(provider,path,16000,files[0]['complete_length'])):
         return {'available':False,'reason':'no_conversation','descriptor_version':1,'manifest':None,'members':[]}
     if provider=='codex' and any(r.get('type')=='session_meta' and isinstance(r.get('payload'),dict) and r['payload'].get('history_base') for r,_ in _lines(path,files[0]['complete_length'])):
         return {'available':False,'reason':'external_history_base_not_packaged','descriptor_version':1,'manifest':None,'members':[]}
@@ -466,3 +493,39 @@ def package_descriptor(provider, native_id, *, home=None):
     return {'available':True,'reason':None,'descriptor_version':1,
             'manifest':{'format':'codex-session-librarian','version':3,'mode':'raw','created_at':meta['updated_at'] or meta['created_at'] or '1970-01-01T00:00:00+00:00','sessions':[entry]},
             'members':members}
+
+
+def _antigravity_view(root,native_id,position,limit,text_limit):
+    if position is not None and (not isinstance(position,dict) or
+            position.get('version')!=1 or position.get('provider')!='antigravity' or
+            position.get('native_id')!=native_id or type(position.get('next_seq')) is not int or
+            position['next_seq']<1 or position.get('text_limit')!=text_limit):
+        raise ProviderError('invalid_view_position')
+    target=position['next_seq'] if position else 1
+    page=[];seq=1;digest=hashlib.sha256();verified=position is None
+    def result(files,reset=False,complete=False):
+        anchors=[{'file_key':f['file_key'],'length':f['complete_length'],'sha256':f['sha256']} for f in files]
+        return {'records':[] if reset else page,'reset_required':reset,
+                'reason':'view_prefix_changed' if reset else None,'complete':False if reset else complete,
+                'position':{'version':1,'provider':'antigravity','native_id':native_id,
+                            'next_seq':1 if reset else seq,'text_limit':text_limit,
+                            'prefix_sha256':hashlib.sha256().hexdigest() if reset else digest.hexdigest()},
+                'source_file':anchors[0],'source_files':anchors}
+    try:
+        with csl_antigravity.snapshot(root,native_id) as (db,files):
+            for event in csl_antigravity.views(db,text_limit):
+                if seq==target:
+                    if position is not None and digest.hexdigest()!=position.get('prefix_sha256'):
+                        return result(files,reset=True)
+                    verified=True
+                if seq>=target and len(page)>=limit:
+                    return result(files)
+                row={'seq':seq,**event}
+                if seq>=target:page.append(row)
+                digest.update(json.dumps(row,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()+b'\n')
+                seq+=1
+            if not verified and seq==target and digest.hexdigest()==position.get('prefix_sha256'):
+                verified=True
+            return result(files,reset=not verified,complete=True)
+    except (csl_antigravity.FormatError,OSError) as error:
+        raise ProviderError(str(error) if isinstance(error,csl_antigravity.FormatError) else 'source_unavailable') from None
