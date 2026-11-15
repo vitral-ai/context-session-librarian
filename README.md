@@ -202,9 +202,11 @@ There is no validated downloadable app bundle yet; the CLI bridge is the tested
 Mac path. The prototype does not provide automatic pairing or configure networking.
 
 Development checkouts also include [task-independent mailbox messaging](docs/BRIDGE.md#task-independent-mailbox-v1--development)
-for registered Codex/Claude clients. It persists messages for explicit receive,
-acknowledgement and correlated replies, without waking a model. This increment
-is not part of the published v0.3.0 tag and has synthetic-harness validation only.
+for registered Codex/Claude sessions, with durable inboxes, explicit acknowledgement
+and correlated replies. Optional hooks surface messages at session boundaries;
+mail itself grants no permission to act or wake a model. These experimental
+commands are not part of published v0.3.0. See the [communication guide](docs/AGENT_COMMUNICATION.md)
+for setup, tested interfaces and limits.
 
 ## Experimental Encrypted Backup
 

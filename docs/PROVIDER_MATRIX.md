@@ -82,10 +82,12 @@ unvalidated. The macOS app is source only, not a validated binary. See
 **Development mailbox v1:** task-independent `bridge send`, `receive`, `ack` and
 `reply` also support shell/MCP clients such as Claude Code, using their own
 registered session endpoint. This capability persists mail without waking or
-steering a model; the agent explicitly receives it during a normal turn. It has
-synthetic-harness evidence only, not a real mailbox-v1 Claude/Codex exchange yet.
-Claude support here does not add a native runtime/activation adapter, search or
-conversion guarantees. The published v0.3.0 tag predates this mailbox increment.
+steering a model. Explicit receive and session-bound hooks are available;
+bounded real CLI exchanges and Claude hook/MCP sessions have been exercised.
+The separate owner-opted Codex notifier requires a local activate grant and an
+existing owned runtime. Claude support does not imply arbitrary idle wake,
+search or conversion guarantees. See the [communication specification](AGENT_COMMUNICATION.md)
+for evidence boundaries. Published v0.3.0 predates this development increment.
 
 `backup` is included in the
 [v0.3.0 release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.3.0)

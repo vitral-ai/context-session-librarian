@@ -7,8 +7,16 @@
 - Resolve optional owner grants locally and dynamically, separately from inbox
   admission. Messages never activate models or execute work, including with a grant.
 - Expose the same mailbox through CLI and fixed-agent MCP tools for Codex/Claude
-  clients; real mailbox-v1 exchanges remain unvalidated. Legacy coordination is
-  unchanged and v0.3.0 remains the published baseline.
+  clients; bounded real exchanges, Claude hook/MCP sessions and isolated SSH
+  container transport have been exercised. Physical cross-OS/WAN mailbox delivery
+  remains unverified. Legacy coordination is unchanged; v0.3.0 is the published baseline.
+- Add explicit grant replacement, inspection, expiry and optional endpoint-bound
+  owner-admin MCP tools; logical CLI rejection exits nonzero and MCP reports errors.
+- Add session-bound, bounded boundary hooks and a separately opted Codex native
+  queue notifier requiring a local activate grant and an existing owned runtime.
+  Gemini is specified only; arbitrary idle Claude activation is not implemented.
+- Add an isolated full synthetic test runner with a tested native-version floor;
+  actual native hook/queue gates use fabricated loopback provider responses.
 
 ## 0.3.0 — 2026-11-14
 
