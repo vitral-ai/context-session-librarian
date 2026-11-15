@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Avoid repeated parsing, hashing, view rendering and per-session requests for
+  unchanged Codex/Claude sync inputs. Add private incremental views, periodic full
+  prefix verification and early foreground wakeup for changed histories, while
+  retaining acknowledged completeness timestamps and source/view fences.
+- Run each foreground sync pass in a fresh worker interpreter. Keep the
+  installation lock in the supervisor, resume checkpoints after crashes with
+  bounded backoff, and report native signal/exit codes without echoing transcript
+  diagnostics. Document optional user-managed restart policies.
+
 - Add experimental task-independent bridge mailbox v1 with durable send/receive,
   explicit acknowledgement, correlated replies and endpoint/content-bound IDs.
 - Resolve optional owner grants locally and dynamically, separately from inbox

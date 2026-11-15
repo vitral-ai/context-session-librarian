@@ -106,6 +106,67 @@ of looping on an old refresh token. Only one collector/sign-in operation can own
 a state directory at a time; another returns `collector_busy`. Different state
 directories are different installations, not a way to share one device journal.
 
+### Incremental collection and verification
+
+For Codex and Claude JSONL histories, the collector keeps a private derived cache
+under the selected sync state directory. Unchanged files are checked by inventory,
+device/inode, size, nanosecond modification time and change time. They do not
+repeat transcript parsing, view rendering or per-session HTTP calls. This reuses
+the previous acknowledged snapshot; it **does not advance its completeness time**.
+Gemini and Antigravity retain the full provider verification path.
+
+The metadata hint is not an integrity proof. Every five minutes, or when the
+clock goes backwards, cached complete prefixes are fully hashed and incomplete
+suffixes checked for newly completed records. Changed/replaced/truncated files
+are captured and verified before publication. Ordinary same-size/mtime rewrites
+are detected by change time; a change concealing all file metadata is bounded
+by the periodic full check. Source and view hashes still bind the exact complete
+prefix. Changed append prefixes are fully verified; no opaque or serialized SHA
+state is trusted to guess their integrity.
+
+Appending to a JSONL renders only new native records, retaining historical tool
+correlation and acknowledged view positions. A changed historical prefix rebuilds
+the derived view and triggers its normal generation/reset protocol. Sources that
+continue appending can publish a frozen complete prefix; later bytes are collected
+on the next pass, and incomplete final records are never sent.
+
+Codex history-base graphs include their ancestor files in the snapshot and its
+view binding. Candidate paths in active/archive storage, including compressed
+siblings, invalidate the cache when added, removed or changed. Periodic checks
+hash every graph input, not only the leaf or inherited byte prefix. A changed
+graph is resolved and rendered again through the bounded native history adapter;
+missing dependencies or missing view anchors remain errors. Single-file JSONL
+appends keep their incremental rendering path.
+
+`watch --interval 60` also checks lightweight source-change hints once a second
+and wakes early for changed/new histories. Its regular deadline includes pass
+duration rather than adding another full sleep afterward. Hints cause normal
+verification, never a completeness claim by themselves. Cold initialization,
+large rewrites, sustained source changes or a slow registry can still exceed an
+interval; the interval is not a universal network-latency guarantee.
+
+Every pass runs in a fresh child interpreter. The foreground supervisor keeps
+the installation lock and only reads small cache hints while waiting. A native
+crash or leak in JSON/provider parsing therefore ends one worker rather than
+the watcher, and the worker's memory is returned on exit. A failed pass resumes
+from durable acknowledgements in a new process, with exponential backoff from
+1 to 60 seconds. A signal produces a structured diagnostic such as
+`{"state":"pass_crashed","exit_code":139,"signal":"SIGSEGV",...}`;
+ordinary failures include the exit code and safe error code. Native stderr is
+not echoed as transcript data. Authentication requiring human action stops the
+watcher instead of repeatedly consuming an old refresh token.
+
+Ctrl-C or SIGTERM shuts down an active worker before releasing the lock. No
+SQLite connection is used across interpreter processes. This isolates native
+failures; it does not establish their root cause or prevent the OS from killing
+the supervisor, and it cannot guarantee recovery from every host failure.
+
+The cache contains transcript-derived text, tool names and metadata and may
+therefore contain secrets. Its directory/files use private permissions and it is
+not an encrypted backup. Temporary raw copies are removed after preparation;
+derived view/cache files remain local. Stop watch before deleting `provider-cache`
+to rebuild it; this leaves native histories, credentials and remote sessions intact.
+
 To disable locally, first stop the foreground collector or your user-managed
 service, then run `csl sync sign-out`. This erases local tokens and disables the
 installation; it does not revoke the server session or delete remote transcripts.
@@ -125,6 +186,7 @@ Type=simple
 ExecStart=/absolute/path/to/csl sync --home /absolute/private/state watch --interval 30
 Restart=on-failure
 RestartSec=30
+KillMode=control-group
 [Install]
 WantedBy=default.target
 ```
@@ -134,11 +196,29 @@ Enable only if desired using `systemctl --user daemon-reload` and
 Authentication failures still require human sign-in; do not configure an aggressive
 restart loop to manufacture consent.
 
-On macOS, the equivalent is a user-created LaunchAgent with `ProgramArguments`
-containing the absolute `csl` path, `sync`, `--home`, the private state path,
-`watch`, `--interval`, `30`, and `RunAtLoad` only if desired. Load/unload it with
-your normal `launchctl bootstrap gui/$(id -u) …` / `bootout` workflow. No launchd
-file is generated by CSL; this scheduling arrangement is not tested by unit tests.
+On macOS, a user-managed LaunchAgent can restart an unsuccessful supervisor
+(`KeepAlive.SuccessfulExit=false` is launchd's counterpart to systemd's
+`Restart=on-failure`):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>local.csl.sync</string>
+  <key>ProgramArguments</key><array>
+    <string>/absolute/path/to/csl</string><string>sync</string>
+    <string>--home</string><string>/absolute/private/state</string>
+    <string>watch</string><string>--interval</string><string>60</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>30</integer>
+</dict></plist>
+```
+
+Load/unload it with your normal `launchctl bootstrap gui/$(id -u) …` / `bootout`
+workflow. Sign in manually first. No unit/plist is generated, installed or enabled
+by CSL; these service-manager arrangements require their own platform validation.
 
 ### Remote environments without a desktop browser
 
@@ -158,8 +238,8 @@ not establish it.
 The repository tests use synthetic providers and in-test HTTP peers; no real
 accounts or model calls. Actual registry/identity deployments and remote-environment
 acceptance need their own checks. Provider-native fidelity has separate, bounded
-evidence: Gemini native loading remains unverified; Codex sessions depending on
-an external history base cannot produce a self-contained package. See
+evidence: Gemini native loading remains unverified; Codex supports bounded raw
+history-base graphs while missing or unsupported dependencies are rejected. See
 [provider coverage](PROVIDER_MATRIX.md) and [Antigravity evidence](ANTIGRAVITY.md).
 Raw sync success does not prove model recall. Public v0.3.0 cannot import native
 package v3; use a client containing the v3 importer. Core uses only Python's standard

@@ -43,11 +43,12 @@ class CLITests(unittest.TestCase):
         private_json(self.home/'credentials.json',{'access_token':'fixture-access','refresh_token':'fixture-refresh','refresh_state':'ready','expires_at':time.time()+600})
         args=argparse.Namespace(sync_home=self.home,sync_action='watch',all=False,days=30,providers=None,interval=2)
         out,err=io.StringIO(),io.StringIO()
-        with patch('csl_sync.Providers'),patch('csl_sync.Collector') as collector,patch('csl_sync.time.sleep',side_effect=[None,KeyboardInterrupt]):
-            collector.return_value.run.side_effect=[SyncError('registry_unavailable',retryable=True),{'pending':0,'sessions':[]}]
+        with patch('csl_sync_cache.CachedProviders'),patch('csl_sync_watch.run_pass') as worker,patch('csl_sync_watch.time.sleep',side_effect=[None,KeyboardInterrupt]):
+            worker.side_effect=[(2,'','{"error":"registry_unavailable"}',123),
+                                (0,'{"pending":0,"synced":0,"sessions":[]}','',124)]
             with redirect_stdout(out),redirect_stderr(err),self.assertRaises(SystemExit) as stopped:command(args,None)
-            self.assertEqual(stopped.exception.code,130);self.assertEqual(collector.return_value.run.call_count,2)
-        self.assertIn('waiting',out.getvalue());self.assertNotIn('fixture-access',out.getvalue()+err.getvalue())
+            self.assertEqual(stopped.exception.code,130);self.assertEqual(worker.call_count,2)
+        self.assertIn('pass_failed',err.getvalue());self.assertNotIn('fixture-access',out.getvalue()+err.getvalue())
 
     def test_sign_in_discloses_raw_privacy_before_enabling_without_starting_sync(self):
         args=argparse.Namespace(sync_home=self.home,sync_action='sign-in',endpoint='http://127.0.0.1:1/v1',
