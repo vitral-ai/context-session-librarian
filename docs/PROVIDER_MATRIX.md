@@ -26,6 +26,9 @@ The experimental `sync` command publishes through the local provider interface
 for Codex, Claude Code, Gemini CLI and Antigravity CLI to a registry you configure.
 Raw sync uploads transcripts including any secrets they contain. See [sync](SYNC.md)
 and [Antigravity scope and limitations](ANTIGRAVITY.md).
+Antigravity CLI is a distinct experimental SQLite/protobuf provider. CLI 1.5.9
+has localhost reconstruction evidence and a bounded authenticated owner recall
+check; broader profiles remain unverified. See [scope and limitations](ANTIGRAVITY.md).
 
 The table is mirrored by `csl capabilities` / `csl capabilities --json`.
 Tests require every registered command to appear and this table to match the

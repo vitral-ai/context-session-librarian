@@ -197,8 +197,8 @@ V3's primary member is `sessions/ID/main.db`, `relative_path=session.db`; WAL
 uses the normal `files/` member rule. Registry assembly remains opaque. Active,
 external-parent and subtrajectory-dependent sessions have an unavailable
 descriptor; raw collection remains available. Native import creates fresh IDs
-and rebinds local policy. Loader reconstruction was verified only on CLI 1.5.9
-with a localhost fixture, not a commercial model or real auth.
+and rebinds local policy. CLI 1.5.9 has localhost reconstruction and a bounded
+authenticated owner text-recall check; other profiles are not implied supported.
 
 Wire/collector/panel must admit the distinct provider value `antigravity`; never
 alias it to `gemini`. CLI export requires `--provider antigravity --raw`;
