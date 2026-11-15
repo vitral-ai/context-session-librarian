@@ -1,12 +1,27 @@
 # Release operation and published state
 
-## Unreleased
+## Current provider scope
 
 The current provider set is Codex, Claude Code and Antigravity CLI. Removed
 providers are rejected, including in existing v3 packages; see [CHANGELOG](CHANGELOG.md).
 The version records below refer to their original published tags, which are unchanged.
 
 ## Version records
+
+### v0.4.2
+
+This release removes Gemini CLI support. Current native provider profiles are
+Codex, Claude Code and Antigravity CLI. Commands selecting the removed provider
+fail explicitly; existing v3 packages naming it are rejected before installation
+or native launch. No automatic conversion or replacement is performed. Historical
+tags and Release notes retain their original contents.
+
+Run the full isolated regression suite, available offline native gates, isolated
+installation and synthetic demo at the selected SHA. Publication is established
+by the annotated tag and [v0.4.2 Release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.4.2).
+Mailbox and raw sync remain experimental; raw sync uploads secrets unchanged.
+Updating the backup producer starts a fresh capture; finish pending runs with
+their original version and keep historical recovery keys.
 
 ### v0.4.1
 

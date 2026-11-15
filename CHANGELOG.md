@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.2 — 2026-11-15
+
 - Removed `gemini` CLI support. Antigravity CLI remains the supported Google
   harness. Commands naming the removed provider and existing v3 packages that
   name it are rejected with an unsupported-provider error; no automatic conversion
