@@ -1,0 +1,4 @@
+#!/usr/bin/env python3
+"""Optional owner-installed Claude Code hook; no background runtime."""
+from csl_bridge_hooks import main
+raise SystemExit(main())

@@ -66,6 +66,11 @@ def validate(request):
     if not isinstance(request, dict) or type(request.get('version')) is not int or request['version'] != 1:
         raise BridgeError('Unsupported bridge version')
     op = request.get('op')
+    if op == 'mail':
+        from csl_bridge_mailbox import validate_mail
+        if len(encode(request).encode()) > MAX_WIRE - 1024:
+            raise BridgeError('Bridge size limit exceeded')
+        return validate_mail(request)
     fields = {
         'followup': {'source', 'target', 'text'},
         'send_message': {'source', 'target', 'text'},
@@ -173,9 +178,9 @@ class Store:
     def peers(self):
         return {r['name']: decode(r['config']) for r in self.rows('SELECT * FROM peers')}
 
-    def reserve(self, peer, request):
+    def reserve(self, peer, request, *, transaction=None):
         fingerprint = hashlib.sha256(encode(request).encode()).hexdigest()
-        with self.transaction() as db:
+        def reserve_in(db):
             old = db.execute('SELECT * FROM operations WHERE id=?', (request['id'],)).fetchone()
             if old:
                 if old['peer'] != peer or old['hash'] != fingerprint:
@@ -183,7 +188,11 @@ class Store:
                 return {'state': old['state'], 'result': decode(old['result']) if old['result'] else None}
             db.execute('INSERT INTO operations VALUES(?,?,?,?,?,NULL)',
                        (request['id'], peer, fingerprint, encode(request), 'pending'))
-        return None
+            return None
+        if transaction is not None:
+            return reserve_in(transaction)
+        with self.transaction() as db:
+            return reserve_in(db)
 
     def operation(self, identifier, state, result):
         with self.transaction() as db:

@@ -19,6 +19,7 @@ def event_id(value):
 class Connector:
     def __init__(self, home, runtime_factory=Runtime):
         self.store = Store(home)
+        self._mailbox = None  # legacy homes do not acquire a mailbox schema on join
         self.identity = self.store.setting('identity')
         self.runtime_path = self.store.setting('runtime_socket')
         self.client_only = self.runtime_path is None
@@ -45,6 +46,14 @@ class Connector:
         with self.store.transaction() as db:
             db.execute("UPDATE operations SET state='uncertain' WHERE state='invoking'")
 
+    @property
+    def mailbox(self):
+        with self.store.lock:
+            if self._mailbox is None:
+                from csl_bridge_mailbox import Mailbox
+                self._mailbox = Mailbox(self)
+            return self._mailbox
+
     def spawn(self, function, *args):
         thread = threading.Thread(target=function, args=args, daemon=True)
         self.threads.append(thread)
@@ -53,8 +62,12 @@ class Connector:
     def start(self):
         if not self.client_only:
             self.spawn(self.runtime_loop)
+        if any('mail' in config.get('allow_ops', []) for config in self.peers.values()):
+            self.spawn(self.mail_loop)
         for peer in self.peers:
-            if self.peers[peer]['transport'] != 'receive-only':
+            ops = self.peers[peer].get('allow_ops', [])
+            mail_only = 'mail' in ops and 'watch' not in ops
+            if self.peers[peer]['transport'] != 'receive-only' and not mail_only:
                 self.spawn(self.peer_loop, peer)
         connector = self
         class Handler(socketserver.StreamRequestHandler):
@@ -67,6 +80,11 @@ class Connector:
                     request = decode(raw)
                     data = connector.local(request)
                     output = {'ok': True, 'data': data}
+                except sqlite3.Error:
+                    mail = request.get('local_op', '').startswith('mail_') or request.get('request', {}).get('op') == 'mail'
+                    output = ({'ok': True, 'data': {'state': 'uncertain', 'reason': 'mailbox_storage_unavailable',
+                               'request_id': request.get('id', request.get('request', {}).get('id'))}}
+                              if mail else {'ok': False, 'data': {'error': 'Bridge rejected request; inspect receipt/state'}})
                 except (BridgeError, RuntimeUnavailable, RuntimeRejected, sqlite3.Error, OSError, ValueError, KeyError, TypeError):
                     output = {'ok': False, 'data': {'error': 'Bridge rejected request; inspect receipt/state'}}
                 try:
@@ -218,6 +236,8 @@ class Connector:
     def incoming(self, peer, request):
         peer = name(peer)
         validate(request)
+        if request['op'] == 'mail':
+            return self.mailbox.incoming(peer, request)
         if peer not in self.peers or request['op'] not in self.peers[peer]['allow_ops']:
             raise BridgeError('Peer operation not permitted')
         op = request['op']
@@ -336,7 +356,8 @@ class Connector:
         # evidence remains uncertain; never auto-repeat an invocation.
         for agent, thread in self.agents.items():
             uncertain_ops = [row for row in self.store.rows("SELECT id,peer,request FROM operations WHERE state='uncertain'")
-                             if not row['peer'].startswith('outbound:') and decode(row['request']).get('target') == agent]
+                             if not row['peer'].startswith('outbound:') and decode(row['request']).get('op') != 'mail'
+                             and decode(row['request']).get('target') == agent]
             uncertain_events = [row for row in self.store.rows("SELECT id,body FROM inbound WHERE delivery='uncertain'")
                                 if decode(row['body'])['target'] == agent]
             # Repair only local crash windows with an already-confirmed native turn.
@@ -384,6 +405,16 @@ class Connector:
             if flush_pending:
                 with self.locks[agent]:
                     self.flush(agent)
+
+    def mail_loop(self):
+        while not self.stop.is_set():
+            for peer, config in self.peers.items():
+                if config['transport'] != 'receive-only' and 'mail' in config.get('allow_ops', []):
+                    try:
+                        self.mailbox.flush(peer)
+                    except (BridgeError, OSError, ValueError, sqlite3.Error):
+                        pass  # durable queued facts remain; never invoke a model
+            self.stop.wait(1)
 
     def peer_loop(self, peer):
         retry = 1
@@ -466,6 +497,8 @@ class Connector:
         if not isinstance(request, dict) or not isinstance(request.get('local_op'), str):
             raise BridgeError('Invalid local operation')
         op = request['local_op']
+        if op.startswith('mail_'):
+            return self.mailbox.local(request)
         if op == '_incoming' and set(request) == {'local_op', 'trusted_peer', 'request'}:
             return self.incoming(request['trusted_peer'], request['request'])
         if op == 'call' and set(request) == {'local_op', 'peer', 'request'}:

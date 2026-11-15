@@ -1,0 +1,4 @@
+#!/usr/bin/env python3
+"""Owner-run optional native notification entry point."""
+from csl_bridge_notify import main
+raise SystemExit(main())

@@ -1,0 +1,4 @@
+# Direct test dependencies are pinned; pip records resolved transitive versions.
+-r ../media-requirements.txt
+reportlab==4.5.1
+jsonschema==4.26.0

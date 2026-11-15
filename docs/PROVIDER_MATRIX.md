@@ -1,5 +1,11 @@
 # CLI Coverage And Limits
 
+Experimental development mailbox commands, local grant inspection, own-endpoint
+MCP, session-bound boundary hooks and separately opted Codex queue notifications
+are specified in [agent communication](AGENT_COMMUNICATION.md). These are not in
+the published v0.3.0 baseline. Gemini is specified only, blocked on authentication;
+physical cross-OS mailbox and WAN tests remain distinct from coordination tests.
+
 CSL supports **native Codex -> Codex and Claude Code -> Claude Code handoffs**.
 Explicit experimental conversion in both directions is integrated through
 canonical v2 for text, references, completed tools, embedded images and PDFs. See
@@ -23,7 +29,7 @@ registry. Update implementation, tests and this document in the same change.
 | --- | --- | --- |
 | `annotate` | supported | not-integrated |
 | `backup` | experimental | not-integrated |
-| `bridge` | experimental | not-integrated |
+| `bridge` | experimental | experimental |
 | `capabilities` | supported | supported |
 | `cockpit` | supported | not-integrated |
 | `convert` | experimental | experimental |
@@ -72,6 +78,16 @@ compatible runtime, transport and peer permissions. Linux–Mac LAN coordination
 bounded real-model evidence; Internet, Windows and live Claude coordination remain
 unvalidated. The macOS app is source only, not a validated binary. See
 [bridge compatibility and setup](BRIDGE.md).
+
+**Development mailbox v1:** task-independent `bridge send`, `receive`, `ack` and
+`reply` also support shell/MCP clients such as Claude Code, using their own
+registered session endpoint. This capability persists mail without waking or
+steering a model. Explicit receive and session-bound hooks are available;
+bounded real CLI exchanges and Claude hook/MCP sessions have been exercised.
+The separate owner-opted Codex notifier requires a local activate grant and an
+existing owned runtime. Claude support does not imply arbitrary idle wake,
+search or conversion guarantees. See the [communication specification](AGENT_COMMUNICATION.md)
+for evidence boundaries. Published v0.3.0 predates this development increment.
 
 `backup` is included in the
 [v0.3.0 release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.3.0)

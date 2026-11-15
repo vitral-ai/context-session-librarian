@@ -27,6 +27,8 @@ def local_call(home, request, timeout=25):
         if not isinstance(response, dict) or set(response) != {'ok', 'data'} or type(response['ok']) is not bool:
             raise BridgeError('Invalid bridge response; outcome uncertain')
         if not response['ok']:
+            if request.get('local_op', '').startswith('mail_') or request.get('request', {}).get('op') == 'mail':
+                return {'state': 'uncertain', 'reason': 'peer_rejected_reason_unknown', 'peer_rejected': True}
             # Never repeat remote-provided error text in logs or terminal diagnostics.
             raise BridgeError('Bridge rejected operation; inspect receipt/state')
         return response['data']
@@ -72,12 +74,14 @@ def exchange(config, local_peer, request):
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=25, check=False)
     except (OSError, subprocess.TimeoutExpired):
         raise BridgeError('SSH outcome uncertain; reconcile receipt before retry') from None
-    if result.returncode or len(result.stdout) > MAX_WIRE:
+    if (result.returncode and request['op'] != 'mail') or len(result.stdout) > MAX_WIRE:
         raise BridgeError('SSH outcome uncertain; reconcile receipt before retry')
     response = decode(result.stdout)
     if not isinstance(response, dict) or set(response) != {'ok', 'data'} or type(response['ok']) is not bool:
         raise BridgeError('Invalid SSH response; outcome uncertain')
     if not response['ok']:
+        if request['op'] == 'mail':
+            return {'state': 'uncertain', 'reason': 'peer_rejected_reason_unknown', 'peer_rejected': True}
         raise BridgeError('Remote bridge rejected operation; inspect receipt/state')
     return response['data']
 

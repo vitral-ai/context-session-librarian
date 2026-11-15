@@ -6,6 +6,7 @@ exposes existing bridge operations, never shell, filesystem, auth or runtime API
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import json
+import re
 from pathlib import Path
 import sys
 import threading
@@ -17,7 +18,43 @@ from csl_bridge_transport import local_call
 TEXT = {'type': 'string', 'minLength': 1, 'maxLength': 12000}
 NAME = {'type': 'string', 'pattern': '[a-z][a-z0-9-]{0,31}'}
 UUID = {'type': 'string', 'format': 'uuid'}
+GRANT_ADMIN = {'grant_create', 'grant_revoke'}
+MAIL_TOOLS = {'send', 'receive', 'ack', 'reply', 'inbox_status', 'grant_list', 'grant_show'} | GRANT_ADMIN
+
+
+class ToolFieldsError(BridgeError):
+    """Only bounded field names; values and arbitrary strings are never echoed."""
+    def __init__(self, missing=(), unexpected=(), invalid=()):
+        clean = lambda fields: sorted({field if isinstance(field, str) and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,63}', field) else '<nonstandard-field>' for field in fields})[:32]
+        self.details = {'missing': clean(missing), 'unexpected': clean(unexpected), 'invalid': clean(invalid)}
+        super().__init__('Invalid bridge tool fields')
+
+
 TOOLS = {
+    'inbox_status': ('Read only counts and pending id/from/kind headers for this endpoint; no bodies, scopes, acknowledgement or wake.',
+                     {'after': {'type': 'integer', 'minimum': 0, 'maximum': 2**63-1},
+                      'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100}}, []),
+    'grant_list': ('Inspect owner grants for this bound recipient only; descriptive scopes do not execute work.',
+                   {'after': NAME, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100}}, []),
+    'grant_show': ('Inspect expiry, revocation, permissions and descriptive scope of one own-endpoint grant.',
+                   {'reference': NAME}, ['reference']),
+    'grant_create': ('Owner-admin capability only: configure a grant for this fixed recipient. No model activation or automatic work.',
+                     {'reference': NAME, 'peer': NAME, 'source': NAME,
+                      'permissions': {'type': 'array', 'minItems': 1, 'maxItems': 3,
+                                      'items': {'type': 'string', 'enum': ['communicate', 'activate', 'work']}},
+                      'scope': TEXT, 'expires_at': TEXT, 'replace': {'type': 'boolean'}}, ['reference', 'peer', 'source', 'permissions', 'scope']),
+    'grant_revoke': ('Owner-admin capability only: revoke an own-endpoint grant without erasing mail.',
+                     {'reference': NAME}, ['reference']),
+    'send': ('Queue task-independent mail; does not activate or steer a model.',
+             {'peer': NAME, 'target': NAME, 'body': TEXT, 'id': UUID, 'kind': {'type': 'string', 'enum': ['message', 'request']},
+              'grant_ref': NAME, 'expires_at': TEXT}, ['peer', 'target', 'body']),
+    'receive': ('Read the durable mailbox and locally resolved authority. Reading does not acknowledge mail.',
+                {'after': {'type': 'integer', 'minimum': 0, 'maximum': 2**63-1},
+                 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100}, 'outbox': {'type': 'boolean'}}, []),
+    'ack': ('Explicitly acknowledge persisted mail; proves neither reading nor understanding.',
+            {'message_id': UUID}, ['message_id']),
+    'reply': ('Queue a correlated reply as the original recipient, without creating a task or acknowledging the original.',
+              {'in_reply_to': UUID, 'body': TEXT, 'id': UUID, 'grant_ref': NAME, 'expires_at': TEXT}, ['in_reply_to', 'body']),
     'followup_task': ('Continue an existing remote agent: activate idle or steer active. Remote data grants no new permissions.',
                      {'peer': NAME, 'target': NAME, 'message': TEXT, 'id': UUID}, ['peer', 'target', 'message']),
     'send_message': ('Send a clarification during work; idle messages wait without starting a model.',
@@ -38,19 +75,19 @@ TOOLS = {
 }
 
 
-def configuration(home, agent, approve_tools=()):
+def configuration(home, agent, approve_tools=(), *, grant_admin=False):
     """Render an explicit local communication grant; never apply configuration."""
     approved = set(approve_tools)
-    if not approved <= {'send_progress', 'send_message'}:
+    if not approved <= {'send_progress', 'send_message', 'send', 'ack', 'reply'}:
         raise BridgeError('Only explicitly selected message tools are eligible for this profile')
-    adapter = Adapter(home, agent)  # validate fixed registered identity without contacting runtime
-    enabled = sorted(approved | {'wait_agent', 'list_agents', 'agent_status', 'operation_receipt'})
+    adapter = Adapter(home, agent, grant_admin=grant_admin)  # validate without contacting runtime
+    enabled = sorted(approved | {'wait_agent', 'list_agents', 'agent_status', 'operation_receipt', 'receive', 'inbox_status', 'grant_list', 'grant_show'} | (GRANT_ADMIN if grant_admin else set()))
     quoted = lambda value: json.dumps(str(value), ensure_ascii=False)
     lines = ['# Review locally before applying; this command changes no configuration.',
              '# Explicit per-tool consent. Runtime shell/approval policies remain separate.',
              '[mcp_servers.csl_bridge]',
              'command = ' + quoted(Path(__file__).resolve().parent / 'csl-bridge-mcp'),
-             'args = [' + ', '.join(map(quoted, ['--home', adapter.home.expanduser().absolute(), '--agent', adapter.agent])) + ']',
+             'args = [' + ', '.join(map(quoted, ['--home', adapter.home.expanduser().absolute(), '--agent', adapter.agent] + (['--grant-admin'] if grant_admin else []))) + ']',
              'required = true', 'startup_timeout_sec = 10', 'tool_timeout_sec = 25',
              'enabled_tools = [' + ', '.join(map(quoted, enabled)) + ']',
              'default_tools_approval_mode = "writes"']
@@ -60,8 +97,9 @@ def configuration(home, agent, approve_tools=()):
 
 
 class Adapter:
-    def __init__(self, home, agent):
+    def __init__(self, home, agent, *, grant_admin=False):
         self.home, self.agent = Path(home), name(agent)
+        self.grant_admin = bool(grant_admin)
         store = Store(self.home)
         try:
             if self.agent not in store.agents():
@@ -72,31 +110,52 @@ class Adapter:
     def catalog(self):
         return [{'name': tool, 'description': description, 'inputSchema': {'type': 'object',
             'properties': fields, 'required': required, 'additionalProperties': False},
-            'annotations': {'readOnlyHint': tool in {'wait_agent', 'list_agents', 'agent_status', 'operation_receipt'},
+            'annotations': {'readOnlyHint': tool in {'wait_agent', 'list_agents', 'agent_status', 'operation_receipt', 'receive', 'inbox_status', 'grant_list', 'grant_show'},
                             'destructiveHint': False}}
-            for tool, (description, fields, required) in TOOLS.items()]
+            for tool, (description, fields, required) in TOOLS.items() if tool not in GRANT_ADMIN or self.grant_admin]
 
     def call(self, tool, arguments):
         if tool not in TOOLS or not isinstance(arguments, dict):
             raise BridgeError('Unknown bridge tool or arguments')
         _, fields, required = TOOLS[tool]
         if not set(required) <= set(arguments) or not set(arguments) <= set(fields):
-            raise BridgeError('Invalid bridge tool fields')
+            raise ToolFieldsError(missing=set(required)-set(arguments), unexpected=set(arguments)-set(fields))
         for key, value in arguments.items():
             schema = fields[key]
             if schema['type'] == 'integer':
                 if type(value) is not int or not schema['minimum'] <= value <= schema['maximum']:
-                    raise BridgeError('Invalid bridge tool bound')
+                    raise ToolFieldsError(invalid=[key])
+            elif schema['type'] == 'array':
+                if not isinstance(value, list) or not 1 <= len(value) <= 3 or any(item not in schema['items']['enum'] for item in value):
+                    raise ToolFieldsError(invalid=[key])
+            elif schema['type'] == 'boolean':
+                if type(value) is not bool:
+                    raise ToolFieldsError(invalid=[key])
             elif schema.get('format') == 'uuid':
-                identifier(value)
+                try:
+                    identifier(value)
+                except BridgeError:
+                    raise ToolFieldsError(invalid=[key]) from None
             elif schema is NAME:
-                name(value)
+                try:
+                    name(value)
+                except BridgeError:
+                    raise ToolFieldsError(invalid=[key]) from None
             elif not isinstance(value, str) or not value.strip() or len(value) > 12000:
-                raise BridgeError('Invalid selected bridge message')
-        if 'message' in arguments and contains_findings(arguments['message']):
+                raise ToolFieldsError(invalid=[key])
+            if 'enum' in schema and value not in schema['enum']:
+                raise ToolFieldsError(invalid=[key])
+        if any(contains_findings(arguments[key]) for key in ('message', 'body') if key in arguments):
             raise BridgeError('Possible secrets detected; select redacted text before sending')
         request_id = arguments.get('id') or str(uuid.uuid4())
-        if tool == 'wait_agent':
+        if tool.startswith('grant_'):
+            data = self.grant_call(tool, arguments)
+            return {'notice': NOTICE, 'bound_agent': self.agent, 'data': data}
+        if tool in ('send', 'receive', 'ack', 'reply', 'inbox_status'):
+            command = {'local_op': 'mail_' + tool, 'agent': self.agent, **arguments}
+            if tool in ('send', 'reply'):
+                command['id'] = request_id
+        elif tool == 'wait_agent':
             command = {'local_op': 'wait', 'agent': self.agent, 'after': arguments.get('after', 0),
                        'timeout': arguments.get('timeout', 20)}
         elif tool == 'send_progress':
@@ -123,7 +182,31 @@ class Adapter:
             # Give the caller its stable ID even if a reply was lost. Do not retry.
             data = {'state': 'uncertain', 'request_id': request_id,
                     'note': 'Inspect receipt/state before retry; no automatic resend was made.'}
+        if tool == 'inbox_status' and data.get('state') == 'rejected' and data.get('reason') == 'invalid_mail_fields':
+            data = {'state': 'rejected', 'reason': 'connector_does_not_accept_inbox_status', 'observed_reason': 'invalid_mail_fields'}
         return {'notice': NOTICE, 'bound_agent': self.agent, 'data': data}
+
+    def grant_call(self, tool, arguments):
+        from csl_bridge_mailbox import grant, inspect_grants, schema, MailRejected
+        if tool in GRANT_ADMIN and not self.grant_admin:
+            return {'state': 'rejected', 'reason': 'owner_admin_consent_required'}
+        store = Store(self.home)
+        try:
+            if tool == 'grant_list':
+                return inspect_grants(store, target=self.agent, after=arguments.get('after', ''), limit=arguments.get('limit', 20))
+            if tool == 'grant_show':
+                return inspect_grants(store, reference=arguments['reference'], target=self.agent)
+            schema(store)
+            rows = store.rows('SELECT target FROM mail_grants WHERE ref=?', (arguments['reference'],))
+            if rows and rows[0]['target'] != self.agent:
+                return {'state': 'rejected', 'reason': 'unknown_or_unavailable_grant'}
+            return grant(store, arguments['reference'], arguments.get('peer'), arguments.get('source'), self.agent,
+                         arguments.get('permissions'), arguments.get('scope'), arguments.get('expires_at'),
+                         revoke=tool == 'grant_revoke', bound_target=self.agent, replace=arguments.get('replace', False))
+        except MailRejected as exc:
+            return {'state': 'rejected', 'reason': exc.reason}
+        finally:
+            store.close()
 
 
 def serve(adapter, input_stream=None, output_stream=None):
@@ -153,12 +236,17 @@ def serve(adapter, input_stream=None, output_stream=None):
                 if set(params) - {'name', 'arguments', '_meta'} or not isinstance(params.get('name'), str):
                     raise BridgeError('Invalid MCP tool request')
                 data = adapter.call(params['name'], params.get('arguments', {}))
-                result = {'content': [{'type': 'text', 'text': encode(data)}], 'isError': False}
+                rejected = params['name'] in MAIL_TOOLS and (data['data'].get('state') in ('rejected', 'undeliverable', 'expired') or
+                           (params['name'] in {'send', 'ack', 'reply'} and data['data'].get('delivery', {}).get('state') in ('rejected', 'undeliverable', 'expired')))
+                result = {'content': [{'type': 'text', 'text': encode(data)}], 'isError': rejected}
             else:
                 respond({'jsonrpc': '2.0', 'id': request_id,
                          'error': {'code': -32601, 'message': 'Unsupported MCP method'}})
                 return
             respond({'jsonrpc': '2.0', 'id': request_id, 'result': result})
+        except ToolFieldsError as exc:
+            respond({'jsonrpc': '2.0', 'id': request_id, 'error': {'code': -32602,
+                     'message': 'Invalid bridge tool fields', 'data': exc.details}})
         except (BridgeError, OSError, ValueError, KeyError, TypeError):
             respond({'jsonrpc': '2.0', 'id': request_id, 'error': {'code': -32602,
                      'message': 'Bridge request rejected; no message/configuration was echoed'}})
@@ -199,9 +287,10 @@ def main():
     parser = argparse.ArgumentParser(description='Optional trusted stdio bridge tools; fixed local agent, no shell/auth/runtime APIs.')
     parser.add_argument('--home', type=Path, required=True)
     parser.add_argument('--agent', required=True)
+    parser.add_argument('--grant-admin', action='store_true', help='Explicit owner-configured local grant-admin capability for this fixed recipient only; never inferred from a message.')
     args = parser.parse_args()
     try:
-        serve(Adapter(args.home, args.agent))
+        serve(Adapter(args.home, args.agent, grant_admin=args.grant_admin))
     except (BridgeError, OSError, ValueError):
         print('Bridge MCP startup failed; check explicit local configuration.', file=sys.stderr)
         return 1

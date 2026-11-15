@@ -19,7 +19,7 @@ def coverage():
     commands["verify-live"] = {"codex": "experimental", "claude": "experimental"}
     commands["migrate"] = {"codex": "experimental", "claude": "not-integrated"}
     commands["backup"] = {"codex": "experimental", "claude": "not-integrated"}
-    commands["bridge"] = {"codex": "experimental", "claude": "not-integrated"}
+    commands["bridge"] = {"codex": "experimental", "claude": "experimental"}
     for name in ("native-cut", "native-clone", "native-sanitize"):
         commands[name]["codex"] = "experimental"
     return {"schema_version": 1, "providers": ["codex", "claude"], "commands": commands,
@@ -54,6 +54,19 @@ def coverage():
                 "commands": ["export", "share", "migrate upload"], "mode": "portable-only",
                 "scope": "explicit recognized orphaned-summary-metadata recovery; exact hidden context not restored"},
             "authentication": "Recipient CLI owns authentication; CSL never copies credentials or selects billing accounts.",
+            "bridge_messaging": {"status": "experimental-development", "message_version": 1,
+                "providers": ["codex", "claude"], "operations": ["send", "receive", "ack", "reply", "inbox-status"],
+                "notification_metadata": "own-endpoint unacknowledged counts and bounded id/from/kind headers only; no wake or acknowledgement",
+                "grant_inspection": "CLI and own-endpoint MCP list/show include descriptive scope, expiry and revocation",
+                "grant_mutation": "local owner CLI; MCP requires explicit owner --grant-admin startup capability, scoped to bound endpoint",
+                "boundary_hook": "Session-bound SessionStart/UserPromptSubmit/PostToolUse/Stop adapter; metadata default, body explicit owner opt-in; no acknowledgement or idle wake",
+                "delivery": "durable local inbox; explicit receive in the existing session",
+                "model_activation": "mail operations never activate; separate owner notify --wake-codex requires recipient-local activate grant and reviewed Codex executable",
+                "executes_work": False,
+                "authority": "recipient-owner registry, separate from inbox admission; none without a matching grant",
+                "identity": "operator registration and authenticated peer binding, not process attestation",
+                "validation": "real reciprocal Codex/Claude CLI mailbox exchange and scoped agent actions; synthetic fault injection around real connectors; hook harness evidence tracked separately in docs/AGENT_COMMUNICATION.md",
+                "legacy_coordination": "Codex only; unchanged"},
             "continuation": "Native file transfer is not a guarantee of model availability, context fit, or universal CLI-version compatibility."}
 
 
