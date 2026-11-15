@@ -45,7 +45,8 @@ def command(args, csl):
                 settings.update(discover(settings['discovery_url']))
                 state.set('settings', settings)
                 options = {'device_id': state.get('device_id'), 'device_label': args.label,
-                           'callback_port': getattr(args, 'callback_port', 0)}
+                           'callback_port': getattr(args, 'callback_port', 0),
+                           'timeout': getattr(args, 'sign_in_timeout', 180)}
                 authorization_file = state.root / 'authorization.json'
                 if getattr(args, 'manual_browser', False):
                     def manual_browser(url):
@@ -149,6 +150,8 @@ def add_commands(subparsers, csl):
     signin.add_argument('--label', default='CSL device')
     signin.add_argument('--kind', choices=['local','environment'], default='local')
     signin.add_argument('--environment-name')
+    signin.add_argument('--sign-in-timeout', type=int, default=180,
+                        help='Seconds to wait for the browser login before giving up (default 180).')
     signin.add_argument('--callback-port', type=port, default=0, help='Loopback port; 0 chooses a free port. Useful with an explicit SSH forward.')
     signin.add_argument('--manual-browser', action='store_true', help='Write the authorization URL to a private state file, never logs; open it in your own system browser.')
     actions.add_parser('status', help='Local cached IDs, byte counts, pending states and last error; never tokens or transcript text.')
