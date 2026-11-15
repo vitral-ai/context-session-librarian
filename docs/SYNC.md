@@ -106,6 +106,43 @@ of looping on an old refresh token. Only one collector/sign-in operation can own
 a state directory at a time; another returns `collector_busy`. Different state
 directories are different installations, not a way to share one device journal.
 
+### Incremental collection and verification
+
+For Codex and Claude JSONL histories, the collector keeps a private derived cache
+under the selected sync state directory. Unchanged files are checked by inventory,
+device/inode, size, nanosecond modification time and change time. They do not
+repeat transcript parsing, view rendering or per-session HTTP calls. This reuses
+the previous acknowledged snapshot; it **does not advance its completeness time**.
+Gemini and Antigravity retain the full provider verification path.
+
+The metadata hint is not an integrity proof. Every five minutes, or when the
+clock goes backwards, cached complete prefixes are fully hashed and incomplete
+suffixes checked for newly completed records. Changed/replaced/truncated files
+are captured and verified before publication. Ordinary same-size/mtime rewrites
+are detected by change time; a change concealing all file metadata is bounded
+by the periodic full check. Source and view hashes still bind the exact complete
+prefix. Changed append prefixes are fully verified; no opaque or serialized SHA
+state is trusted to guess their integrity.
+
+Appending to a JSONL renders only new native records, retaining historical tool
+correlation and acknowledged view positions. A changed historical prefix rebuilds
+the derived view and triggers its normal generation/reset protocol. Sources that
+continue appending can publish a frozen complete prefix; later bytes are collected
+on the next pass, and incomplete final records are never sent.
+
+`watch --interval 60` also checks lightweight source-change hints once a second
+and wakes early for changed/new histories. Its regular deadline includes pass
+duration rather than adding another full sleep afterward. Hints cause normal
+verification, never a completeness claim by themselves. Cold initialization,
+large rewrites, sustained source changes or a slow registry can still exceed an
+interval; the interval is not a universal network-latency guarantee.
+
+The cache contains transcript-derived text, tool names and metadata and may
+therefore contain secrets. Its directory/files use private permissions and it is
+not an encrypted backup. Temporary raw copies are removed after preparation;
+derived view/cache files remain local. Stop watch before deleting `provider-cache`
+to rebuild it; this leaves native histories, credentials and remote sessions intact.
+
 To disable locally, first stop the foreground collector or your user-managed
 service, then run `csl sync sign-out`. This erases local tokens and disables the
 installation; it does not revoke the server session or delete remote transcripts.

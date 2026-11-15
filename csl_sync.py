@@ -82,9 +82,11 @@ def command(args, csl):
                 result = Collector(state, registry, None).register()
                 print(json.dumps({'device_id': state.get('device_id'), 'registered': True}))
                 return
-            collector = Collector(state, registry, Providers())
+            providers = Providers(state.root)
+            collector = Collector(state, registry, providers)
             backoff = 1
             while True:
+                pass_started = time.monotonic()
                 try:
                     result = collector.run(days=None if args.all else args.days, providers=args.providers or PROVIDERS)
                     backoff = 1
@@ -101,7 +103,12 @@ def command(args, csl):
                 if action == 'run':
                     if result['pending']: raise SystemExit(2)
                     return
-                time.sleep(args.interval)
+                deadline = pass_started + args.interval
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0: break
+                    time.sleep(min(1, remaining))
+                    if providers.changed() is True: break
     except SyncError as error:
         if state is not None: state.set('last_error', error.code)
         print(json.dumps({'state': 'stopped', 'error': error.code, 'retryable': error.retryable}), file=sys.stderr)

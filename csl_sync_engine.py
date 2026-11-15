@@ -47,25 +47,40 @@ def safe_id(value):
 
 class Providers:
     """Lazy integration with the separately owned, documented provider interface."""
-    def __init__(self):
+    def __init__(self, state_root=None):
         try:
             import csl_sync_providers
         except ImportError:
             raise SyncError('provider_interface_unavailable') from None
         self.module = csl_sync_providers
+        if state_root is not None:
+            from csl_sync_cache import CachedProviders
+            self.cache = CachedProviders(self.module, state_root)
+        else:
+            self.cache = None
 
     def list_sessions(self, provider):
-        return self.module.list_sessions(provider)
+        return (self.cache or self.module).list_sessions(provider)
 
     def raw_files(self, provider, native_id):
-        return self.module.raw_files(provider, native_id)
+        return (self.cache or self.module).raw_files(provider, native_id)
 
     def view_records(self, provider, native_id, **kwargs):
-        return self.module.view_records(provider, native_id, **kwargs)
+        return (self.cache or self.module).view_records(provider, native_id, **kwargs)
 
     def package_descriptor(self, provider, native_id):
-        function = getattr(self.module, 'package_descriptor', None)
+        function = getattr(self.cache or self.module, 'package_descriptor', None)
         return function(provider, native_id) if function else None
+
+    def unchanged(self, provider, native_id, local):
+        return bool(self.cache and local.get('status') == 'synced' and
+                    self.cache.unchanged(provider, native_id, local.get('verified_cache')))
+
+    def verified_cache(self, provider, native_id):
+        return self.cache.signature(provider, native_id) if self.cache else None
+
+    def changed(self):
+        return bool(self.cache and self.cache.changed())
 
 
 class Collector:
@@ -118,6 +133,9 @@ class Collector:
                 if metadata.get('state') == 'active' and metadata.get('updated_at'):
                     active.append({'provider': provider, 'native_id': native_id, 'last_write_at': metadata['updated_at']})
                 try:
+                    if getattr(self.providers, 'unchanged', lambda *a: False)(provider, native_id, self.state.session(provider, native_id)):
+                        results.append({'provider': provider, 'native_id': safe_id(native_id), 'status': 'synced', 'unchanged': True})
+                        continue
                     self.sync_session(provider, native_id, metadata)
                     results.append({'provider': provider, 'native_id': safe_id(native_id), 'status': 'synced'})
                 except Exception as error:
@@ -345,6 +363,7 @@ class Collector:
                 local['view'].update(position=page['position'], last_seq=page['records'][-1]['seq'])
                 self.state.save_session(provider, native_id, local)
             local.update(status='synced', last_synced_at=now(), last_error=None)
+            local['verified_cache'] = getattr(self.providers, 'verified_cache', lambda *a: None)(provider, native_id)
             self.state.save_session(provider, native_id, local)
         except SyncError:
             self.state.save_session(provider, native_id, local)

@@ -48,12 +48,14 @@ def _safe(path, root):
     return path
 
 
-def _lines(path, max_bytes=None):
+def _lines(path, max_bytes=None, start_offset=0):
     """Fixed opening length; never parse a concurrently growing partial tail."""
     try:
         with path.open('rb') as source:
             left = os.fstat(source.fileno()).st_size
             if max_bytes is not None:left=min(left,max_bytes)
+            if not 0 <= start_offset <= left:raise ProviderError('invalid_view_position')
+            source.seek(start_offset);left-=start_offset
             while left:
                 offset = source.tell()
                 line = source.readline(left)
@@ -161,7 +163,7 @@ def _repository(cwd):
     return {'remote_url': remote, 'branch': git('symbolic-ref', '--short', 'HEAD')}
 
 
-def _metadata(provider, path, root, active_seconds):
+def _metadata(provider, path, root, active_seconds, *, files=None, evidence=None):
     if provider == 'antigravity':
         try:
             with csl_antigravity.snapshot(root,path.stem) as (db,files):
@@ -210,6 +212,7 @@ def _metadata(provider, path, root, active_seconds):
                 if not isinstance(payload, dict):
                     raise ProviderError('invalid_codex_payload')
                 if record.get('type') == 'session_meta':
+                    if evidence is not None and payload.get('history_base'): evidence['external_history_base'] = True
                     sid = sid or payload.get('id') or payload.get('session_id')
                     cwd = payload.get('cwd') or cwd
                     parent = payload.get('forked_from_id') or parent
@@ -245,7 +248,7 @@ def _metadata(provider, path, root, active_seconds):
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',sid):raise ProviderError('invalid_native_id')
     if any(v is not None and not isinstance(v,str) for v in (title,cwd,model,parent)):
         raise ProviderError('invalid_metadata_field')
-    files = _files(provider, path, root)
+    files = _files(provider, path, root) if files is None else files
     modified = max((Path(f['path']).stat().st_mtime for f in files), default=path.stat().st_mtime)
     state = 'archived' if 'archived_sessions' in path.relative_to(root).parts else (
         'active' if datetime.now(timezone.utc).timestamp() - modified <= active_seconds else 'idle')
@@ -386,9 +389,9 @@ def _blocks(provider, record):
     return role, blocks
 
 
-def _view(provider, path, text_limit, max_bytes=None):
-    records = _gemini(path,max_bytes)[1] if provider == 'gemini' else _lines(path,max_bytes)
-    tools={}
+def _view(provider, path, text_limit, max_bytes=None, *, start_offset=0, tools=None):
+    records = _gemini(path,max_bytes)[1] if provider == 'gemini' else _lines(path,max_bytes,start_offset)
+    tools={} if tools is None else tools
     for record_index, (record, offset) in enumerate(records):
         role, blocks = _blocks(provider, record)
         if role is None:
@@ -484,9 +487,13 @@ def package_descriptor(provider, native_id, *, home=None):
         return {'available':False,'reason':'no_conversation','descriptor_version':1,'manifest':None,'members':[]}
     if provider=='codex' and any(r.get('type')=='session_meta' and isinstance(r.get('payload'),dict) and r['payload'].get('history_base') for r,_ in _lines(path,files[0]['complete_length'])):
         return {'available':False,'reason':'external_history_base_not_packaged','descriptor_version':1,'manifest':None,'members':[]}
+    return _package_mapping(provider, native_id, path.suffix, meta, files)
+
+
+def _package_mapping(provider, native_id, suffix, meta, files):
     members=[];entries=[]
     for f in files:
-        member=f'sessions/{native_id}/'+('main'+path.suffix if f['file_key']=='main' else 'files/'+f['relative_path'])
+        member=f'sessions/{native_id}/'+('main'+suffix if f['file_key']=='main' else 'files/'+f['relative_path'])
         members.append({'file_key':f['file_key'],'member':member})
         entries.append({'file_key':f['file_key'],'file':member,'relative_path':f['relative_path'],'role':f['role']})
     entry={'id':native_id,'provider':provider,'title':meta['title'],'cwd':meta['cwd'],'primary':members[0]['member'],'files':entries}
