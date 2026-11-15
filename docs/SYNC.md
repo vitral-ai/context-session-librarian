@@ -130,6 +130,14 @@ the derived view and triggers its normal generation/reset protocol. Sources that
 continue appending can publish a frozen complete prefix; later bytes are collected
 on the next pass, and incomplete final records are never sent.
 
+Codex history-base graphs include their ancestor files in the snapshot and its
+view binding. Candidate paths in active/archive storage, including compressed
+siblings, invalidate the cache when added, removed or changed. Periodic checks
+hash every graph input, not only the leaf or inherited byte prefix. A changed
+graph is resolved and rendered again through the bounded native history adapter;
+missing dependencies or missing view anchors remain errors. Single-file JSONL
+appends keep their incremental rendering path.
+
 `watch --interval 60` also checks lightweight source-change hints once a second
 and wakes early for changed/new histories. Its regular deadline includes pass
 duration rather than adding another full sleep afterward. Hints cause normal
@@ -230,8 +238,8 @@ not establish it.
 The repository tests use synthetic providers and in-test HTTP peers; no real
 accounts or model calls. Actual registry/identity deployments and remote-environment
 acceptance need their own checks. Provider-native fidelity has separate, bounded
-evidence: Gemini native loading remains unverified; Codex sessions depending on
-an external history base cannot produce a self-contained package. See
+evidence: Gemini native loading remains unverified; Codex supports bounded raw
+history-base graphs while missing or unsupported dependencies are rejected. See
 [provider coverage](PROVIDER_MATRIX.md) and [Antigravity evidence](ANTIGRAVITY.md).
 Raw sync success does not prove model recall. Public v0.3.0 cannot import native
 package v3; use a client containing the v3 importer. Core uses only Python's standard

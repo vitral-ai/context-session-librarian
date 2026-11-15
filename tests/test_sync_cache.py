@@ -129,13 +129,14 @@ class CacheTests(unittest.TestCase):
         for path in self.providers.cache.root.rglob('*'):
             if path.is_file(): self.assertEqual(path.stat().st_mode & 0o077, 0)
 
-    def test_package_descriptor_matches_uncached_provider_and_external_base_refusal(self):
+    def test_package_descriptor_matches_uncached_provider_and_rejects_invalid_base(self):
         self.run_pass()
         self.assertEqual(self.providers.package_descriptor('codex', self.sid), native.package_descriptor('codex', self.sid))
         self.rows[0]['payload']['history_base'] = {'thread_id': 'fabricated-external-base'}
-        self.write(); self.run_pass()
-        self.assertEqual(self.providers.package_descriptor('codex', self.sid), native.package_descriptor('codex', self.sid))
-        self.assertFalse(self.providers.package_descriptor('codex', self.sid)['available'])
+        self.write()
+        self.assertEqual(self.run_pass()['pending'],1)
+        with self.assertRaises(SyncError): self.providers.list_sessions('codex')
+        self.assertFalse(native.package_descriptor('codex',self.sid)['available'])
 
     def test_claude_companion_changes_invalidate_cache(self):
         home = self.root / 'claude'

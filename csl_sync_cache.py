@@ -36,8 +36,32 @@ class CachedProviders:
         self.root = private_directory(Path(state_root) / 'provider-cache')
         self.entries, self.hashes, self.reused, self.listed = {}, {}, set(), {}
 
-    def sources(self, provider, path, home):
+    def sources(self, provider, path, home, entry=None):
         paths = [path]
+        if provider == 'codex':
+            history = self.module.csl_codex_history
+            try:
+                # Cached graph topology is a hint only: changed inputs force
+                # fresh lineage resolution before freezing or rendering.
+                rollouts = entry.get('graph_rollouts') if entry else None
+                if rollouts is None:
+                    rollouts = ([n.rollout_id for n in history.lineage(home, path)[:-1]]
+                                if history.has_base(path) else [])
+                for rollout in rollouts:
+                    candidates = []
+                    for tree in ('sessions', 'archived_sessions'):
+                        for candidate in (home/tree).rglob('rollout-*.jsonl*'):
+                            ids = history.identity(candidate)
+                            if ids and ids[1] == rollout:
+                                history._safe(candidate, home)
+                                candidates.append(candidate)
+                    if not candidates: raise SyncError('history_base_missing')
+                    # Include ignored compressed siblings and alternate copies:
+                    # their arrival/change can alter native candidate selection.
+                    paths.extend(sorted(candidates))
+            except history.HistoryError as error:
+                raise SyncError(str(error)) from None
+            paths = list(dict.fromkeys(paths))
         if provider == 'claude':
             directory = path.with_suffix('')
             if directory.is_dir():
@@ -67,10 +91,10 @@ class CachedProviders:
             directory = private_directory(self.root / key)
             info_path = directory / 'entry.json'
             entry = read_private_json(info_path)
-            paths = self.sources(provider, path, home)
+            paths = self.sources(provider, path, home, entry)
             stamp = self.fingerprint(paths, home)
             elapsed = self.clock() - entry['checked_at'] if entry else -1
-            reusable = bool(entry and entry.get('schema') == 1 and entry.get('index_valid', True))
+            reusable = bool(entry and entry.get('schema') == 2 and entry.get('index_valid', True))
             reuse = bool(reusable and entry.get('fingerprint') == stamp and
                          0 <= elapsed < self.verify_seconds)
             if not reuse and reusable and entry.get('fingerprint') == stamp:
@@ -82,6 +106,7 @@ class CachedProviders:
             if not reuse:
                 entry = self.prepare(provider, path, home, paths, stamp, directory, entry)
                 private_json(info_path, entry)
+            paths = [home / row[0] for row in entry['fingerprint']]
             sid = entry['metadata']['native_id']
             if sid in seen: raise SyncError('ambiguous_native_id')
             seen.add(sid)
@@ -107,7 +132,7 @@ class CachedProviders:
             for (p, _), (_, entry, paths, root) in self.entries.items():
                 if p != provider or root != home: continue
                 try:
-                    actual = self.sources(provider, paths[0], home)
+                    actual = self.sources(provider, paths[0], home, entry)
                     if self.fingerprint(actual, home) != entry['fingerprint']: return True
                 except (OSError, SyncError, ValueError): return True
         return False
@@ -122,7 +147,7 @@ class CachedProviders:
         for path in self.root.glob('*/entry.json'):
             entry = read_private_json(path)
             provider = entry.get('metadata', {}).get('provider') if entry else None
-            if provider not in self.listed or not entry.get('inventory'): continue
+            if provider not in self.listed or not entry.get('inventory') or entry.get('schema') != 2: continue
             home = self.listed[provider][0]
             primary = Path(entry['inventory'][0]['path'])
             if not primary.is_relative_to(home) or not primary.is_file(): continue
@@ -131,6 +156,13 @@ class CachedProviders:
 
     def verify_entry(self, entry):
         try:
+            if entry.get('graph_rollouts'):
+                for item in entry['graph_inputs']:
+                    path = Path(item['path'])
+                    if (path.is_symlink() or path.stat().st_size != item['size'] or
+                            hash_prefix(path, item['size']) != item['sha256']):
+                        return False
+                return True
             for item in entry['inventory']:
                 path = Path(item['path'])
                 if path.is_symlink() or path.stat().st_size != item['size']:
@@ -146,10 +178,15 @@ class CachedProviders:
         except OSError: return False
 
     def prepare(self, provider, path, home, paths, stamp, directory, previous):
+        # Re-resolve references after any dependency hint changed. A base may
+        # introduce another ancestor while the leaf itself remains untouched.
+        paths = self.sources(provider, path, home)
+        stamp = self.fingerprint(paths, home)
         stage = directory / 'staging'
         shutil.rmtree(stage, ignore_errors=True)
         private_directory(stage)
         try:
+            inputs = []
             for source in paths:
                 target = stage / source.relative_to(home)
                 private_directory(target.parent)
@@ -164,7 +201,10 @@ class CachedProviders:
                         if not chunk: raise SyncError('source_changed')
                         output.write(chunk); h.update(chunk); left -= len(chunk)
                 if hash_prefix(source, size) != h.hexdigest(): raise SyncError('source_changed')
+                inputs.append({'path': str(source), 'size': size, 'sha256': h.hexdigest()})
             frozen = stage / path.relative_to(home)
+            nodes = (self.module.csl_codex_history.lineage(stage, frozen)
+                     if provider == 'codex' and self.module.csl_codex_history.has_base(frozen) else None)
             inventory = self.module._files(provider, frozen, stage)
             evidence = {}
             metadata = self.module._metadata(provider, frozen, stage, 300, files=inventory, evidence=evidence)
@@ -172,18 +212,23 @@ class CachedProviders:
             # in the engine. Growth after this prefix is deferred to next pass.
             for item in inventory:
                 item['path'] = str(home / Path(item['path']).relative_to(stage))
-            has_conversation = self.index_view(provider, frozen, inventory[0], directory, previous)
-            reason = 'external_history_base_not_packaged' if evidence.get('external_history_base') else None if has_conversation else 'no_conversation'
+            binding = hashlib.sha256(encoded([{'file_key': f['file_key'], 'length': f['complete_length'],
+                                               'sha256': f['sha256']} for f in inventory])).hexdigest()
+            has_conversation = self.index_view(provider, frozen, inventory[0], directory, previous, nodes=nodes, binding=binding)
+            reason = None if has_conversation else 'no_conversation'
             package = ({'available': False, 'reason': reason, 'descriptor_version': 1, 'manifest': None, 'members': []}
-                       if reason else self.module._package_mapping(provider, metadata['native_id'], frozen.suffix, metadata, inventory))
-            return {'schema': 1, 'metadata': metadata, 'inventory': inventory, 'package': package,
+                       if reason else self.module._package_mapping(provider, metadata['native_id'], frozen.suffix, metadata, inventory, nodes=nodes))
+            return {'schema': 2, 'metadata': metadata, 'inventory': inventory, 'package': package,
                     'index_valid': True,
+                    'view_binding': binding,
+                    'graph_rollouts': [n.rollout_id for n in nodes[:-1]] if nodes else [],
+                    'graph_inputs': inputs if nodes else [],
                     'fingerprint': stamp, 'checked_at': self.clock(),
                     'content_signature': hashlib.sha256(encoded(inventory)).hexdigest()}
         finally:
             shutil.rmtree(stage, ignore_errors=True)
 
-    def index_view(self, provider, path, primary, directory, previous):
+    def index_view(self, provider, path, primary, directory, previous, *, nodes=None, binding=None):
         db = sqlite3.connect(directory / 'view.sqlite')
         (directory / 'view.sqlite').chmod(0o600)
         try:
@@ -191,7 +236,7 @@ class CachedProviders:
             db.execute('CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY, value TEXT)')
             saved = db.execute('SELECT value FROM meta WHERE id=1').fetchone()
             saved = json.loads(saved[0]) if saved else None
-            append = bool(saved and saved['length'] <= primary['complete_length'] and
+            append = bool(not nodes and saved and saved['length'] <= primary['complete_length'] and
                           hash_prefix(path, saved['length']) == saved['sha256'])
             with db:
                 if not append:
@@ -206,15 +251,17 @@ class CachedProviders:
                 else: h = h.copy()
                 seq, tools = saved['seq'], saved['tools']
                 has_conversation = saved.get('has_conversation', False)
-                for event in self.module._view(provider, path, 16000, primary['complete_length'],
-                                               start_offset=saved['length'], tools=tools):
+                events = (self.module._codex_lineage_events(nodes, 16000) if nodes else
+                          self.module._view(provider, path, 16000, primary['complete_length'],
+                                            start_offset=saved['length'], tools=tools))
+                for event in events:
                     seq += 1
                     has_conversation = has_conversation or event['kind'] in ('text','tool_call','tool_result','image','document')
                     body = encoded({'seq': seq, **event})
                     h.update(body + b'\n')
                     db.execute('INSERT INTO records VALUES (?,?,?)', (seq, body.decode(), h.hexdigest()))
                 value = {'length': primary['complete_length'], 'sha256': primary['sha256'], 'seq': seq, 'tools': tools,
-                         'has_conversation': has_conversation}
+                         'has_conversation': has_conversation, 'binding': binding}
                 db.execute('INSERT OR REPLACE INTO meta VALUES (1,?)', (json.dumps(value),))
             self.hashes[str(directory)] = h.copy()
             return has_conversation
@@ -232,7 +279,7 @@ class CachedProviders:
         found = self.entries.get((provider, native_id))
         if not found: return self.module.raw_files(provider, native_id)
         _, entry, paths, home = found
-        actual = self.sources(provider, paths[0], home)
+        actual = self.sources(provider, paths[0], home, entry)
         if [p.relative_to(home) for p in actual] != [p.relative_to(home) for p in paths]:
             raise SyncError('source_changed')
         for item in entry['inventory']:
@@ -258,7 +305,8 @@ class CachedProviders:
         db = sqlite3.connect(directory / 'view.sqlite')
         try:
             saved = db.execute('SELECT value FROM meta WHERE id=1').fetchone()
-            if not saved or json.loads(saved[0])['sha256'] != entry['inventory'][0]['sha256']:
+            if (not saved or json.loads(saved[0])['sha256'] != entry['inventory'][0]['sha256'] or
+                    json.loads(saved[0]).get('binding') != entry.get('view_binding')):
                 entry['checked_at'] = 0
                 entry['index_valid'] = False
                 private_json(directory / 'entry.json', entry)
@@ -273,9 +321,13 @@ class CachedProviders:
             if page: digest = page[-1][2]
             count = db.execute('SELECT max(seq) FROM records').fetchone()[0] or 0
             primary = entry['inventory'][0]
-            return {'records': records, 'position': {'version': 1, 'provider': provider, 'native_id': native_id,
+            result = {'records': records, 'position': {'version': 1, 'provider': provider, 'native_id': native_id,
                     'next_seq': end, 'prefix_sha256': digest, 'text_limit': text_limit},
                     'reset_required': reset, 'complete': not reset and end > count,
                     'reason': 'view_prefix_changed' if reset else None,
                     'source_file': {'file_key': primary['file_key'], 'length': primary['complete_length'], 'sha256': primary['sha256']}}
+            if entry.get('graph_rollouts'):
+                result['source_files'] = [{'file_key': f['file_key'], 'length': f['complete_length'],
+                                           'sha256': f['sha256']} for f in entry['inventory']]
+            return result
         finally: db.close()
