@@ -2,9 +2,15 @@
 
 ## Unreleased
 
+## 0.4.1 — 2026-11-15
+
 - Bind sync snapshot IDs to the complete metadata/inventory/view/package request,
   so metadata-only changes cannot reuse a registry snapshot identity. Canonicalize
   JSON requests for stable replay after lost responses or process restart.
+
+This patch does not expand provider or transport coverage. Mailbox and raw sync
+remain experimental; raw sync uploads selected transcript bytes, including
+secrets, unchanged. Existing tags and historical release evidence are unchanged.
 
 ## 0.4.0 — 2026-11-15
 
