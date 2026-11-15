@@ -17,6 +17,14 @@
   Gemini is specified only; arbitrary idle Claude activation is not implemented.
 - Add an isolated full synthetic test runner with a tested native-version floor;
   actual native hook/queue gates use fabricated loopback provider responses.
+- Add an explicit, configurable raw session collector: browser PKCE, private
+  rotating credentials, device registration, local scope/status, one-pass and
+  foreground sync. No registry defaults or automatic services are installed.
+- Preserve raw snapshots with resumable byte ranges, stable revisions, prefix
+  hashes, view generations and restart checkpoints. Provider parsing remains in
+  the separately owned sync-provider interface.
+- Add synthetic HTTP, credential, crash/recovery and privacy tests. Real identity,
+  registry, native resume and remote-environment validation remain separate.
 
 ## 0.3.0 — 2026-11-14
 

@@ -10,10 +10,11 @@ CSL supports **native Codex -> Codex and Claude Code -> Claude Code handoffs**.
 Explicit experimental conversion in both directions is integrated through
 canonical v2 for text, references, completed tools, embedded images and PDFs. See
 [conversion and continuity](CONVERSION.md) for the exact profile and commands.
-"Provider" in CSL means the transcript/CLI adapter (`codex` or `claude`), not
+"Provider" in CSL means the transcript/CLI adapter (`codex`, `claude`, or the
+experimental local `gemini` adapter), not
 the model vendor, API endpoint, subscription or billing account.
 
-This matrix describes shipped CSL commands, not capabilities that exist only
+This matrix describes commands in this checkout, not capabilities that exist only
 in a separate portability experiment. `supported` is bounded by the limits below;
 it does not mean every historical transcript or future CLI version is compatible.
 `experimental` depends on evolving native formats. `not-integrated` is unavailable
@@ -21,46 +22,54 @@ in this public tool, even if a related laboratory experiment has passed.
 
 ## Command Matrix
 
+The development-only `sync` command publishes through the shared provider
+interface for Codex, Claude Code and Gemini. Its protocol client is tested with
+synthetic providers; actual provider integration and native resume evidence are
+tracked separately. This branch retains the existing two-column command registry;
+the provider-adapter branch owns Gemini's full command coverage. See [sync](SYNC.md).
+
 The table is mirrored by `csl capabilities` / `csl capabilities --json`.
 Tests require every registered command to appear and this table to match the
 registry. Update implementation, tests and this document in the same change.
 
-| Command | Codex | Claude Code |
-| --- | --- | --- |
-| `annotate` | supported | not-integrated |
-| `backup` | experimental | not-integrated |
-| `bridge` | experimental | experimental |
-| `capabilities` | supported | supported |
-| `cockpit` | supported | not-integrated |
-| `convert` | experimental | experimental |
-| `cut` | supported | not-integrated |
-| `doctor` | supported | supported |
-| `export` | supported | supported |
-| `find-work` | supported | not-integrated |
-| `import` | supported | supported |
-| `inbox` | supported | supported |
-| `index` | supported | not-integrated |
-| `migrate` | experimental | not-integrated |
-| `native-clone` | experimental | not-integrated |
-| `native-cut` | experimental | not-integrated |
-| `native-sanitize` | experimental | not-integrated |
-| `patches` | supported | not-integrated |
-| `pinpoint` | supported | not-integrated |
-| `queue` | supported | not-integrated |
-| `recall` | supported | not-integrated |
-| `receive` | supported | supported |
-| `recent` | supported | not-integrated |
-| `related` | supported | not-integrated |
-| `search` | supported | not-integrated |
-| `sessions` | supported | supported |
-| `share` | supported | supported |
-| `show` | supported | not-integrated |
-| `stats` | supported | not-integrated |
-| `summarize` | supported | not-integrated |
-| `team` | supported | supported |
-| `timeline` | supported | not-integrated |
-| `verify-live` | experimental | experimental |
-| `why` | supported | not-integrated |
+| Command | Codex | Claude Code | Gemini CLI |
+| --- | --- | --- | --- |
+| `annotate` | supported | not-integrated | not-integrated |
+| `backup` | experimental | not-integrated | not-integrated |
+| `bridge` | experimental | experimental | not-integrated |
+| `capabilities` | supported | supported | not-integrated |
+| `cockpit` | supported | not-integrated | not-integrated |
+| `convert` | experimental | experimental | not-integrated |
+| `cut` | supported | not-integrated | not-integrated |
+| `doctor` | supported | supported | not-integrated |
+| `export` | supported | supported | experimental |
+| `find-work` | supported | not-integrated | not-integrated |
+| `import` | supported | supported | experimental |
+| `inbox` | supported | supported | not-integrated |
+| `index` | supported | not-integrated | not-integrated |
+| `migrate` | experimental | not-integrated | not-integrated |
+| `native-clone` | experimental | not-integrated | not-integrated |
+| `native-cut` | experimental | not-integrated | not-integrated |
+| `native-sanitize` | experimental | not-integrated | not-integrated |
+| `patches` | supported | not-integrated | not-integrated |
+| `pinpoint` | supported | not-integrated | not-integrated |
+| `providers` | experimental | experimental | experimental |
+| `queue` | supported | not-integrated | not-integrated |
+| `recall` | supported | not-integrated | not-integrated |
+| `receive` | supported | supported | not-integrated |
+| `recent` | supported | not-integrated | not-integrated |
+| `related` | supported | not-integrated | not-integrated |
+| `search` | supported | not-integrated | not-integrated |
+| `sessions` | supported | supported | experimental |
+| `share` | supported | supported | not-integrated |
+| `show` | supported | not-integrated | not-integrated |
+| `stats` | supported | not-integrated | not-integrated |
+| `summarize` | supported | not-integrated | not-integrated |
+| `sync` | experimental | experimental | experimental |
+| `team` | supported | supported | not-integrated |
+| `timeline` | supported | not-integrated | not-integrated |
+| `verify-live` | experimental | experimental | not-integrated |
+| `why` | supported | not-integrated | not-integrated |
 
 `convert` is an experimental, fail-closed adapter rather than a universal format
 translator. `doctor` reports structural/static/native evidence separately and
@@ -271,3 +280,19 @@ personal CLI history with synthetic sessions.
 Native behavior references: [Claude session management](https://code.claude.com/docs/en/sessions)
 and [Claude CLI flags](https://code.claude.com/docs/en/cli-reference). Local CLI
 `--help` is authoritative for the installed version's argument set.
+
+
+## Provider reads and native-file packages — development
+
+`csl providers list|files|view|package --provider codex|claude|gemini` exposes the
+local collector interface in [SYNC_PROVIDERS.md](SYNC_PROVIDERS.md). Claude and
+Gemini session listing includes the shared metadata fields; primary views include
+text, correlated tool blocks and raw offsets. Subagents are preserved as raw
+companions rather than merged into an invented chronology.
+
+Native-file package v3 preserves raw byte prefixes and companions. New CSL can
+inspect/import it; published v0.3.0 cannot. Claude raw export includes its sibling
+session directory when present. Gemini export is explicit `--provider gemini
+--raw`; portable Gemini conversion and sharing are not integrated. Gemini native
+loader acceptance is not established merely by file installation. No network,
+credentials, model calls, or Vitral dependency exist in the provider layer.
