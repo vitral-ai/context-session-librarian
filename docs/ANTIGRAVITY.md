@@ -85,9 +85,39 @@ are **not byte-identical**.
 
 This proves bounded native loading/request reconstruction, not model recall.
 Endpoint responses and API keys were synthetic; no commercial model was called.
-Authenticated commercial-model continuation was not verified in this profile.
+That automated fixture remains distinct from the authenticated check below.
 Compaction-rich/subagent sessions, lazy
 auxiliary reads, large DBs and cross-platform restoration remain unverified.
+
+### Authenticated owner round trip (2026-11-15)
+
+A separate manual check used CLI 1.5.9 with an existing sign-in and requested
+`gemini-3.8-flash-low`. Two short real model turns were made. The first recorded
+a random verification tag and a port. CSL listed, viewed, exported and imported
+that native session with a new UUID in another disposable home. The resumed
+model returned both earlier values correctly although neither was in the new
+question. Source-file hashes stayed unchanged.
+
+The second home referenced the same desktop keyring namespace; no credential
+bytes were copied into a package, repository or report. Authentication remains
+the user's responsibility, separate from the history package. This was a
+same-owner text-only check, not cross-account portability or universal recall.
+
+The real source used the same seven native tables and user/assistant step types
+as the localhost fixture. A later resumed turn also recorded a native system
+step (101), retained as an opaque notice in the view. No extra history-parent
+dependency was observed for this example. Completed CLI runs checkpointed their
+WAL; a loaded idle native session exposed an empty WAL, which CSL inventoried
+alongside the DB. Nonempty committed-WAL coverage remains automated fixture
+evidence, not a claim about that idle-session observation.
+
+An additional restored copy loaded the real archive with network egress disabled
+at the OS level and the desktop keyring hidden. Its request to a localhost
+fixture contained the earlier tag and port without contacting Google. Thus
+these basic historical messages were available from local files, not only an
+opaque server identifier. This does not prove that authenticated mode never
+consults a backend for history or that all attachments/opaque state are local.
+Online authentication and real model generation still require external services.
 
 ```bash
 python3 -m unittest discover -s tests -p test_antigravity.py -v

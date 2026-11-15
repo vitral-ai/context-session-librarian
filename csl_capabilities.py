@@ -37,7 +37,7 @@ def coverage():
                                "operations":["list_sessions","raw_files","view_records","package_descriptor"],
                                "network":False,"model_calls":False,"native_package_version":3,
                                "gemini_native_resume":"format-tested; native loader and continuation unverified",
-                               "antigravity_native_resume":"CLI 1.5.9; synthetic localhost endpoint, not live model recall"},
+                               "antigravity_native_resume":"CLI 1.5.9; basic authenticated owner recall and isolated localhost reconstruction verified; not universal"},
             "source_lookup": {"default": "auto", "commands": ["export", "share", "convert", "doctor"],
                               "cross_cli_ambiguity": "require --provider codex or --provider claude",
                               "within_cli_ambiguity": "require a more specific UUID or file path"},

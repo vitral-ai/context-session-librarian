@@ -16,9 +16,9 @@ in this public tool, even if a related laboratory experiment has passed.
 
 ## Command Matrix
 
-Antigravity CLI is a distinct experimental SQLite/protobuf provider. Its bounded
-loader evidence uses CLI 1.5.9 with a localhost fixture, not commercial model
-recall or authenticated Google access. See [scope and limitations](ANTIGRAVITY.md).
+Antigravity CLI is a distinct experimental SQLite/protobuf provider. CLI 1.5.9
+has localhost reconstruction evidence and a bounded authenticated owner recall
+check; broader profiles remain unverified. See [scope and limitations](ANTIGRAVITY.md).
 
 The table is mirrored by `csl capabilities` / `csl capabilities --json`.
 Tests require every registered command to appear and this table to match the
