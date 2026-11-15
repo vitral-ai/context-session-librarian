@@ -282,6 +282,11 @@ class CachedProviders:
         actual = self.sources(provider, paths[0], home, entry)
         if [p.relative_to(home) for p in actual] != [p.relative_to(home) for p in paths]:
             raise SyncError('source_changed')
+        if entry.get('graph_rollouts'):
+            # The leaf may append beyond its frozen prefix, but ancestry or
+            # candidate changes require re-resolution, even outside a cutoff.
+            if self.fingerprint(actual, home)[1:] != entry['fingerprint'][1:]:
+                raise SyncError('source_changed')
         for item in entry['inventory']:
             if item['mode'] == 'rewrite' and Path(item['path']).stat().st_size != item['complete_length']:
                 raise SyncError('source_changed')

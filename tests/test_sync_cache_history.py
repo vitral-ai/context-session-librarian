@@ -113,3 +113,15 @@ class HistoryCacheTests(unittest.TestCase):
         self.assertEqual(self.local()['view']['generation'],generation)
         self.base.unlink()
         self.assertEqual(self.run_pass()['sessions'][0]['error'],'history_base_missing')
+
+    def test_ancestor_change_after_render_is_fenced_before_publication(self):
+        self.run_pass()
+        local=self.local();local['status']='error';self.state.save_session('codex',self.sid,local)
+        check=self.collector.check_sources
+        def changing(files):
+            check(files)
+            if len(files)>1:
+                self.base.write_bytes(self.base.read_bytes().replace(b'BASE-ANSWER',b'NEXT-ANSWER'))
+        with patch.object(self.collector,'check_sources',side_effect=changing):
+            self.assertGreater(self.run_pass()['pending'],0)
+        self.assertEqual(self.local()['last_error'],'source_changed')
