@@ -72,6 +72,7 @@ class FakeProvider:
 class Peer:
     def __init__(self):
         self.sessions={};self.files={};self.views={};self.writes=[];self.calls=[]
+        self.snapshots={};self.operations={};self.upload_requests=[];self.drop_metadata_once=False
         self.error=None;self.redirect_url=None;self.drop_once=False;self.drop_view_once=False;self.first_chunk=None;self.release=None
         peer=self
         class Handler(BaseHTTPRequestHandler):
@@ -96,7 +97,14 @@ class Peer:
                 if path.startswith('/devices/'):return self.answer(200,{'registered':True})
                 parts=path.strip('/').split('/');key='/'.join(parts[:3])
                 if len(parts)==3 and self.command=='PUT':
-                    body=json.loads(raw);peer.sessions[key]=body
+                    body=json.loads(raw)
+                    snapshot_key=(key,body['snapshot_id'])
+                    fingerprint=json.dumps(body,sort_keys=True,separators=(',',':'))
+                    if snapshot_key in peer.snapshots and peer.snapshots[snapshot_key]!=fingerprint:
+                        return self.fail(409,'idempotency_conflict')
+                    peer.snapshots[snapshot_key]=fingerprint;peer.sessions[key]=body
+                    if peer.drop_metadata_once:
+                        peer.drop_metadata_once=False;self.connection.shutdown(socket.SHUT_RDWR);self.connection.close();return
                     return self.answer(200,{'id':'opaque-session'})
                 if len(parts)==4 and parts[-1]=='files':
                     items=[{'file_key':f,'revision':r,'length':len(data),'sha256':hashlib.sha256(data).hexdigest()}
@@ -107,6 +115,11 @@ class Peer:
                     f=parts[-2];rev=query['revision'][0];filekey=(key,f,rev);data=peer.files.setdefault(filekey,bytearray())
                     start=int(self.headers['X-Start']);end=int(self.headers['X-End'])
                     if end-start!=len(raw) or self.headers['X-Content-SHA256']!=hashlib.sha256(raw).hexdigest():return self.fail(422,'invalid_input')
+                    operation=(key,f,rev,query['mode'][0],start,end,self.headers.get('X-Prefix-SHA256',''),self.headers['X-Content-SHA256'])
+                    idem=self.headers['Idempotency-Key']
+                    peer.upload_requests.append((idem,operation))
+                    if idem in peer.operations and peer.operations[idem]!=operation:return self.fail(409,'idempotency_conflict')
+                    peer.operations[idem]=operation
                     if start and self.headers.get('X-Prefix-SHA256')!=hashlib.sha256(data[:start]).hexdigest():return self.fail(409,'prefix_mismatch')
                     if start==len(data):data.extend(raw);peer.writes.append((filekey,start,end))
                     elif not (end<=len(data) and data[start:end]==raw):return self.fail(409,'revision_conflict')

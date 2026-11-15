@@ -84,6 +84,9 @@ this costs disk space roughly equal to the selected session's raw set. Interrupt
 copies remain private and are cleaned at the next exclusively locked pass.
 
 Chunks are at most 8 MiB, with prefix/content hashes and stable idempotency keys.
+Chunk identities include mode, range and hashes. Metadata snapshots separately
+bind the entire input, including activity state and other metadata: a metadata-only
+change receives a new snapshot ID without forcing a new raw-file revision.
 Registry file inventories are queried before resuming. Rewritten files receive
 new revisions; changed view prefixes receive new generations. View records retain
 provider ordering and raw offsets; the provider's opaque page position is saved

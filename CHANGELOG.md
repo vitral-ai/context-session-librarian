@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bind sync snapshot IDs to the complete metadata/inventory/view/package request,
+  so metadata-only changes cannot reuse a registry snapshot identity. Canonicalize
+  JSON requests for stable replay after lost responses or process restart.
+
 - Avoid repeated parsing, hashing, view rendering and per-session requests for
   unchanged Codex/Claude sync inputs. Add private incremental views, periodic full
   prefix verification and early foreground wakeup for changed histories, while

@@ -91,7 +91,10 @@ class Registry:
         if key:
             supplied['Idempotency-Key'] = key
         if body is not None:
-            binary = json.dumps(body, separators=(',', ':'), ensure_ascii=False).encode()
+            # Match content-addressed request identities even when nested dicts
+            # were reconstructed in another order after a restart. Package JSON
+            # is stored as RawMessage by compatible registries.
+            binary = json.dumps(body, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
             supplied['Content-Type'] = 'application/json'
         elif binary is not None:
             supplied['Content-Type'] = 'application/octet-stream'

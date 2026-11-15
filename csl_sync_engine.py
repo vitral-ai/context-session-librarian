@@ -327,16 +327,20 @@ class Collector:
                 local.setdefault('package_created_at', now())
                 package = {**package, 'manifest': {**package['manifest'], 'created_at': local['package_created_at']}}
             snapshot = {'files': planned, 'view': {'generation': local['view']['generation'], 'last_seq': last_seq}, 'package': package}
-            snapshot_id = str(uuid.uuid5(uuid.NAMESPACE_URL, self.state.get('device_id') + '/' + provider + '/' + native_id + '/' + digest(snapshot)))
-            local.update(snapshot_id=snapshot_id, status='syncing')
-            self.state.save_session(provider, native_id, local)  # Revision/generation fixed before the first remote write.
             path = '/sessions/' + segment(provider) + '/' + segment(native_id)
             body = {k: metadata.get(k) for k in ['title','cwd','repository','created_at','updated_at','model','record_count','byte_count','parent','origin','state']}
             captured_bytes = sum(f['complete_length'] for f in files)
             if body['byte_count'] != captured_bytes:
                 raise SyncError('source_changed')  # Ask the provider for a fresh consistent inventory next pass.
             body['byte_count'] = captured_bytes
-            body.update(snapshot, device_id=self.state.get('device_id'), snapshot_id=snapshot_id)
+            body.update(snapshot, device_id=self.state.get('device_id'))
+            # The registry binds snapshot_id to the WHOLE input, not just files
+            # and views. Version the identity so legacy inventory-only IDs cannot
+            # remain poisoned after a metadata-only transition or lost response.
+            snapshot_id = str(uuid.uuid5(uuid.NAMESPACE_URL, 'csl-sync-snapshot-v2' + path + '/' + digest(body)))
+            body['snapshot_id'] = snapshot_id
+            local.update(snapshot_id=snapshot_id, status='syncing')
+            self.state.save_session(provider, native_id, local)  # Fixed before the first remote write.
             self.registry.call('PUT', path, body=body, key=digest(body))
             remote_files, cursor = {}, None
             for _ in range(10000):
