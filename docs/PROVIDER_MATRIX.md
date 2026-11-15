@@ -283,7 +283,7 @@ and [Claude CLI flags](https://code.claude.com/docs/en/cli-reference). Local CLI
 
 ## Provider reads and native-file packages — development
 
-`csl providers list|files|view|package --provider codex|claude|gemini` exposes the
+`csl providers list|files|view|package --provider codex|claude|gemini|antigravity` exposes the
 local collector interface in [SYNC_PROVIDERS.md](SYNC_PROVIDERS.md). Claude and
 Gemini session listing includes the shared metadata fields; primary views include
 text, correlated tool blocks and raw offsets. Subagents are preserved as raw

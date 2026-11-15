@@ -15,7 +15,7 @@ from csl_version import __version__
 
 CHUNK = 8 * 1024 * 1024
 EMPTY_HASH = hashlib.sha256(b'').hexdigest()
-PROVIDERS = ('codex', 'claude', 'gemini')
+PROVIDERS = ('codex', 'claude', 'gemini', 'antigravity')
 
 
 def digest(value):
@@ -195,11 +195,23 @@ class Collector:
                                     'sha256': f['sha256']} for f in files}
         pages = []
         resets = 0
+        def bind_sources(page):
+            anchors = page.get('source_files', [page.get('source_file')])
+            if not isinstance(anchors, list) or not anchors:
+                raise SyncError('source_changed')
+            keys = set()
+            for anchor in anchors:
+                if (not isinstance(anchor, dict) or anchor.get('file_key') in keys or
+                        snapshots.get(anchor.get('file_key')) != anchor):
+                    raise SyncError('source_changed')
+                keys.add(anchor['file_key'])
+            if provider == 'antigravity' and ('source_files' not in page or keys != set(snapshots)):
+                raise SyncError('source_changed')
+            if page.get('source_file') is not None and page['source_file'] not in anchors:
+                raise SyncError('source_changed')
         for _ in range(100000):
             page = self.providers.view_records(provider, native_id, position=position, limit=100)
-            source_file = page.get('source_file')
-            if not isinstance(source_file, dict) or snapshots.get(source_file.get('file_key')) != source_file:
-                raise SyncError('source_changed')
+            bind_sources(page)
             if page.get('reset_required'):
                 if resets: raise SyncError('source_changed')
                 for p in pages: Path(p).unlink(missing_ok=True)
@@ -222,7 +234,8 @@ class Collector:
             if bounded_at_snapshot:
                 if not eligible: break
                 page = self.providers.view_records(provider, native_id, position=position, limit=len(eligible))
-                if page.get('source_file') != source_file or page.get('reset_required') or page.get('records') != eligible:
+                bind_sources(page)
+                if page.get('reset_required') or page.get('records') != eligible:
                     raise SyncError('source_changed')
             if not eligible: break
             wire = []
@@ -265,6 +278,13 @@ class Collector:
                 seen.add(item.get('file_key')); files.append(self.capture(item))
             pages, last_seq = self.build_view(provider, native_id, local, files)
             self.check_sources(files)
+            # Detect newly appearing/disappearing companions as well as changed
+            # bytes. A DB-only fence cannot detect a WAL-only transaction.
+            def signature(rows):
+                return {row['file_key']: (row['mode'], row['complete_length'], row['sha256']) for row in rows}
+            refreshed = self.providers.raw_files(provider, native_id)
+            if len(refreshed) != len(files) or signature(refreshed) != signature(files):
+                raise SyncError('source_changed')
             planned = []
             for item in files:
                 key = item['file_key']; previous = local.setdefault('files', {}).get(key, {})

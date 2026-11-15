@@ -2,9 +2,9 @@
 
 `csl sync` publishes selected local sessions to a registry implementing the sync
 protocol. It is opt-in, separate from ZIP export, encrypted backup and agent
-messaging. It requires the companion `csl_sync_providers.py` provider interface;
-this development branch does not duplicate those provider parsers. These commands
-are not in the published v0.3.0 tag.
+messaging. It reads Codex, Claude Code, Gemini CLI and Antigravity CLI through
+local provider adapters. These commands are not in the published v0.3.0 tag;
+use a development checkout that includes `csl sync`.
 
 **Raw sync uploads the complete transcript bytes and supported companion files,
 including any secrets they contain.** It does not scrub them or apply backup
@@ -87,7 +87,11 @@ Chunks are at most 8 MiB, with prefix/content hashes and stable idempotency keys
 Registry file inventories are queried before resuming. Rewritten files receive
 new revisions; changed view prefixes receive new generations. View records retain
 provider ordering and raw offsets; the provider's opaque page position is saved
-only after upload acknowledgment. Reading a complete file/request is not a model
+only after upload acknowledgment. SQLite databases and their committed WAL prefixes
+use replace-mode revisions. Every DB/WAL input to a view must match the captured
+inventory, including when a WAL appears, disappears or is rewritten. Changing
+sources remain pending for another pass rather than publishing a mixed snapshot.
+Reading a complete file/request is not a model
 recall test, and this collector does not activate models.
 
 ## Foreground operation
@@ -152,8 +156,12 @@ not establish it.
 ## Validation boundaries
 
 The repository tests use synthetic providers and in-test HTTP peers; no real
-accounts or model calls. Actual registry/identity integration, provider branch
-integration, native package loader fidelity and the real remote-environment
-acceptance exercise must be recorded separately. Core uses only Python's standard
+accounts or model calls. Actual registry/identity deployments and remote-environment
+acceptance need their own checks. Provider-native fidelity has separate, bounded
+evidence: Gemini native loading remains unverified; Codex sessions depending on
+an external history base cannot produce a self-contained package. See
+[provider coverage](PROVIDER_MATRIX.md) and [Antigravity evidence](ANTIGRAVITY.md).
+Raw sync success does not prove model recall. Public v0.3.0 cannot import native
+package v3; use a client containing the v3 importer. Core uses only Python's standard
 library. Windows is not claimed; existing CSL is Linux-oriented, and the lock
 and optional service examples assume Unix.
