@@ -381,7 +381,7 @@ See the standalone [agent communication specification](AGENT_COMMUNICATION.md)
 for the complete envelope, grants, session-bound hooks, optional native queue
 activation, remote transports, failure semantics and verification limits.
 
-This increment is not in the published v0.3.0 tag. It adds `send`, `receive`, `ack`
+This capability is included in CSL 0.4.0, not the earlier v0.3.0 tag. It adds `send`, `receive`, `ack`
 and `reply` independently of delegated tasks. A message is persisted in a private
 inbox even when its recipient is idle or a client-only harness. **No mailbox
 operation starts, resumes, steers or interrupts a model.** The existing

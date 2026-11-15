@@ -1,7 +1,7 @@
 # Referenced Codex histories
 
 Some Codex forks and reverts store their earlier history in other rollout files.
-The leaf JSONL alone does not contain that context. CSL's development raw v3
+The leaf JSONL alone does not contain that context. CSL 0.4.0's experimental raw v3
 profile includes those files and preserves the native reference on import.
 Published v0.3.0 does not read v3 packages.
 

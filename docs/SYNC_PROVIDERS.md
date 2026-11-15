@@ -147,7 +147,7 @@ The primary file uses `main.jsonl` or `main.json` according to its source format
 companion paths use `files/<normalized-relative-path>`.
 
 The registry must refuse an incomplete snapshot or unavailable descriptor. Format
-V3 import support is included in development; existing public v0.3.0
+V3 import support is included in CSL 0.4.0; earlier v0.3.0
 only accepts v1/v2. Do not assume a v3 package is loadable by old CSL. Availability
 will be true only for profiles the new importer implements; native Gemini loader
 verification is separately reported, not implied by byte packaging.

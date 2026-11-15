@@ -2,6 +2,43 @@
 
 ## Version records
 
+### v0.4.0
+
+This version packages task-independent agent messaging, opt-in raw session sync,
+multi-file native provider reads/packages and bounded Codex history-base graphs.
+Mailbox and sync remain experimental. Mail persists independently from tasks;
+ACK, recipient persistence and reply are separate facts. Optional hooks and
+native notifications require explicit owner setup; installation grants no work
+authority and does not start a service.
+
+Sync has no default registry and requires explicit authentication/configuration.
+It uploads selected raw transcripts and supported companion files **including
+their secrets, unchanged**. It does not scrub them or apply backup encryption.
+Incremental reuse and crash-contained foreground watch passes do not constitute
+a durability SLA or model-continuity guarantee.
+
+Local provider reads and raw v3 packages cover Codex, Claude Code, Gemini CLI and
+Antigravity CLI within documented profiles. Gemini native resume is unverified;
+Antigravity has bounded CLI 1.5.9 reconstruction and text-recall evidence, not
+universal compatibility. Codex 0.169.0 bounded history-base import preserves
+references, but cold-home `thread/read` needs explicit activation to reconstruct
+the native projection cache. Import never activates a model to hide that step.
+CSL 0.3.0 cannot import v3 packages.
+
+Backup remains experimental/manual with its existing key and age requirements.
+The new producer version starts a fresh capture; finish pending runs/recipient
+plans with their original version and retain older checkpoints' recovery keys.
+Historical tags, notes and checkpoints are not rewritten.
+
+Validate this release's fixed candidate SHA with the full isolated suite and
+available offline native gates, isolated prefix installation/help/capabilities
+and the offline synthetic demo. The GitHub Release records final commit, counts,
+skips, CLI versions and clean installation from the published annotated tag.
+Preparation or a merged PR alone is not proof of publication. See
+[v0.4.0](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.4.0),
+[sync privacy](docs/SYNC.md), [provider limits](docs/SYNC_PROVIDERS.md) and
+[communication](docs/AGENT_COMMUNICATION.md).
+
 ### v0.3.0
 
 This version adds experimental live coordination of existing Codex conversations,
@@ -161,7 +198,7 @@ expansion. Package-registry publication requires its own plan and verification.
 
 Ordinary CI covers Python 3.11/3.13 and optional media in process mode; it does not
 by itself establish native CLI loading or migration E2E. The manual isolated native
-workflow pins Codex 0.166.0 and Claude Code 2.1.308, enables native/migration opt-ins
+workflow pins Codex 0.169.0 and Claude Code 2.1.308, enables native/migration opt-ins
 and requires bubblewrap for media. Use synthetic temporary homes, no personal
 credentials and no model inference. Record actual results, not workflow existence.
 Paid continuations are a separate explicitly authorized stage.
