@@ -70,9 +70,10 @@ class CachedProviders:
             paths = self.sources(provider, path, home)
             stamp = self.fingerprint(paths, home)
             elapsed = self.clock() - entry['checked_at'] if entry else -1
-            reuse = bool(entry and entry.get('schema') == 1 and entry.get('fingerprint') == stamp and
+            reusable = bool(entry and entry.get('schema') == 1 and entry.get('index_valid', True))
+            reuse = bool(reusable and entry.get('fingerprint') == stamp and
                          0 <= elapsed < self.verify_seconds)
-            if not reuse and entry and entry.get('schema') == 1 and entry.get('fingerprint') == stamp:
+            if not reuse and reusable and entry.get('fingerprint') == stamp:
                 # Expired or backwards wall clock: verify bytes, not merely stat.
                 if self.verify_entry(entry):
                     entry['checked_at'] = self.clock()
@@ -176,6 +177,7 @@ class CachedProviders:
             package = ({'available': False, 'reason': reason, 'descriptor_version': 1, 'manifest': None, 'members': []}
                        if reason else self.module._package_mapping(provider, metadata['native_id'], frozen.suffix, metadata, inventory))
             return {'schema': 1, 'metadata': metadata, 'inventory': inventory, 'package': package,
+                    'index_valid': True,
                     'fingerprint': stamp, 'checked_at': self.clock(),
                     'content_signature': hashlib.sha256(encoded(inventory)).hexdigest()}
         finally:
@@ -258,6 +260,7 @@ class CachedProviders:
             saved = db.execute('SELECT value FROM meta WHERE id=1').fetchone()
             if not saved or json.loads(saved[0])['sha256'] != entry['inventory'][0]['sha256']:
                 entry['checked_at'] = 0
+                entry['index_valid'] = False
                 private_json(directory / 'entry.json', entry)
                 raise SyncError('cache_recovery_required')
             prior = db.execute('SELECT digest FROM records WHERE seq=?', (target - 1,)).fetchone()

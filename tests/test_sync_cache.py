@@ -1,8 +1,10 @@
 """Synthetic collector performance invariants, not wall-clock speed assertions."""
 import json
+from contextlib import closing
 import os
 import subprocess
 import select
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -13,7 +15,7 @@ import uuid
 
 from csl_sync_engine import Collector, Providers
 from csl_sync_http import HTTP, Registry
-from csl_sync_state import State
+from csl_sync_state import State, SyncError
 from csl_sync_state import private_json
 import csl_sync_providers as native
 from sync_support import FakeTokens, Peer
@@ -202,3 +204,14 @@ class CacheTests(unittest.TestCase):
         self.assertTrue(self.providers.changed())
         self.providers.list_sessions('codex')
         self.assertFalse(self.providers.changed())
+
+    def test_mismatched_derived_index_is_rebuilt_instead_of_remaining_pending(self):
+        self.run_pass()
+        directory = self.providers.cache.entries[('codex', self.sid)][0]
+        with closing(sqlite3.connect(directory/'view.sqlite')) as db, db:
+            value = json.loads(db.execute('SELECT value FROM meta WHERE id=1').fetchone()[0])
+            value['sha256'] = '0'*64
+            db.execute('UPDATE meta SET value=? WHERE id=1',(json.dumps(value),))
+        with self.assertRaises(SyncError): self.providers.view_records('codex',self.sid)
+        self.assertEqual(self.run_pass()['synced'],1)
+        self.assertEqual(self.providers.view_records('codex',self.sid),native.view_records('codex',self.sid))
