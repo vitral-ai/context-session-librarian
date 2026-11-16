@@ -1,19 +1,40 @@
 #!/usr/bin/env python3
 """Linux/Mac session pairing CLI; no SSH bootstrap, login or model replacement."""
+import argparse
 from pathlib import Path
 import os
 import sys
+def step_help(action):
+    example=("csl-pair share --thread EXISTING_UUID --mode relay --approve-communication" if action=='share' else
+             "csl-pair connect --thread EXISTING_UUID --mode relay --pair-code-stdin --approve-communication")
+    parser=argparse.ArgumentParser(prog='csl-pair '+action,
+        description=('Share a one-use128bit code for this already-open conversation.' if action=='share' else
+                     'Connect this already-open conversation using a private code pasted through stdin.'),
+        epilog='Example: '+example+'. Auto uses a provisioned private relay, otherwise LAN; no automatic fallback/replay. Pairing is not proof of model activity.')
+    parser.add_argument('--thread',metavar='EXISTING_UUID',help='Already-loaded conversation; defaults to saved/current or only loaded thread. Never clones a session.')
+    parser.add_argument('--mode',choices=['auto','lan','relay'],default='auto',help='auto: provisioned relay if present, otherwise LAN. Relay needs the owner-provisioned private profile; LAN needs a common reachable LAN.')
+    parser.add_argument('--interface','--bind',dest='interface',metavar='NAME',help='LAN only: interface name or local IPv4 if the OS default route is ambiguous.')
+    if action=='connect':parser.add_argument('--pair-code-stdin',action='store_true',required=True,help='Required: paste one26-character code (or LAN private link), then Enter. Never put the code in argv/env.')
+    parser.add_argument('--approve-communication',action='store_true',help='Explicit initial local consent for progress and query tools only; no login/model/shell permission changes.')
+    parser.add_argument('--approve-delegation',action='store_true',help='Optional with --approve-communication: adds followup_task and send_message. Can activate idle work and consume model tokens/cost; no interrupt auto-grant.')
+    parser.add_argument('--state-root',metavar='DIRECTORY',help='Operator override for private state and relay-profile.json; no token in arguments.')
+    parser.add_argument('--bridge-home',metavar='DIRECTORY',help='Operator override to preserve an existing bridge database and registered conversation.')
+    parser.add_argument('--codex-home',metavar='DIRECTORY',help='Operator override for existing local runtime discovery; no auth or history reads.')
+    parser.print_help()
+
 source=Path(__file__).resolve().parent
 sys.path.insert(0,str(source))
 sys.path.insert(0,str(source/'macos/CSLBridge'))
 from app_service import main
+if len(sys.argv)>2 and sys.argv[1] in ('share','connect') and any(value in ('-h','--help') for value in sys.argv[2:]):
+    step_help(sys.argv[1]);raise SystemExit(0)
 if len(sys.argv)<2 or sys.argv[1] in ('-h','--help'):
     print('CSL private session pairing: select an already-open conversation, share a manual code/link, connect.\n'
           'csl-pair share --thread EXISTING_UUID [--mode auto|lan|relay] [--interface NAME]\n'
           'csl-pair connect --thread EXISTING_UUID --pair-code-stdin [--mode auto|lan|relay] [--interface NAME]\n'
           'csl-pair task --text-file TASK | message --text-file ANSWER | receipt --operation-id ID\n'
           'csl-pair wait --after CURSOR --timeout 20 | status | reconcile | stop | events\n'
-          'Paste the one-use 26-character code or private link through stdin. LAN/OS permission required.\n'
+          'Paste the one-use 26-character code through stdin (private link is a LAN fallback).\n'
           'Auto uses an operator-provisioned private relay profile for mobility; otherwise LAN.\nNo QR, arbitrary public relay, new model, login or OS service. No automatic ambiguous replay. SSH remains advanced.\n'
           'A valid pair is not proof of model continuation or completion.')
     raise SystemExit(0)

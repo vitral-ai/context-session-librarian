@@ -300,12 +300,21 @@ class Service:
         return result
 
     def lan_stop(self):
-        from csl_bridge_lan import control
+        relayed=self.settings.get('connection_mode')=='relay'
+        path=self.state/('relay/relay-control.sock' if relayed else 'lan/session-control.sock')
+        if not path.exists():
+            return {'stopped':True,'already_stopped':True,'note':'No session channel is running; no state was created.'}
+        try:
+            if relayed:
+                from csl_bridge_relay_client import session_control
+                result=session_control(self.state/'relay','stop')
+            else:
+                from csl_bridge_lan import control
+                result=control(self.state/'lan','stop')
+        except (FileNotFoundError,ConnectionRefusedError):
+            return {'stopped':True,'already_stopped':True,'note':'No session channel is running; no state was changed.'}
         json_file(self.state/'peer-proof.json',{'ready':False,'phase':'stopping','observed_at':time.time(),'note':'Desconexión solicitada; no es cancelación del trabajo ya aceptado.'})
-        if self.settings.get('connection_mode')=='relay':
-            from csl_bridge_relay_client import session_control
-            return session_control(self.state/'relay','stop')
-        return control(self.state/'lan','stop')
+        return result
 
     def lan_call(self, action, text_file=None, request_id=None, operation_id=None, after=0, timeout=20):
         from csl_bridge_lan import control

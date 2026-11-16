@@ -3,14 +3,23 @@
 En la app: **selecciona tu conversación ya abierta → Compartir código**. En la otra
 utilidad: selecciona su conversación, pega el código y conecta. El código aleatorio
 es de26caracteres, se comparte MANUALMENTE copiar/pegar, caduca en5min y funciona una
-vez. No QR. Si UDP no llega, copiar/pegar el enlace privado de la misma invitación.
-No copiar claves, huellas, rutas Python ni configurar SSH para este recorrido.
+vez. No QR. **Automático usa el relay privado provisionado por el owner si hay perfil;
+sin perfil usa LAN directa.** Son modos distintos:
 
-Requiere misma LAN accesible, openssl existente del OS y permisos nativos de red
-local/entrante. No cambia firewall/router ni instala servicios globales. Se elige la
-interfaz de la ruta por defecto del OS, sin tráfico; si hay ambigüedad puede elegirse
-en la app o con `--interface NOMBRE`. No hay relay público ni pairing Internet/NAT.
-SSH queda disponible como transporte avanzado previamente autorizado.
+- **Relay privado:** los dos equipos abren conexiones salientes al endpoint TLS del
+  owner (en este ensayo, puerto8443). Funciona entre redes distintas si ese endpoint
+  es accesible. El perfil/pin y enrollment privado los instala el owner; el usuario
+  comparte sólo el código. No necesita SSH ni una LAN común.
+- **LAN directa (`--mode lan`):** requiere la misma LAN accesible y permisos nativos
+  de red local/entrante. Si UDP no llega, copiar/pegar el enlace privado de la misma
+  invitación. Se elige la interfaz de la ruta por defecto del OS, sin tráfico; si es
+  ambigua, selección en app o `--interface NOMBRE`.
+
+No se copian claves, huellas ni rutas Python en el recorrido normal. Se usa openssl
+existente del OS; no se cambian firewall/router ni servicios globales. No hay selección
+medida que prefiera LAN ni fallback automático LAN→relay después de un envío incierto.
+No se ofrece un relay público de producto ni NAT traversal propio. SSH sigue siendo
+un transporte avanzado previamente autorizado.
 
 Contraparte CLI Linux/Mac, Python>=3.11 existente (Macapp incluye Python3.12 privado):
 

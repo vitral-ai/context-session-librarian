@@ -77,6 +77,7 @@ class AppTests(unittest.TestCase):
   store.close()
  def test_channel_stop_clears_old_positive_proof_without_stopping_native(self):
   app.json_file(self.service.state/'peer-proof.json',{'ready':True,'observed_at':0})
+  channel=self.service.state/'lan/session-control.sock';channel.parent.mkdir();channel.touch()
   with patch('csl_bridge_lan.control',return_value={'stopping':True}) as control,patch('csl_app_service.os.kill') as kill:
    result=self.service.lan_stop()
   self.assertTrue(result['stopping']);kill.assert_not_called()
@@ -106,6 +107,14 @@ class AppTests(unittest.TestCase):
    self.assertTrue(self.service.status()['connected'])
    app.json_file(self.service.state/'relay/relay-status.json',{'phase':'reconnecting','connected_at':now-2})
    self.assertFalse(self.service.status()['connected'])
+ def test_empty_stop_is_idempotent_and_creates_no_state_for_either_mode(self):
+  for mode in ('lan','relay'):
+   self.service.settings={'connection_mode':mode}
+   with patch('csl_bridge_lan.control') as local,patch('csl_bridge_relay_client.session_control') as relayed:
+    self.assertTrue(self.service.lan_stop()['already_stopped'])
+    self.assertTrue(self.service.lan_stop()['already_stopped'])
+   local.assert_not_called();relayed.assert_not_called()
+   self.assertFalse(self.service.state.exists())
  def test_only_owned_mcp_sections_replaced_other_text_preserved(self):
   old='model="owner-model"\n\n[mcp_servers.other]\ncommand="owner"\n\n[mcp_servers.csl_bridge]\ncommand="old"\n[mcp_servers.csl_bridge.tools.send_progress]\napproval_mode="prompt"\n'
   new,previous=app.Service.replace_owned(old,self.service.mcp_profile())
