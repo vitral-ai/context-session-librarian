@@ -442,6 +442,29 @@ Passing these gates does not complete acceptance with real Codex models or
 establish Mac, SSH or cross-account compatibility. Restarting a connector may
 resume previously authorized pending followups; it does not create new assignments.
 
+### Transport deadlines and uncertain outcomes
+
+Remote operations use nested budgets: receiver-to-connector IPC60s, SSH/operator
+exchange90s, caller-to-origin IPC95s. Local queries and wait retain25s; wait itself
+is bounded to0..20s. These are waiting budgets, not latency targets or cancellation.
+Native runtime deadlines are unchanged. Long queue/native contention can still
+exceed them; increasing budgets does not establish the source of WAN latency.
+
+If the caller disconnects, the receiver may already have committed delivery. The
+CLI preserves the original request ID and recommends `receipt --peer PEER
+--operation-id ID`, for both a returned uncertain receipt and lost local IPC. Do
+not create another task or blindly replay. Inspect receipt/state using the same
+ID; delivery and task completion remain separate observations.
+
+Generated MCP profiles use a105s host ceiling: caller IPC95s plus an explicit10s
+framing/scheduling margin. Both CLI and Mac app profiles share that value. It is
+a host ceiling, not a wait duration or latency guarantee: wait_agent remains0..20s
+and local IPC25s; startup remains10s. Tool lists, per-tool consent and approval
+modes are unchanged. Existing live profiles are not migrated by generating one.
+The Swift UI backend wrapper has no shorter subprocess deadline; its3s local
+status/process checks and8s local-start readiness probe remain local-only. Build
+and signing timeouts are unrelated to operational remote calls and remain intact.
+
 ## Task-Independent Mailbox V1 — Development
 
 See the standalone [agent communication specification](AGENT_COMMUNICATION.md)

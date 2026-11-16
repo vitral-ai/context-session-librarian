@@ -54,11 +54,12 @@ def main():
     shutil.copy2(source/'macos/CSLBridge/ssh_session.py',resources/'ssh_session.py')
     plist={'CFBundleName':'CSL Bridge','CFBundleDisplayName':'CSL Bridge','CFBundleIdentifier':'ai.vitral.cslbridge.private',
            'CFBundleExecutable':'CSLBridge','CFBundlePackageType':'APPL','CFBundleShortVersionString':'0.1.0','CFBundleVersion':'1',
-           'LSMinimumSystemVersion':'13.0','NSHighResolutionCapable':True,'NSPrincipalClass':'NSApplication',
+           'LSMinimumSystemVersion':'13.0','NSHighResolutionCapable':True,'NSLocalNetworkUsageDescription':'Conectar tus agentes seleccionados en la red local mediante un código privado, sin servicio público.','NSPrincipalClass':'NSApplication',
            'CSLSourceRevision':args.source_sha,'CSLPrivateDevelopmentBuild':True}
     with (contents/'Info.plist').open('wb') as file:plistlib.dump(plist,file)
     swift=run(['/usr/bin/xcrun','--find','swiftc'])
-    run([swift,'-O','-swift-version','5','-target',platform.machine()+'-apple-macos13.0','-framework','AppKit','-framework','Foundation',source/'macos/CSLBridge/CSLBridge.swift','-o',macos/'CSLBridge'],timeout=180)
+    sdk=run(['/usr/bin/xcrun','--show-sdk-path'])
+    run([swift,'-sdk',sdk,'-O','-swift-version','5','-target',platform.machine()+'-apple-macosx13.0','-framework','AppKit','-framework','Foundation',source/'macos/CSLBridge/CSLBridge.swift','-o',macos/'CSLBridge'],timeout=180)
     executable=resources/'python-runtime/bin/python3.12'
     # An empty home and minimal environment prevent fallback to uv/user packages.
     isolated=output/'selftest-home';isolated.mkdir(mode=0o700)
@@ -69,17 +70,25 @@ def main():
     if str(runtime) in linked:raise RuntimeError('Bundled Python still links to the original runtime.')
     # Sign nested Mach-O objects, then the app; no Developer ID, hardened policy or notarization.
     signed=[]
+    runtime_linkage={}
     for path in sorted(resources.rglob('*')):
         if path.is_file() and not path.is_symlink():
             with path.open('rb') as file:magic=file.read(4)
             if magic in (b'\xcf\xfa\xed\xfe',b'\xce\xfa\xed\xfe',b'\xca\xfe\xba\xbe',b'\xfe\xed\xfa\xcf'):
+                if path.suffix=='.dylib':
+                    identity=run(['/usr/bin/otool','-D',path]).splitlines()[1:]
+                    if any(str(runtime) in value for value in identity):
+                        run(['/usr/bin/install_name_tool','-id','@rpath/'+path.name,path])
+                dependencies=run(['/usr/bin/otool','-L',path])
+                if str(runtime) in dependencies:raise RuntimeError('Bundled Mach-O retains original runtime linkage: '+str(path.relative_to(app)))
+                runtime_linkage[str(path.relative_to(app))]=dependencies
                 run(['/usr/bin/codesign','--force','--sign','-',path],timeout=20);signed.append(str(path.relative_to(app)))
     run(['/usr/bin/codesign','--force','--sign','-',app],timeout=30)
     run(['/usr/bin/codesign','--verify','--deep','--strict',app],timeout=30)
     manifest={'source_sha':args.source_sha,'verified_source_manifest':source_manifest,'tracked_only':True,'input_manifest_sha256':args.source_manifest_sha256,'architecture':platform.machine(),'build_macos':platform.mac_ver()[0],
-              'app':str(app),'swift':run([swift,'--version']),'python_bundle_selftest':data,'python_linkage':linked,
+              'app':str(app),'swift':run([swift,'--version']),'sdk':sdk,'python_bundle_selftest':data,'python_linkage':linked,
               'runtime_source':'existing private standalone Python, copied fully; original no longer required',
-              'signed_objects':len(signed),'codesign':'ad-hoc; verification PASS; no notarization/public release',
+              'all_runtime_linkage':runtime_linkage,'signed_objects':len(signed),'codesign':'ad-hoc; verification PASS; no notarization/public release',
               'does_not':'Start/stop existing bridge, Codex, models, login, SSH, tunnels or services',
               'earlier_macos_versions':'NOT_TESTED; deployment target is not a compatibility result'}
     (output/'BUILD-MANIFEST.json').write_text(json.dumps(manifest,indent=2))

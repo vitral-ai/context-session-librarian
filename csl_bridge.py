@@ -135,7 +135,14 @@ def configure(args):
         store.close()
 
 
+def uncertain_diagnostic(request, peer):
+    print('Outcome uncertain; not cancelled. request_id=' + request['id'] +
+          '. Query receipt --peer ' + peer + ' --operation-id ' + request['id'] +
+          ' before retrying; keep this ID. Do not create a replacement task.', file=sys.stderr)
+
+
 def run(args):
+    request = None
     try:
         if args.action == 'notify':
             from csl_bridge_notify import main as notify_main
@@ -221,6 +228,8 @@ def run(args):
                 request['request_id'] = args.operation_id
             result = local_call(args.home, {'local_op': 'call', 'peer': args.peer, 'request': request})
         print(encode(result))
+        if request and args.action in ('followup', 'send_message', 'interrupt') and result.get('state') == 'uncertain':
+            uncertain_diagnostic(request, args.peer)
         if args.action in ('send', 'receive', 'ack', 'reply', 'inbox-status', 'grant', 'grant-revoke', 'grant-list', 'grant-show'):
             if result.get('state') in ('rejected', 'undeliverable', 'expired'):
                 raise SystemExit(1)
@@ -228,6 +237,8 @@ def run(args):
                 raise SystemExit(1)
     except BridgeError as exc:
         print('Bridge: ' + str(exc), file=sys.stderr)
+        if request and args.action in ('followup', 'send_message', 'interrupt') and 'uncertain' in str(exc).lower():
+            uncertain_diagnostic(request, args.peer)
         raise SystemExit(1)
     except (OSError, ValueError, sqlite3.Error):
         # Do not expose DB/OS/remote errors that may contain text, account or paths.
@@ -240,8 +251,7 @@ def add_commands(subparsers, csl):
         description='Coordinate existing Codex agents through a foreground session connector. '
                     'Followup activates idle; messages/events enter active work automatically. '
                     'No native attach to standalone TUI, no cloning, no automatic approvals. '
-                    'Requires initial endpoint/agent/peer setup. Linux-Mac LAN exercised; '
-                    'Internet, Windows and live Claude coordination unvalidated. See docs/BRIDGE.md.')
+                    'Requires endpoint/agent/peer setup. Experimental csl-pair adds LAN/private-relay pairing. See macos/README.md for validation limits.')
     parser.add_argument('--home', type=Path, required=True, help='Explicit private bridge home, separate from Codex histories/auth.')
     sub = parser.add_subparsers(dest='action', required=True)
     init = sub.add_parser('init', help='Initialize explicit private state; does not start anything.')
@@ -336,7 +346,7 @@ def add_commands(subparsers, csl):
     mcp_config = sub.add_parser('mcp-config', help='Print a reviewable local MCP profile; never applies consent/configuration.')
     mcp_config.add_argument('--agent', required=True, help='Explicit registered local identity bound to the tools.')
     mcp_config.add_argument('--grant-admin', action='store_true', help='Explicit local owner capability for grant mutation scoped to this bound recipient; does not apply configuration or approve execution.')
-    mcp_config.add_argument('--approve-tool', action='append', default=[], choices=['send_progress', 'send_message', 'send', 'ack', 'reply'],
+    mcp_config.add_argument('--approve-tool', action='append', default=[], choices=['send_progress', 'send_message', 'followup_task', 'send', 'ack', 'reply'],
         help='Explicit initial local consent for this message tool only; other side-effecting tools remain unavailable.')
     agents = sub.add_parser('agents', help='List registered local agents, or the agents a peer permits you to inspect.')
     agents.add_argument('--peer')

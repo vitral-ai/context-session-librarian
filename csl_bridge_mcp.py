@@ -13,7 +13,12 @@ import threading
 import uuid
 
 from csl_bridge_store import BridgeError, MAX_WIRE, NOTICE, Store, contains_findings, decode, encode, identifier, name
-from csl_bridge_transport import local_call
+from csl_bridge_transport import CALL_TIMEOUT, local_call
+
+# Host ceiling includes bounded caller IPC plus MCP framing/scheduling margin.
+# It does not change wait_agent's own 20-second maximum.
+MCP_HOST_MARGIN = 10
+MCP_TOOL_TIMEOUT = CALL_TIMEOUT + MCP_HOST_MARGIN
 
 TEXT = {'type': 'string', 'minLength': 1, 'maxLength': 12000}
 NAME = {'type': 'string', 'pattern': '[a-z][a-z0-9-]{0,31}'}
@@ -77,18 +82,29 @@ TOOLS = {
 
 def configuration(home, agent, approve_tools=(), *, grant_admin=False):
     """Render an explicit local communication grant; never apply configuration."""
+    adapter = Adapter(home, agent, grant_admin=grant_admin)
+    arguments = ['--home', adapter.home.expanduser().absolute(), '--agent', adapter.agent]
+    if grant_admin:
+        arguments.append('--grant-admin')
+    return render_profile(adapter.home.expanduser().absolute(), adapter.agent, approve_tools,
+        Path(__file__).resolve().parent / 'csl-bridge-mcp', arguments, grant_admin=grant_admin)
+
+
+def render_profile(home, agent, approve_tools, command, arguments, *, grant_admin=False):
+    name(agent)
     approved = set(approve_tools)
-    if not approved <= {'send_progress', 'send_message', 'send', 'ack', 'reply'}:
-        raise BridgeError('Only explicitly selected message tools are eligible for this profile')
-    adapter = Adapter(home, agent, grant_admin=grant_admin)  # validate without contacting runtime
-    enabled = sorted(approved | {'wait_agent', 'list_agents', 'agent_status', 'operation_receipt', 'receive', 'inbox_status', 'grant_list', 'grant_show'} | (GRANT_ADMIN if grant_admin else set()))
+    if not approved <= {'send_progress', 'send_message', 'followup_task', 'send', 'ack', 'reply'}:
+        raise BridgeError('Only explicitly selected communication tools are eligible for this profile')
+    enabled = sorted(approved | {'wait_agent', 'list_agents', 'agent_status', 'operation_receipt',
+        'receive', 'inbox_status', 'grant_list', 'grant_show'} | (GRANT_ADMIN if grant_admin else set()))
     quoted = lambda value: json.dumps(str(value), ensure_ascii=False)
     lines = ['# Review locally before applying; this command changes no configuration.',
-             '# Explicit per-tool consent. Runtime shell/approval policies remain separate.',
+             '# Explicit per-tool consent. followup_task activates idle work and can consume model tokens/cost.',
+             '# Runtime shell, approval, login and model policies remain separate.',
              '[mcp_servers.csl_bridge]',
-             'command = ' + quoted(Path(__file__).resolve().parent / 'csl-bridge-mcp'),
-             'args = [' + ', '.join(map(quoted, ['--home', adapter.home.expanduser().absolute(), '--agent', adapter.agent] + (['--grant-admin'] if grant_admin else []))) + ']',
-             'required = true', 'startup_timeout_sec = 10', 'tool_timeout_sec = 25',
+             'command = ' + quoted(command),
+             'args = [' + ', '.join(map(quoted, arguments)) + ']',
+             'required = true', 'startup_timeout_sec = 10', 'tool_timeout_sec = ' + str(MCP_TOOL_TIMEOUT),
              'enabled_tools = [' + ', '.join(map(quoted, enabled)) + ']',
              'default_tools_approval_mode = "writes"']
     for tool in sorted(approved):

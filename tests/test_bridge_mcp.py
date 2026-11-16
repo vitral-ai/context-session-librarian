@@ -9,7 +9,8 @@ from unittest.mock import patch
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from csl_bridge_mcp import Adapter, serve, configuration
+from csl_bridge_mcp import Adapter, serve, configuration, MCP_TOOL_TIMEOUT, MCP_HOST_MARGIN
+from csl_bridge_transport import CALL_TIMEOUT, EXCHANGE_TIMEOUT, RECEIVER_TIMEOUT, LOCAL_TIMEOUT
 from csl_bridge_store import BridgeError, Store, encode
 
 
@@ -44,7 +45,33 @@ class MCPTests(unittest.TestCase):
         self.assertNotIn('tools', unapproved)
         self.assertNotIn('send_progress', unapproved['enabled_tools'])
         with self.assertRaises(BridgeError):
-            configuration(self.home, 'worker', ['followup_task'])
+            configuration(self.home, 'worker', ['interrupt_agent'])
+
+    def test_generated_host_budget_covers_remote_ipc_without_extending_wait(self):
+        import tomllib
+        for grants in ([], ['send_progress'], ['send_progress', 'send_message']):
+            config=tomllib.loads(configuration(self.home,'worker',grants))['mcp_servers']['csl_bridge']
+            self.assertEqual(config['tool_timeout_sec'],MCP_TOOL_TIMEOUT)
+            self.assertEqual(config['tool_timeout_sec']-CALL_TIMEOUT,MCP_HOST_MARGIN)
+            self.assertGreater(CALL_TIMEOUT,EXCHANGE_TIMEOUT)
+            self.assertGreater(EXCHANGE_TIMEOUT,RECEIVER_TIMEOUT)
+        self.assertEqual(LOCAL_TIMEOUT,25)
+        wait=next(x for x in self.adapter.catalog() if x['name']=='wait_agent')
+        self.assertEqual(wait['inputSchema']['properties']['timeout']['maximum'],20)
+        with patch('csl_bridge_mcp.local_call',return_value={}) as call:
+            self.adapter.call('wait_agent',{})
+        self.assertEqual(call.call_args.args[1]['timeout'],20)
+        self.assertNotIn('timeout',call.call_args.kwargs)
+
+    def test_optional_delegation_profile_is_exact_explicit_and_cost_labelled(self):
+        import tomllib
+        text=configuration(self.home,'worker',['followup_task','send_message','send_progress'])
+        profile=tomllib.loads(text)['mcp_servers']['csl_bridge']
+        self.assertEqual(set(profile['tools']),{'followup_task','send_message','send_progress'})
+        self.assertEqual(set(profile['enabled_tools']),{'followup_task','send_message','send_progress','wait_agent','list_agents','agent_status','operation_receipt','receive','inbox_status','grant_list','grant_show'})
+        self.assertTrue(all(x=={'approval_mode':'approve'} for x in profile['tools'].values()))
+        self.assertNotIn('interrupt_agent',profile['enabled_tools'])
+        self.assertIn('consume model tokens/cost',text)
 
     def test_fixed_identity_and_no_sensitive_surfaces(self):
         with patch('csl_bridge_mcp.local_call', return_value={'state': 'delivered'}) as call:

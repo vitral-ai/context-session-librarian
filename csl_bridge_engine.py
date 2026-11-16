@@ -1,5 +1,6 @@
 """Session-scoped coordination around existing Codex threads; no session cloning."""
 import fcntl
+import hashlib
 import queue
 import socketserver
 import sqlite3
@@ -33,6 +34,7 @@ class Connector:
         self.stop = threading.Event()
         self.changed = threading.Condition()
         self.locks = {agent: threading.RLock() for agent in self.agents}
+        self.retry_lock=threading.Lock()
         self.waiters = {agent: 0 for agent in self.agents}
         self.turns, self.answers = {}, {}
         self.threads = []
@@ -546,10 +548,63 @@ class Connector:
         except RuntimeUnavailable:
             pass
 
+    def retry_operation(self, request_id, expected_hash):
+        identifier(request_id)
+        if not isinstance(expected_hash,str) or len(expected_hash)!=64 or any(c not in '0123456789abcdef' for c in expected_hash):
+            raise BridgeError('Select the original durable request hash')
+        # Explicit local recovery only. Network/MCP schemas cannot invoke this path.
+        with self.retry_lock:
+            rows=self.store.rows('SELECT * FROM operations WHERE id=?',(request_id,))
+            if not rows or not rows[0]['peer'].startswith('outbound:'):raise BridgeError('Original outgoing operation not found')
+            original=rows[0];body=validate(decode(original['request']))
+            digest=hashlib.sha256(encode(body).encode()).hexdigest()
+            if digest!=expected_hash or digest!=original['hash']:raise BridgeError('Original request hash differs; no retry was sent')
+            if body['op'] not in ('followup','send_message'):raise BridgeError('Explicit retry only supports original tasks/messages; interruptions require a current exact-turn decision')
+            peer=original['peer'][len('outbound:'):]
+            if peer not in self.peers:raise BridgeError('Original peer is not configured')
+            if original['state'] not in ('uncertain',):
+                return decode(original['result']) if original['result'] else {'state':original['state'],'request_id':request_id,'resent':False}
+            query={'version':1,'op':'receipt','id':str(uuid.uuid4()),'request_id':request_id}
+            try:receipt=exchange(self.peers[peer],self.identity,query)
+            except BridgeError:return {'state':'uncertain','request_id':request_id,'resent':False,'reason':'receipt_unavailable'}
+            state=receipt.get('state');result=receipt.get('result')
+            if state!='not_found':
+                if state in ('delivered','pending','rejected') and isinstance(result,dict) and result.get('request_id')==request_id:
+                    self.store.operation(request_id,state,result)
+                    return {**result,'resent':False,'recovered_from_receipt':True}
+                return {'state':'uncertain','request_id':request_id,'resent':False,'reason':'receiver_invoking_or_uncertain'}
+            # AUTHENTICATED not_found is a snapshot, not proof that an old frame cannot
+            # arrive later. Send the exact ID/body once; receiver hash/dedup handles that race.
+            self.store.operation(request_id,'invoking',{'state':'uncertain','request_id':request_id})
+            try:result=exchange(self.peers[peer],self.identity,body)
+            except BridgeError:result={'state':'uncertain','request_id':request_id}
+            self.store.operation(request_id,result.get('state','uncertain'),result)
+            return {**result,'resent':True,'request_hash':digest,'reason':'explicit_retry_after_authenticated_not_found'}
+
     def local(self, request):
         if not isinstance(request, dict) or not isinstance(request.get('local_op'), str):
             raise BridgeError('Invalid local operation')
         op = request['local_op']
+        if op=='retry_operation' and set(request)=={'local_op','operation_id','expected_hash','confirmed'}:
+            if request['confirmed'] is not True:raise BridgeError('Explicit local confirmation is required to retry the original operation')
+            return self.retry_operation(request['operation_id'],request['expected_hash'])
+        if op == 'pair_peer' and set(request) == {'local_op', 'peer', 'config'}:
+            # Only the owned local IPC admits this initial communication grant.
+            # The network protocol and MCP never expose configuration operations.
+            from csl_bridge_lan import validate_config
+            peer=name(request['peer']); config=validate_config(request['config'])
+            if peer==self.identity or not set(config['allow_agents'])<=set(self.agents):
+                raise BridgeError('Invalid local pairing identity/scope')
+            previous=self.peers.get(peer)
+            if previous is not None and previous!=config and previous.get('transport') not in ('lan','relay'):
+                raise BridgeError('Existing non-LAN peer profile is preserved')
+            if previous!=config:
+                with self.store.transaction() as db:
+                    db.execute('INSERT OR REPLACE INTO peers VALUES(?,?)',(peer,encode(config)))
+                self.peers[peer]=config
+                if previous is None:self.spawn(self.peer_loop,peer)
+            return {'paired':peer,'scope':'communication'}
+
         if op.startswith('mail_'):
             return self.mailbox.local(request)
         if op == '_incoming' and set(request) == {'local_op', 'trusted_peer', 'request'}:

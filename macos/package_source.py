@@ -11,7 +11,7 @@ import tarfile
 
 FORBIDDEN={'.git','.local','.agents','.ssh','.codex','.claude','skills','plans','planes','evidence','evidencias','credentials','secrets','lab','reports','tests','__pycache__'}
 SECRET_NAMES={'auth.json','credentials.json','.env','.netrc','.pypirc','id_rsa','id_ed25519','config.private.json'}
-ROOT_FILES={'csl','csl-bridge-mcp','csl-bridge-receiver','LICENSE','LICENSE.md','NOTICE','THIRD_PARTY_NOTICES.md'}
+ROOT_FILES={'csl-pair','csl','csl-bridge-mcp','csl-bridge-receiver','LICENSE','LICENSE.md','NOTICE','THIRD_PARTY_NOTICES.md'}
 APP_FILES={'macos/CSLBridge/CSLBridge.swift','macos/CSLBridge/app_service.py','macos/CSLBridge/ssh_session.py','macos/build_app.py','macos/package_source.py','macos/README.md'}
 
 

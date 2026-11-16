@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Add experimental session pairing through `csl-pair` and the macOS app: manual
+  single-use invitations, pinned TLS on LAN, and an optional operator-provisioned
+  outgoing relay with inner peer-to-peer TLS. No public relay or notarized app is
+  installed by CSL. Paired source admission preserves the current bridge rules.
+- Recover uncertain task/message delivery using authenticated receipts and an
+  explicit retry of the original ID, body and hash; never create replacement work
+  automatically. Renew relay leases independently of inbound work.
+- Add an optional macOS availability assertion scoped to the connected client,
+  released on stop or process exit without changing global power settings.
+- Preserve mailbox/query and optional grant-admin MCP profiles while allowing
+  explicitly selected delegation tools and host deadlines covering remote IPC.
+
 - Frame bridge text injected into native conversations as
   `[Message from=<agent>; session=<sender conversation UUID>; task=<UUID>]`
   without the authorization notice text. Tool-result `notice` fields are unchanged.
