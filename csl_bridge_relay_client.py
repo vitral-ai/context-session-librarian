@@ -83,6 +83,7 @@ class RelaySession(Session):
         return {'transport':'relay','endpoint':relay_endpoint(remote),'token_file':str(token_path),'relay_profile':str(self.profile_path),'allow_agents':self.agents,'allow_ops':COMMUNICATION_OPS}
 
     def publish(self):
+        rpc(self.profile,{'op':'register',**self.route})
         invitation=self.invite();code=code_bytes(invitation['code'])
         locator=hashlib.sha256(b'CSL-relay-invitation-v1'+code).hexdigest()
         descriptor={'endpoint':self.remote,'identity':self.identity,'nonce':secrets.token_hex(16),'expires_at':invitation['expires_at']}
@@ -102,6 +103,7 @@ class RelaySession(Session):
         if not isinstance(signed['proof'],str) or not hmac.compare_digest(signed['proof'],mac(secret,descriptor)):raise BridgeError('Invitation authentication failed; no peer credentials sent')
         if not isinstance(descriptor['expires_at'],(float,int)) or not time.time()<descriptor['expires_at']<=time.time()+305:raise BridgeError('Invitation expired')
         peer=name(descriptor['identity']);remote=relay_endpoint(descriptor['endpoint'])
+        rpc(self.profile,{'op':'register',**self.route})
         offer={'identity':self.identity,'agent':self.agents[0],'endpoint':self.remote,'token':secrets.token_hex(32),'pair_id':str(uuid.uuid4())}
         attempt={'state':'uncertain','remote':remote,'offer':offer,'expected_identity':peer};save(path,attempt)
         try:
@@ -160,16 +162,21 @@ class RelaySession(Session):
 
     def publish_status(self):save(self.state/'relay-status.json',self.relay_status)
 
-    def close(self,revoke=True):
-        self.stop.set()
-        if revoke:
-            try:rpc(self.profile,{'op':'revoke',**self.route},timeout=5)
-            except (BridgeError,OSError,ValueError):pass
+    def revoke_credentials(self):
+        with self.lock:
             self.registry={};self.receipts={};self.peer_agents={}
             save(self.state/'registry.json',{});save(self.state/'pair-receipts.json',{});save(self.state/'peers.json',{})
             save(self.state/'invitation.json',{'used':True,'expires':0,'failures':6,'code':''})
             save(self.state/'pair-attempt.json',{'state':'revoked'})
+            self.invitation=None
             for path in self.state.glob('to-*.json'):save(path,{'token':''})
+
+    def close(self,revoke=True):
+        self.stop.set()
+        if revoke:
+            self.revoke_credentials()
+            try:rpc(self.profile,{'op':'revoke',**self.route},timeout=5)
+            except (BridgeError,OSError,ValueError):pass
         for thread in self.workers:thread.join(.1)
         self.owner_lock.close()
 
@@ -200,7 +207,12 @@ def start_control(session):
                 if value=={'op':'share'}:data=session.publish()
                 elif isinstance(value,dict) and set(value)=={'op','code'} and value['op']=='connect':data=session.connect_code(value['code'])
                 elif value=={'op':'reconcile'}:data=session.reconcile_pair()
-                elif value=={'op':'stop'}:session.stop.set();data={'stopping':True,'revocation':'future calls only; accepted work is not cancelled'}
+                elif value=={'op':'stop'}:
+                    session.revoke_credentials()
+                    session.stop.set()
+                    try:rpc(session.profile,{'op':'revoke',**session.route},timeout=5)
+                    except (BridgeError,OSError,ValueError):pass
+                    data={'stopping':True,'revocation':'local grants revoked; relay revoke best effort; accepted work is not cancelled'}
                 elif value=={'op':'status'}:
                     data={'running':True,'identity':session.identity,'bridge_home':str(session.home),'mode':'relay',**session.relay_status,
                           'peers':[{'identity':p,'agent':a} for p,a in session.peer_agents.items()]}

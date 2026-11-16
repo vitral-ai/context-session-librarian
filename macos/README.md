@@ -117,7 +117,7 @@ Servidor self-host de ensayo: Python>=3.11, openssl/cert TLS y enrollment privad
 --private-key KEY --enrollment-file FILE`. El owner instala sólo relay+store en un
 usuario dedicado, publica el pin confiablemente y decide límites del OS. Defaults:
 32rutas,16conexiones (waiters incluidos; no32pares simultáneos), control4KiB,
-60conexiones/min/IP, invitation300s, pending8/ruta, idle60s, túnel180s/8MiB.
+60conexiones/min/IP y240/min global, tablaIPmáx1024, invitation300s, pending8/ruta, idle60s, túnel180s/8MiB.
 No SLA/DoS garantizado; el límite externo de memoria/CPU corresponde al operador.
 No logs de payload, código, tokens ni respuesta OAuth. El pin no es TOFU.
 

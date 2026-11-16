@@ -208,8 +208,10 @@ final class App: NSObject, NSApplicationDelegate {
             let tools=data["communication_tools"] as? [String:Any]
             let warning=(tools?["installed"] as? Bool == false) ? "ATENCIÓN: herramientas del agente no instaladas; revisa la configuración local. CLI sigue disponible.\n\n" : ""
             alert.informativeText=warning+"Copia y pega el código en la otra utilidad. Caduca en cinco minutos y funciona una vez. Si usas LAN y UDP está bloqueado, copia el enlace privado. Relay usa el mismo código y requiere el perfil privado provisionado. Emparejar no demuestra que el modelo haya avanzado."
-            alert.addButton(withTitle:"Copiar código");alert.addButton(withTitle:"Copiar enlace")
+            let relayed=data["mode"] as? String == "outgoing-relay"
+            alert.addButton(withTitle:"Copiar código");alert.addButton(withTitle:relayed ? "Cerrar" : "Copiar enlace")
             let response=alert.runModal()
+            if relayed && response != .alertFirstButtonReturn {return}
             let selected=response == .alertFirstButtonReturn ? code : data["link"] as? String ?? code
             NSPasteboard.general.clearContents();NSPasteboard.general.setString(selected,forType:.string)
             self.noteLabel.stringValue="Invitación copiada manualmente. Esperando al otro equipo; emparejar no es un encargo."

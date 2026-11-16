@@ -68,6 +68,9 @@ class RelayTests(unittest.TestCase):
         with self.assertRaises(BridgeError):broker.control({'op':'publish',**{k:v for k,v in register.items() if k!='op'},'locator':'a'*64,'descriptor':'x'*3000})
         now[0]=3;broker.control({**register,'route':'4'*64});self.assertNotIn('1'*64,broker.routes)
         broker.control({'op':'revoke','route':'4'*64,'lease':'2'*64});self.assertFalse(broker.routes)
+        global_broker=Broker(Limits(rate=1))
+        for index in range(4):global_broker.admit(str(index));global_broker.release()
+        with self.assertRaisesRegex(BridgeError,'global rate'):global_broker.admit('other')
         for malformed in ({'op':'shell'},{'op':'lookup','locator':'invalid'},[],{'op':'register','route':2,'lease':None}):
             with self.assertRaises(BridgeError):broker.control(malformed)
 
@@ -102,6 +105,70 @@ class RelayTests(unittest.TestCase):
         finally:
             self.broker.forward=original
             alice.close();bob.close();at.join(2);bt.join(2)
+
+    def test_pair_ack_loss_reconciles_same_grant_and_wrong_code_never_pairs(self):
+        import csl_bridge_relay_client as client
+        alice,at=self.make_session('alice');bob,bt=self.make_session('bob')
+        try:
+            invite=alice.publish()
+            with self.assertRaises(BridgeError):bob.connect_code('A'*26)
+            original=client.peer_request
+            def lose(profile,remote,payload,**kwargs):
+                result=original(profile,remote,payload,**kwargs)
+                if payload['op']=='pair':raise OSError('Synthetic ACK loss after peer committed')
+                return result
+            with patch('csl_bridge_relay_client.peer_request',side_effect=lose):result=bob.connect_code(invite['code'])
+            self.assertEqual(result['state'],'uncertain');before=dict(alice.registry)
+            with self.assertRaisesRegex(BridgeError,'Reconcile'):bob.connect_code(invite['code'])
+            result=bob.reconcile_pair();self.assertEqual(result['state'],'paired');self.assertEqual(alice.registry,before)
+            self.assertEqual(len(alice.registry),1)
+            # Relay loss does not erase peer credentials or issue another invitation.
+            self.broker.control({'op':'revoke',**alice.route})
+            end=time.monotonic()+3
+            while alice.route['route'] not in self.broker.routes and time.monotonic()<end:time.sleep(.01)
+            rpc(self.profile,{'op':'register',**alice.route})
+            self.assertEqual(alice.registry,before)
+        finally:alice.close();bob.close();at.join(2);bt.join(2)
+
+    def test_real_relay_ipc_lost_task_ack_receipt_same_id_and_final(self):
+        from csl_bridge_engine import Connector
+        from test_bridge import FakeRuntime
+        import csl_bridge_relay_client as client
+        alice,at=self.make_session('owner');bob,bt=self.make_session('workerbox')
+        connectors=[]
+        try:
+            owner=Connector(alice.home);owner.start();connectors.append(owner)
+            worker=Connector(bob.home);worker.start();worker.client_only=False
+            worker.runtime=FakeRuntime(worker.agents['worker']);connectors.append(worker)
+            self.assertEqual(bob.connect_code(alice.publish()['code'])['state'],'paired')
+            frame={'version':1,'op':'followup','id':str(uuid.uuid4()),'source':'worker','target':'worker','text':'Synthetic relay task; no inference.'}
+            operation={'local_op':'call','peer':'workerbox','request':frame}
+            original=client.peer_request;lost=[False]
+            def lose(profile,remote,payload,**kwargs):
+                result=original(profile,remote,payload,**kwargs)
+                if payload.get('request',{}).get('id')==frame['id'] and not lost[0]:lost[0]=True;raise OSError('Synthetic lost task receipt')
+                return result
+            with patch('csl_bridge_relay_client.peer_request',side_effect=lose):
+                self.assertEqual(owner.local(operation)['state'],'uncertain')
+            self.assertEqual(owner.local(operation)['state'],'uncertain')
+            receipt={'version':1,'op':'receipt','id':str(uuid.uuid4()),'request_id':frame['id']}
+            result=owner.local({'local_op':'call','peer':'workerbox','request':receipt})
+            self.assertEqual(result['state'],'delivered');turn=result['result']['turn_id']
+            self.assertEqual(owner.local(operation)['turn_id'],turn)
+            worker.local({'local_op':'progress','source':'worker','task_id':frame['id'],'id':str(uuid.uuid4()),'text':'Synthetic question?'})
+            event=owner.local({'local_op':'wait','agent':'worker','after':0,'timeout':2})['events'][0]
+            answer={**frame,'id':str(uuid.uuid4()),'op':'send_message','text':'Synthetic real caller choice.'}
+            self.assertEqual(owner.local({'local_op':'call','peer':'workerbox','request':answer})['turn_id'],turn)
+            worker.answers[(worker.agents['worker'],turn)]='Synthetic final.';worker.completed('worker',turn,'completed')
+            final=owner.local({'local_op':'wait','agent':'worker','after':event['cursor'],'timeout':2})['events'][0]
+            self.assertEqual(final['event']['kind'],'final');self.assertEqual(final['event']['turn_id'],turn)
+            self.assertEqual(len([x for x in worker.runtime.calls if x[0]=='turn/start']),1)
+        finally:
+            for connector in connectors:connector.close()
+            alice.close();bob.close();at.join(2);bt.join(2)
+            for connector in connectors:
+                for thread in connector.threads:thread.join(1)
+                if all(not t.is_alive() for t in connector.threads):connector.store.close()
 
     def test_fragmented_inner_tls_read_and_write_large_data(self):
         # Actual MemoryBIO TLS over a fragmenting socketpair; no relay plaintext.

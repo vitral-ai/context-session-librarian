@@ -89,6 +89,23 @@ class AppTests(unittest.TestCase):
   self.assertEqual(result['state'],'uncertain');self.assertTrue(result['connector_owned']);verify.assert_not_called()
   self.assertEqual(self.service.settings['coordinator'],'existing-owner')
   self.assertFalse(json.loads((self.service.state/'peer-proof.json').read_text())['ready'])
+ def test_auto_selects_provisioned_relay_without_reading_or_copying_enrollment(self):
+  self.assertEqual(self.service.connection_mode(),'lan')
+  self.service.state.mkdir(mode=0o700)
+  profile=self.service.state/'relay-profile.json';profile.write_text('{"operator":"private"}');profile.chmod(0o600)
+  self.assertEqual(self.service.connection_mode(),'relay');self.assertEqual(self.service.connection_mode('lan'),'lan')
+  self.assertEqual(self.service.relay_profile_path(),profile)
+ def test_relay_rejoin_invalidates_old_application_ready_until_new_response(self):
+  import time
+  self.service.settings['connection_mode']='relay';now=time.time()
+  app.json_file(self.service.state/'peer-proof.json',{'ready':True,'observed_at':now-3})
+  app.json_file(self.service.state/'relay/relay-status.json',{'phase':'relay_connected_peer_unverified','connected_at':now-2})
+  with patch.object(app,'local_call',return_value={'agents':[{'status':'idle'}]}),patch.object(self.service,'owned',return_value=None):
+   self.assertFalse(self.service.status()['connected'])
+   app.json_file(self.service.state/'peer-proof.json',{'ready':True,'observed_at':now-1})
+   self.assertTrue(self.service.status()['connected'])
+   app.json_file(self.service.state/'relay/relay-status.json',{'phase':'reconnecting','connected_at':now-2})
+   self.assertFalse(self.service.status()['connected'])
  def test_only_owned_mcp_sections_replaced_other_text_preserved(self):
   old='model="owner-model"\n\n[mcp_servers.other]\ncommand="owner"\n\n[mcp_servers.csl_bridge]\ncommand="old"\n[mcp_servers.csl_bridge.tools.send_progress]\napproval_mode="prompt"\n'
   new,previous=app.Service.replace_owned(old,self.service.mcp_profile())

@@ -51,7 +51,7 @@ class Broker:
     def __init__(self,limits=None,clock=time.monotonic,enrollment=None):
         self.enrollment=enrollment
         self.limits=limits or Limits();self.clock=clock;self.lock=threading.RLock()
-        self.routes={};self.invitations={};self.rate=defaultdict(deque);self.active=0
+        self.routes={};self.invitations={};self.rate=defaultdict(deque);self.global_rate=deque();self.active=0
 
     def cleanup(self):
         now=self.clock()
@@ -60,6 +60,7 @@ class Broker:
                 row['revoked']=True;row['condition'].notify_all();del self.routes[key]
         for key,row in list(self.invitations.items()):
             if row['expires']<now:del self.invitations[key]
+        while self.global_rate and now-self.global_rate[0]>=60:self.global_rate.popleft()
         for key,values in list(self.rate.items()):
             while values and now-values[0]>=60:values.popleft()
             if not values:del self.rate[key]
@@ -68,9 +69,11 @@ class Broker:
         with self.lock:
             self.cleanup()
             if self.active>=self.limits.connections:raise BridgeError('Relay capacity reached')
+            if address not in self.rate and len(self.rate)>=1024:raise BridgeError('Relay rate table capacity reached')
+            if len(self.global_rate)>=self.limits.rate*4:raise BridgeError('Relay global rate limit')
             values=self.rate[address]
             if len(values)>=self.limits.rate:raise BridgeError('Relay rate limit')
-            values.append(self.clock());self.active+=1
+            values.append(self.clock());self.global_rate.append(self.clock());self.active+=1
 
     def release(self):
         with self.lock:self.active-=1
@@ -306,6 +309,7 @@ def main():
     parser.add_argument('--max-routes',type=int,default=32);parser.add_argument('--max-connections',type=int,default=16)
     parser.add_argument('--idle-seconds',type=int,default=60);parser.add_argument('--tunnel-seconds',type=int,default=180);parser.add_argument('--tunnel-bytes',type=int,default=8*1024*1024)
     args=parser.parse_args()
+    if not 1<=args.idle_seconds<=300 or not 1<=args.tunnel_seconds<=600 or not 1024<=args.tunnel_bytes<=64*1024*1024:parser.error('Choose bounded idle, lifetime and byte limits')
     if not 1<=args.max_routes<=256 or not 2<=args.max_connections<=1024:parser.error('Choose bounded quotas')
     for path in (args.certificate,args.private_key):
         info=path.lstat()
