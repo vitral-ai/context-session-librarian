@@ -8,12 +8,16 @@ import time
 import uuid
 
 from csl_bridge_rpc import Runtime, RuntimeRejected, RuntimeUnavailable
-from csl_bridge_store import BridgeError, MAX_WIRE, NOTICE, Store, contains_findings, decode, encode, identifier, name, validate
+from csl_bridge_store import (BridgeError, MAX_WIRE, NOTICE, SESSION_OPS, Store, contains_findings, decode, encode,
+                              identifier, message_header, name, validate)
 from csl_bridge_transport import exchange
 
 
 def event_id(value):
     return str(uuid.uuid5(uuid.NAMESPACE_URL, value))
+
+
+EVENT_FIELDS = {'id', 'task_id', 'source', 'target', 'kind', 'text', 'turn_id', 'status'}
 
 
 class Connector:
@@ -187,9 +191,12 @@ class Connector:
                     runtime.close()
             self.stop.wait(1)
 
+    def sends_session(self, peer):
+        # Explicit per-peer opt-in: older receivers reject unknown request/event fields.
+        return self.peers.get(peer, {}).get('send_session') is True
+
     def frame(self, peer, request):
-        return ('[CSL remote agent data; peer=' + peer + '; agent=' + request['source'] +
-                '; request=' + request['id'] + ']\n' + NOTICE + '\n' + request['text'])
+        return message_header(request['source'], request['id'], request.get('session')) + request['text']
 
     def invoke(self, peer, request):
         agent, request_id = request['target'], request['id']
@@ -345,6 +352,8 @@ class Connector:
         for task in tasks:
             event = {'task_id': task['id'], 'source': agent, 'target': task['source'],
                      'kind': 'final', 'text': answer, 'turn_id': tid, 'status': status}
+            if self.sends_session(task['peer']):
+                event['session'] = self.agents[agent]
             self.store.publish(task['peer'], event, event_id(task['id'] + '/' + tid + '/final'))
             with self.store.transaction() as db:
                 db.execute('UPDATE tasks SET status=? WHERE id=?', (status, task['id']))
@@ -435,9 +444,9 @@ class Connector:
         if not isinstance(row, dict) or set(row) != {'seq', 'event'} or type(row['seq']) is not int or not 0 < row['seq'] <= 2**63 - 1:
             raise BridgeError('Invalid event cursor')
         event = row['event']
-        if not isinstance(event, dict) or set(event) != {'id', 'task_id', 'source', 'target', 'kind', 'text', 'turn_id', 'status'}:
+        if not isinstance(event, dict) or set(event) - {'session'} != EVENT_FIELDS:
             raise BridgeError('Invalid event fields')
-        for key in ('id', 'task_id', 'turn_id'):
+        for key in ('id', 'task_id', 'turn_id') + (('session',) if 'session' in event else ()):
             identifier(event[key])
         name(event['source']); name(event['target'])
         if event['kind'] not in ('progress', 'final') or event['status'] not in ('progress', 'completed', 'interrupted', 'failed'):
@@ -483,8 +492,7 @@ class Connector:
                 db.execute("UPDATE inbound SET delivery='uncertain' WHERE id=?", (event['id'],))
             self.ready().call('turn/steer', {'threadId': self.agents[agent], 'expectedTurnId': state['turn_id'],
                 'clientUserMessageId': event['id'], 'input': [{'type': 'text', 'text':
-                    '[CSL remote ' + event['kind'] + '; peer=' + row['peer'] + '; task=' + event['task_id'] + ']\n' +
-                    NOTICE + '\n' + event['text']}]})
+                    message_header(event['source'], event['task_id'], event.get('session')) + event['text']}]})
             with self.store.transaction() as db:
                 db.execute("UPDATE inbound SET delivery='delivered' WHERE id=?", (event['id'],))
         except RuntimeRejected:
@@ -508,6 +516,14 @@ class Connector:
                 raise BridgeError('Possible secrets detected; select or scrub text locally before sending')
             if peer not in self.peers or body.get('source', next(iter(self.agents), None)) not in self.agents:
                 raise BridgeError('Unknown configured peer or source agent')
+            if body['op'] in SESSION_OPS:
+                # The session is always the source's registered conversation, never a caller claim.
+                registered = self.agents[body['source']]
+                if body.get('session', registered) != registered:
+                    raise BridgeError('Session must be the registered conversation of the source agent')
+                body = {key: value for key, value in body.items() if key != 'session'}
+                if self.sends_session(peer):
+                    body['session'] = registered
             if body['op'] in ('followup', 'send_message', 'interrupt'):
                 previous = self.store.reserve('outbound:' + peer, body)
                 if previous:
@@ -543,6 +559,8 @@ class Connector:
                 raise BridgeError('Possible secrets detected; select or scrub progress text locally')
             body = {'task_id': task['id'], 'source': task['target'], 'target': task['source'],
                     'kind': 'progress', 'text': request['text'], 'turn_id': task['turn'], 'status': 'progress'}
+            if self.sends_session(task['peer']):
+                body['session'] = self.agents[task['target']]
             existing = self.store.rows('SELECT body FROM outbound WHERE id=?', (request['id'],))
             if existing and decode(existing[0]['body']) != {**body, 'id': request['id']}:
                 raise BridgeError('Progress ID collision')

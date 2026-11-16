@@ -124,6 +124,39 @@ the selected bridge operations do not reduce that separate key's privileges.
 The helper and its credential storage are local operator setup, not bundled
 credentials or an automatically installed remote service.
 
+### Message Header And Optional Sender Session
+
+Text that a followup, message or progress/final event places in a running
+native conversation starts with one header line, followed by the selected text:
+
+```text
+[Message from=<source agent>; session=<sender conversation UUID>; task=<task/request UUID>]
+```
+
+`from` is the sender's registered agent name. `session` is the conversation UUID
+that the sender's bridge home registers for that agent; a caller cannot choose
+it. `task` is the followup/message request ID, or the task ID of an event. When
+the peer supplies no session, the header is `[Message from=<agent>; task=<UUID>]`;
+none is inferred. The header carries no authorization notice; tool results such
+as `wait` still return a `notice` field. The session is asserted by the peer's
+bridge and authenticated only as far as the peer binding itself.
+
+Receivers accept requests and events with or without the optional `session`
+field. Bridges up to 0.4.2 reject it, so senders include it only for peers that
+explicitly opt in. It is off by default. Enable it when configuring a peer that
+runs a compatible version, or later, offline, for an existing peer:
+
+```sh
+csl bridge --home "$ALICE_BRIDGE_HOME" peer bob --ssh-alias bob-bridge \
+  --allow-agent coordinator --allow-op followup --send-session
+csl bridge --home "$ALICE_BRIDGE_HOME" peer-session bob --enable   # or --disable
+```
+
+The setting is stored as `send_session: true` in that peer's configuration and
+applies to followups and messages sent to that peer and to progress/final events
+published for it. Like other configuration, stop the connector first; it reads
+peers at start. Each side enables it separately for the direction it sends.
+
 Start the connector explicitly in a terminal for the session on each side:
 
 ```sh

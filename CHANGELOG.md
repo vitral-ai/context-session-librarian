@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Frame bridge text injected into native conversations as
+  `[Message from=<agent>; session=<sender conversation UUID>; task=<UUID>]`
+  without the authorization notice text. Tool-result `notice` fields are unchanged.
+- Add an optional `session` field to followup/send_message requests and
+  progress/final events, validated as a UUID and taken from the sender's
+  registered agent conversation. Receivers accept it or its absence; without it
+  the header omits `session`. Unknown fields are still rejected.
+- Send `session` only to peers that opt in with `peer --send-session` or
+  `peer-session PEER --enable`. It is off by default because 0.4.2 and earlier
+  receivers reject the field; enable it after the peer is upgraded.
+
 ## 0.4.2 — 2026-11-15
 
 - Removed `gemini` CLI support. Antigravity CLI remains the supported Google
