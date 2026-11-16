@@ -68,7 +68,7 @@ class MCPTests(unittest.TestCase):
         text=configuration(self.home,'worker',['followup_task','send_message','send_progress'])
         profile=tomllib.loads(text)['mcp_servers']['csl_bridge']
         self.assertEqual(set(profile['tools']),{'followup_task','send_message','send_progress'})
-        self.assertEqual(set(profile['enabled_tools']),{'followup_task','send_message','send_progress','wait_agent','list_agents','agent_status','operation_receipt'})
+        self.assertEqual(set(profile['enabled_tools']),{'followup_task','send_message','send_progress','wait_agent','list_agents','agent_status','operation_receipt','receive','inbox_status','grant_list','grant_show'})
         self.assertTrue(all(x=={'approval_mode':'approve'} for x in profile['tools'].values()))
         self.assertNotIn('interrupt_agent',profile['enabled_tools'])
         self.assertIn('consume model tokens/cost',text)
@@ -125,7 +125,7 @@ class MCPTests(unittest.TestCase):
             serve(self.adapter, stdin, stdout)
         responses = {row['id']: row for row in map(json.loads, stdout.getvalue().splitlines())}
         self.assertEqual(responses[1]['result']['protocolVersion'], '2024-11-05')
-        self.assertEqual(len(responses[2]['result']['tools']), 8)
+        self.assertEqual(len(responses[2]['result']['tools']), 15)
         text = json.loads(responses[3]['result']['content'][0]['text'])
         self.assertEqual(text['bound_agent'], 'worker')
         self.assertEqual(text['data'], {'agents': []})

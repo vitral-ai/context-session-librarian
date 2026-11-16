@@ -159,6 +159,11 @@ class LANConnectorTests(unittest.TestCase):
                 request_id=str(uuid.uuid4())
                 frame={'version':1,'op':'followup','id':request_id,'source':'worker','target':'worker','text':'Synthetic task; no model.'}
                 call={'local_op':'call','peer':'workerbox','request':frame}
+                self.assertEqual(worker.peers['owner']['allow_sources'], ['worker'])
+                spoofed={**frame,'id':str(uuid.uuid4()),'source':'uninvited'}
+                with self.assertRaisesRegex(BridgeError, 'Source agent not admitted'):
+                    worker.incoming('owner',spoofed)
+                self.assertFalse([x for x in worker.runtime.calls if x[0]=='turn/start'])
                 receipt=owner.local(call);self.assertEqual(receipt['state'],'delivered')
                 again=owner.local(call);self.assertEqual(again,receipt)
                 starts=[x for x in worker.runtime.calls if x[0]=='turn/start'];self.assertEqual(len(starts),1)

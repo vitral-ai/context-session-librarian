@@ -44,7 +44,9 @@ def peer_request(profile,remote,payload,timeout=90):
 
 
 def validate_peer_config(config):
-    if set(config)!={'transport','endpoint','token_file','relay_profile','allow_agents','allow_ops'} or config['transport']!='relay':raise BridgeError('Invalid relay peer profile')
+    if not {'transport','endpoint','token_file','relay_profile','allow_agents','allow_ops'} <= set(config) or set(config)-{'transport','endpoint','token_file','relay_profile','allow_agents','allow_ops','allow_sources','send_session'} or config['transport']!='relay':raise BridgeError('Invalid relay peer profile')
+    if 'allow_sources' in config and (not isinstance(config['allow_sources'],list) or any(name(a)!=a for a in config['allow_sources'])):raise BridgeError('Invalid paired source scope')
+    if 'send_session' in config and type(config['send_session']) is not bool:raise BridgeError('Invalid sender session option')
     relay_endpoint(config['endpoint']);validate_profile(private_json(config['relay_profile']));token_value(private_json(config['token_file'])['token'])
     if not config['allow_agents'] or any(name(a)!=a for a in config['allow_agents']):raise BridgeError('Invalid local relay agent scope')
     if set(config['allow_ops'])!=set(COMMUNICATION_OPS):raise BridgeError('Only communication scope is supported')
@@ -80,8 +82,8 @@ class RelaySession(Session):
 
     def validate_endpoint(self,value):return relay_endpoint(value)
 
-    def peer_config(self,remote,token_path):
-        return {'transport':'relay','endpoint':relay_endpoint(remote),'token_file':str(token_path),'relay_profile':str(self.profile_path),'allow_agents':self.agents,'allow_ops':COMMUNICATION_OPS}
+    def peer_config(self,remote,token_path,source_agent):
+        return {'transport':'relay','endpoint':relay_endpoint(remote),'token_file':str(token_path),'relay_profile':str(self.profile_path),'allow_agents':self.agents,'allow_ops':COMMUNICATION_OPS,'allow_sources':[name(source_agent)]}
 
     def publish(self):
         rpc(self.profile,{'op':'register',**self.route})

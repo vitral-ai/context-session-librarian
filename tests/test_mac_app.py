@@ -16,6 +16,12 @@ class AppTests(unittest.TestCase):
   self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
   self.service=app.Service(self.root/'state',self.root/'bridge',self.root/'codex')
  def tearDown(self):self.temp.cleanup()
+ def test_default_home_does_not_adopt_private_lab_configuration(self):
+  with patch.object(app.Path,'home',return_value=self.root):
+   legacy=self.root/'.cslb-mac';legacy.mkdir();(legacy/'bridge.sqlite').touch()
+   service=app.Service(state_root=self.root/'new-state')
+  self.assertEqual(service.home,self.root/'.csl-bridge-app')
+  self.assertEqual(shlex.split(service.connection_info()['receiver_command'])[2],'CSL_BRIDGE_PEER=coordinator')
  def test_profile_uses_current_bundled_interpreter_and_only_communication_grant(self):
   import tomllib
   p=tomllib.loads(self.service.mcp_profile())['mcp_servers']['csl_bridge']
@@ -25,7 +31,7 @@ class AppTests(unittest.TestCase):
   self.assertEqual(p['tool_timeout_sec'],MCP_TOOL_TIMEOUT)
   self.assertEqual(p['tool_timeout_sec']-CALL_TIMEOUT,MCP_HOST_MARGIN)
   self.assertEqual(p['startup_timeout_sec'],10)
-  self.assertEqual(set(p['enabled_tools']),{'send_progress','wait_agent','list_agents','agent_status','operation_receipt'})
+  self.assertEqual(set(p['enabled_tools']),{'send_progress','wait_agent','list_agents','agent_status','operation_receipt','receive','inbox_status','grant_list','grant_show'})
   self.assertEqual(p['tools'],{'send_progress':{'approval_mode':'approve'}})
   self.assertEqual(p['default_tools_approval_mode'],'writes')
   self.assertNotIn('followup_task',p['enabled_tools'])

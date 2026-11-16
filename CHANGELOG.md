@@ -1,5 +1,132 @@
 # Changelog
 
+## Unreleased
+
+- Add experimental session pairing through `csl-pair` and the macOS app: manual
+  single-use invitations, pinned TLS on LAN, and an optional operator-provisioned
+  outgoing relay with inner peer-to-peer TLS. No public relay or notarized app is
+  installed by CSL. Paired source admission preserves the current bridge rules.
+- Recover uncertain task/message delivery using authenticated receipts and an
+  explicit retry of the original ID, body and hash; never create replacement work
+  automatically. Renew relay leases independently of inbound work.
+- Add an optional macOS availability assertion scoped to the connected client,
+  released on stop or process exit without changing global power settings.
+- Preserve mailbox/query and optional grant-admin MCP profiles while allowing
+  explicitly selected delegation tools and host deadlines covering remote IPC.
+
+- Frame bridge text injected into native conversations as
+  `[Message from=<agent>; session=<sender conversation UUID>; task=<UUID>]`
+  without the authorization notice text. Tool-result `notice` fields are unchanged.
+- Add an optional `session` field to followup/send_message requests and
+  progress/final events, validated as a UUID and taken from the sender's
+  registered agent conversation. Receivers accept it or its absence; without it
+  the header omits `session`. Unknown fields are still rejected.
+- Send `session` only to peers that opt in with `peer --send-session` or
+  `peer-session PEER --enable`. It is off by default because 0.4.2 and earlier
+  receivers reject the field; enable it after the peer is upgraded.
+- Breaking: followup and send_message requests are accepted only when their
+  `source` is in the delivering peer's `allow_sources` (previously mailbox-only),
+  because the header no longer names the peer. Admit senders for existing peers
+  offline with the new `peer-sources PEER --allow-source NAME`. Held requests
+  from sources that are not admitted are marked rejected instead of injected.
+- A `session` is accepted only from peers with `send_session` enabled: requests
+  carrying it are rejected, events have it dropped. Events must come from the
+  agent the task targeted on the same peer; stored events that no longer match
+  are never injected or returned by `wait`.
+- Published events store the session; `watch` strips it while the peer's
+  `send_session` is off, so `peer-session PEER --disable` recovers a peer that
+  rejects the field.
+- Body lines starting with `[Message ` are prefixed with `> ` in injected text,
+  and request text with a carriage return outside CRLF is rejected.
+
+## 0.4.2 — 2026-11-15
+
+- Removed `gemini` CLI support. Antigravity CLI remains the supported Google
+  harness. Commands naming the removed provider and existing v3 packages that
+  name it are rejected with an unsupported-provider error; no automatic conversion
+  or replacement is attempted. Existing release history and tags are unchanged.
+
+## 0.4.1 — 2026-11-15
+
+- Bind sync snapshot IDs to the complete metadata/inventory/view/package request,
+  so metadata-only changes cannot reuse a registry snapshot identity. Canonicalize
+  JSON requests for stable replay after lost responses or process restart.
+
+This patch does not expand provider or transport coverage. Mailbox and raw sync
+remain experimental; raw sync uploads selected transcript bytes, including
+secrets, unchanged. Existing tags and historical release evidence are unchanged.
+
+## 0.4.0 — 2026-11-15
+
+Mailbox, raw sync and the added native provider profiles are experimental.
+Raw sync uploads transcript bytes and supported companions **including secrets,
+unchanged**; it does not scrub them or apply encrypted-backup protection.
+
+- Avoid repeated parsing, hashing, view rendering and per-session requests for
+  unchanged Codex/Claude sync inputs. Add private incremental views, periodic full
+  prefix verification and early foreground wakeup for changed histories, while
+  retaining acknowledged completeness timestamps and source/view fences.
+- Run each foreground sync pass in a fresh worker interpreter. Keep the
+  installation lock in the supervisor, resume checkpoints after crashes with
+  bounded backoff, and report native signal/exit codes without echoing transcript
+  diagnostics. Document optional user-managed restart policies.
+
+- Add experimental task-independent bridge mailbox v1 with durable send/receive,
+  explicit acknowledgement, correlated replies and endpoint/content-bound IDs.
+- Resolve optional owner grants locally and dynamically, separately from inbox
+  admission. Messages never activate models or execute work, including with a grant.
+- Expose the same mailbox through CLI and fixed-agent MCP tools for Codex/Claude
+  clients; bounded real exchanges, Claude hook/MCP sessions and isolated SSH
+  container transport have been exercised. Physical cross-OS/WAN mailbox delivery
+  remains unverified. Legacy coordination behavior is retained.
+- Add explicit grant replacement, inspection, expiry and optional endpoint-bound
+  owner-admin MCP tools; logical CLI rejection exits nonzero and MCP reports errors.
+- Add session-bound, bounded boundary hooks and a separately opted Codex native
+  queue notifier requiring a local activate grant and an existing owned runtime.
+  The Gemini messaging adapter is specified only; arbitrary idle Claude activation
+  is not implemented. This is separate from Gemini's local file/provider support.
+- Add an isolated full synthetic test runner with a tested native-version floor;
+  actual native hook/queue gates use fabricated loopback provider responses.
+- Add an explicit, configurable raw session collector: browser PKCE, private
+  rotating credentials, device registration, local scope/status, one-pass and
+  foreground sync. No registry defaults or automatic services are installed.
+- Preserve raw snapshots with resumable byte ranges, stable revisions, prefix
+  hashes, view generations and restart checkpoints. Bind all SQLite DB/WAL
+  inputs to a single captured inventory and retry changing sources.
+- Add local metadata/inventory/view adapters and raw native-file v3 packages for
+  Codex, Claude Code, Gemini CLI and Antigravity CLI. Gemini native resume remains
+  unverified; Antigravity has bounded CLI 1.5.9 reconstruction and owner text-recall
+  evidence. Public
+  v0.3.0 cannot import v3 packages.
+- Include bounded Codex 0.169.0 external history-base chains in raw inventories,
+  inherited views and v3 packages. Import rebinds identities and byte coordinates
+  while retaining paginated references; unsupported/missing ancestry rejects.
+  Native read evidence requires Codex's projection-cache reconstruction; import
+  itself does not activate threads or claim model recall.
+  A cold-home native `thread/read` still needs an explicit owner-selected activation
+  to reconstruct Codex's projection cache; installing files alone is insufficient.
+- Add synthetic HTTP, credential, crash/recovery and privacy tests. Real identity,
+  registry, native resume and remote-environment validation remain separate.
+
+## 0.3.0 — 2026-11-14
+
+- Add an optional experimental bridge for existing Codex conversations: delegate,
+  message, progress/final events, interrupt and continue with stable task receipts.
+  Setup is explicit; no SSH service, global daemon or account is created.
+- Include a bound MCP adapter and an explicit client-only origin mode. Client-only
+  waits deliver events through tool results, without automatic idle wakeup.
+- Include macOS app prototype source and a tracked-file packaging builder, without
+  a validated app binary, notarization or automatic pairing. Real Linux–Mac LAN
+  coordination is exercised; Internet, Windows and Claude live coordination remain
+  unvalidated.
+
+- Add use-case guidance and a dated, reproducible native-import comparison,
+  distinguishing configuration migration from conversation copies and packages.
+- Summarize recognized content, known transformations/state omissions and actual
+  structural validation after conversion/import, without changing JSON schemas.
+- Clarify new destination UUIDs versus receipt-based receive reuse; preserve
+  existing copy, migration and cleanup semantics.
+
 ## 0.2.2 — 2026-11-11
 
 - Show the installed launcher's version and explain a different `csl` on PATH.

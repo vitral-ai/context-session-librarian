@@ -8,15 +8,30 @@ experimental conversion between the two CLIs. It works with conversation history
 including supported tool records, rather than just a summary. See the
 [command and compatibility matrix](docs/PROVIDER_MATRIX.md) for exact coverage.
 
+## When To Use CSL
+
+- Find decisions and tool-output evidence in indexed Codex history.
+- Create an independent continuation, or trim a copy before a different task.
+- Share an inspectable conversation snapshot using ZIPs or a private exchange.
+- Coordinate already-running Codex agents across computers with the optional
+  experimental bridge: delegate work, exchange messages and receive results.
+
+For recent Claude Code chats moving to Codex on the same machine, the
+[native import workflow](https://learn.chatgpt.com/docs/import) may be enough.
+Claude's documented Codex import is for
+[configuration](https://code.claude.com/docs/en/commands), not a symmetric chat
+import. See [native import or CSL?](docs/NATIVE_IMPORT_COMPARISON.md) for a dated,
+reproducible comparison and the distinction between migration and a new copy.
+
 ## Install
 
 Requires Linux and Python 3.11+. The core CLI uses only the Python standard
 library; no virtualenv or pip installation is needed. Confirm tag availability in
-the [v0.2.2 Release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.2.2)
+the [v0.4.2 Release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.4.2)
 before using the tagged installation below.
 
 ```bash
-git clone --branch v0.2.2 https://github.com/vitral-ai/context-session-librarian.git context-session-librarian
+git clone --branch v0.4.2 https://github.com/vitral-ai/context-session-librarian.git context-session-librarian
 cd context-session-librarian
 ./install.sh
 csl --version
@@ -32,7 +47,7 @@ Context Session Librarian was previously named Codex Session Librarian; the
 Opening a conversation requires its native CLI and your own authentication.
 Local search and ZIP transfers need no GitHub account or paid model calls.
 Team exchange additionally requires [GitHub CLI](https://cli.github.com/).
-For development, clone without `--branch v0.2.2` in a separate directory;
+For development, clone without `--branch v0.4.2` in a separate directory;
 see [release history](CHANGELOG.md) for published changes.
 
 ## Find And Reopen A Conversation
@@ -144,6 +159,11 @@ csl convert SESSION_UUID --to claude --cwd ~/work/project
 csl receive csl-SHARE_ID --target codex --cwd ~/work/project
 ```
 
+Successful conversion/import also prints a brief
+conservation summary: recognized messages/tool relationships, known transformations
+and omissions, and the validation actually reached.
+[Read the summary and copy semantics](docs/CONVERSION.md#reading-the-conservation-summary).
+
 The supported profile includes text, completed tools, references, embedded images
 and PDFs. Unsupported assets and opaque context are rejected rather than silently
 discarded. Image/PDF conversion needs the optional isolated decoder installed with
@@ -156,6 +176,54 @@ model recall or that the history fits every model's context. Doctor checks reque
 reconstruction in isolated homes against localhost without generation.
 [Live verification](docs/LIVE_VERIFICATION.md) is a separate, explicitly paid,
 synthetic-only operation.
+
+## Coordinate Existing Codex Agents — Experimental
+
+The optional bridge lets an agent delegate work to an existing Codex conversation
+on another computer, send clarification during work, receive progress and final
+results, and interrupt a delegated turn. A followup continues the same conversation;
+it does not copy its history or create another agent. Each side retains its own
+account, tools and local permissions.
+
+```bash
+csl bridge --help
+```
+
+Setup is explicit: compatible already-loaded Codex conversations, private bridge
+homes, configured peer permissions, an authorized transport and optional MCP tools.
+Installing CSL does not configure SSH or start a bridge. Real Linux–Mac LAN
+coordination has been exercised, including interruption and continued context;
+Internet coordination, Windows and live Claude–Codex coordination are not yet
+validated. A client-only caller receives events through its tool results and does
+not gain automatic idle wakeup. See [bridge setup and boundaries](docs/BRIDGE.md).
+
+A [native macOS app source prototype](macos/README.md) is included for development.
+There is no validated downloadable app bundle yet; the CLI bridge is the tested
+Mac path. The prototype does not provide automatic pairing or configure networking.
+
+Version 0.4.0 also includes [task-independent mailbox messaging](docs/BRIDGE.md#task-independent-mailbox-v1--development)
+for registered Codex/Claude sessions, with durable inboxes, explicit acknowledgement
+and correlated replies. Optional hooks surface messages at session boundaries;
+mail itself grants no permission to act or wake a model. These experimental
+commands require explicit setup. See the [communication guide](docs/AGENT_COMMUNICATION.md)
+for setup, tested interfaces and limits.
+
+## Optional Raw Session Sync — Experimental
+
+Use `csl providers --help` to inspect local Codex, Claude Code and
+Antigravity CLI files through the documented native profiles. These reads do not
+need a registry. Advanced indexed library commands remain Codex-oriented.
+
+`csl sync` can publish selected sessions to a registry you explicitly configure;
+installation starts no upload or background service. **Raw sync uploads secrets
+in transcripts and supported companion files unchanged.** It does not scrub them
+or encrypt them as a backup. Choose the destination and scope deliberately;
+see [setup and privacy](docs/SYNC.md).
+
+Antigravity evidence is bounded to its
+tested CLI/profile. Imported Codex history-base graphs can require an explicit
+native activation before a cold-home read works. File preservation does not
+guarantee model recall. See [native provider limits](docs/SYNC_PROVIDERS.md).
 
 ## Experimental Encrypted Backup
 
@@ -229,6 +297,12 @@ It creates synthetic fixtures, exports and inspects a ZIP, imports a new native
 session and checks experimental Claude-to-Codex conversion. See [the demo](demo/README.md).
 
 ## Development And Documentation
+
+The development collector adds optional [`csl sync`](docs/SYNC.md) for a registry
+you configure. It needs explicit browser sign-in and a separate run command;
+raw uploads include any secrets in transcripts and companion files. It installs
+no service. Supported source formats and resume limits are listed in the
+[provider matrix](docs/PROVIDER_MATRIX.md); this feature is not in the v0.3.0 release.
 
 CSL reads `$CODEX_HOME` (default `~/.codex`) and keeps its search index at
 `session_librarian.sqlite`. Claude transcripts use `$CLAUDE_CONFIG_DIR/projects`

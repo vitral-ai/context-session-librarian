@@ -9,7 +9,8 @@ import time
 import uuid
 
 from csl_bridge_rpc import Runtime, RuntimeRejected, RuntimeUnavailable
-from csl_bridge_store import BridgeError, MAX_WIRE, NOTICE, Store, contains_findings, decode, encode, identifier, name, validate
+from csl_bridge_store import (BridgeError, MAX_WIRE, NOTICE, SESSION_OPS, Store, contains_findings, decode, encode,
+                              frame_message, identifier, name, validate)
 from csl_bridge_transport import exchange
 
 
@@ -17,9 +18,13 @@ def event_id(value):
     return str(uuid.uuid5(uuid.NAMESPACE_URL, value))
 
 
+EVENT_FIELDS = {'id', 'task_id', 'source', 'target', 'kind', 'text', 'turn_id', 'status'}
+
+
 class Connector:
     def __init__(self, home, runtime_factory=Runtime):
         self.store = Store(home)
+        self._mailbox = None  # legacy homes do not acquire a mailbox schema on join
         self.identity = self.store.setting('identity')
         self.runtime_path = self.store.setting('runtime_socket')
         self.client_only = self.runtime_path is None
@@ -47,6 +52,14 @@ class Connector:
         with self.store.transaction() as db:
             db.execute("UPDATE operations SET state='uncertain' WHERE state='invoking'")
 
+    @property
+    def mailbox(self):
+        with self.store.lock:
+            if self._mailbox is None:
+                from csl_bridge_mailbox import Mailbox
+                self._mailbox = Mailbox(self)
+            return self._mailbox
+
     def spawn(self, function, *args):
         thread = threading.Thread(target=function, args=args, daemon=True)
         self.threads.append(thread)
@@ -55,8 +68,12 @@ class Connector:
     def start(self):
         if not self.client_only:
             self.spawn(self.runtime_loop)
+        if any('mail' in config.get('allow_ops', []) for config in self.peers.values()):
+            self.spawn(self.mail_loop)
         for peer in self.peers:
-            if self.peers[peer]['transport'] != 'receive-only':
+            ops = self.peers[peer].get('allow_ops', [])
+            mail_only = 'mail' in ops and 'watch' not in ops
+            if self.peers[peer]['transport'] != 'receive-only' and not mail_only:
                 self.spawn(self.peer_loop, peer)
         connector = self
         class Handler(socketserver.StreamRequestHandler):
@@ -69,6 +86,11 @@ class Connector:
                     request = decode(raw)
                     data = connector.local(request)
                     output = {'ok': True, 'data': data}
+                except sqlite3.Error:
+                    mail = request.get('local_op', '').startswith('mail_') or request.get('request', {}).get('op') == 'mail'
+                    output = ({'ok': True, 'data': {'state': 'uncertain', 'reason': 'mailbox_storage_unavailable',
+                               'request_id': request.get('id', request.get('request', {}).get('id'))}}
+                              if mail else {'ok': False, 'data': {'error': 'Bridge rejected request; inspect receipt/state'}})
                 except (BridgeError, RuntimeUnavailable, RuntimeRejected, sqlite3.Error, OSError, ValueError, KeyError, TypeError):
                     output = {'ok': False, 'data': {'error': 'Bridge rejected request; inspect receipt/state'}}
                 try:
@@ -171,9 +193,24 @@ class Connector:
                     runtime.close()
             self.stop.wait(1)
 
+    def sends_session(self, peer):
+        # Explicit per-peer opt-in, both directions: older receivers reject unknown
+        # request/event fields, and a peer's session claim is shown only if enabled.
+        return self.peers.get(peer, {}).get('send_session') is True
+
+    def admit(self, peer, request):
+        """Raise unless this peer may place text from request['source'] in a conversation.
+
+        The header names the sender by agent and session only, so the source must be
+        bound to this peer; otherwise any peer could claim another peer's agent."""
+        if request['source'] not in self.peers[peer].get('allow_sources', []):
+            raise BridgeError('Source agent not admitted for this peer; configure it with peer-sources/--allow-source')
+        if 'session' in request and not self.sends_session(peer):
+            raise BridgeError('Sender session not accepted from this peer; enable it with peer-session --enable')
+
     def frame(self, peer, request):
-        return ('[CSL remote agent data; peer=' + peer + '; agent=' + request['source'] +
-                '; request=' + request['id'] + ']\n' + NOTICE + '\n' + request['text'])
+        session = request.get('session') if self.sends_session(peer) else None
+        return frame_message(request['source'], request['id'], session, request['text'])
 
     def invoke(self, peer, request):
         agent, request_id = request['target'], request['id']
@@ -220,6 +257,8 @@ class Connector:
     def incoming(self, peer, request):
         peer = name(peer)
         validate(request)
+        if request['op'] == 'mail':
+            return self.mailbox.incoming(peer, request)
         if peer not in self.peers or request['op'] not in self.peers[peer]['allow_ops']:
             raise BridgeError('Peer operation not permitted')
         op = request['op']
@@ -228,6 +267,8 @@ class Connector:
         target = request.get('target')
         if target is not None and (target not in self.agents or target not in self.peers[peer]['allow_agents']):
             raise BridgeError('Peer agent not permitted')
+        if op in SESSION_OPS:
+            self.admit(peer, request)
         if op == 'watch':
             deadline = time.monotonic() + 15
             with self.changed:
@@ -235,7 +276,7 @@ class Connector:
                     rows = self.store.rows('SELECT seq,body FROM outbound WHERE peer=? AND seq>? ORDER BY seq LIMIT 1',
                                            (peer, request['after']))
                     if rows or self.stop.is_set() or time.monotonic() >= deadline:
-                        return {'events': [{'seq': r['seq'], 'event': decode(r['body'])} for r in rows]}
+                        return {'events': [{'seq': r['seq'], 'event': self.served(peer, r['body'])} for r in rows]}
                     self.changed.wait(max(.01, deadline - time.monotonic()))
         if op == 'receipt':
             rows = self.store.rows('SELECT state,result FROM operations WHERE id=? AND peer=?',
@@ -295,6 +336,14 @@ class Connector:
                     self.store.operation(request['id'], 'uncertain', result)
                     return result
 
+    def served(self, peer, body):
+        # Rows keep the session; the peer's current opt-in decides whether it is sent,
+        # so peer-session --disable unblocks a receiver that rejects the field.
+        event = decode(body)
+        if not self.sends_session(peer):
+            event.pop('session', None)
+        return event
+
     def flush(self, agent):
         if self.waiters[agent]:
             return
@@ -302,6 +351,15 @@ class Connector:
         for row in rows:
             request = decode(row['request'])
             if request.get('target') == agent and request['op'] in ('followup', 'send_message') and not row['peer'].startswith('outbound:'):
+                try:
+                    if row['peer'] not in self.peers:
+                        raise BridgeError('Peer no longer configured')
+                    self.admit(row['peer'], request)
+                except BridgeError as exc:
+                    # Held before the current admission rules; never inject it.
+                    self.store.operation(request['id'], 'rejected',
+                                         {'state': 'rejected', 'request_id': request['id'], 'reason': str(exc)})
+                    continue
                 self.invoke(row['peer'], request)
         rows = self.store.rows("SELECT * FROM inbound WHERE delivery='pending' ORDER BY seq")
         for row in rows:
@@ -326,7 +384,8 @@ class Connector:
             answer = 'Result text withheld by partial secret detection. Review selected evidence locally; completion alone is not validation.'
         for task in tasks:
             event = {'task_id': task['id'], 'source': agent, 'target': task['source'],
-                     'kind': 'final', 'text': answer, 'turn_id': tid, 'status': status}
+                     'kind': 'final', 'text': answer, 'turn_id': tid, 'status': status,
+                     'session': self.agents[agent]}  # stripped at serve time unless the peer opted in
             self.store.publish(task['peer'], event, event_id(task['id'] + '/' + tid + '/final'))
             with self.store.transaction() as db:
                 db.execute('UPDATE tasks SET status=? WHERE id=?', (status, task['id']))
@@ -338,7 +397,8 @@ class Connector:
         # evidence remains uncertain; never auto-repeat an invocation.
         for agent, thread in self.agents.items():
             uncertain_ops = [row for row in self.store.rows("SELECT id,peer,request FROM operations WHERE state='uncertain'")
-                             if not row['peer'].startswith('outbound:') and decode(row['request']).get('target') == agent]
+                             if not row['peer'].startswith('outbound:') and decode(row['request']).get('op') != 'mail'
+                             and decode(row['request']).get('target') == agent]
             uncertain_events = [row for row in self.store.rows("SELECT id,body FROM inbound WHERE delivery='uncertain'")
                                 if decode(row['body'])['target'] == agent]
             # Repair only local crash windows with an already-confirmed native turn.
@@ -387,6 +447,16 @@ class Connector:
                 with self.locks[agent]:
                     self.flush(agent)
 
+    def mail_loop(self):
+        while not self.stop.is_set():
+            for peer, config in self.peers.items():
+                if config['transport'] != 'receive-only' and 'mail' in config.get('allow_ops', []):
+                    try:
+                        self.mailbox.flush(peer)
+                    except (BridgeError, OSError, ValueError, sqlite3.Error):
+                        pass  # durable queued facts remain; never invoke a model
+            self.stop.wait(1)
+
     def peer_loop(self, peer):
         retry = 1
         while not self.stop.is_set():
@@ -406,9 +476,9 @@ class Connector:
         if not isinstance(row, dict) or set(row) != {'seq', 'event'} or type(row['seq']) is not int or not 0 < row['seq'] <= 2**63 - 1:
             raise BridgeError('Invalid event cursor')
         event = row['event']
-        if not isinstance(event, dict) or set(event) != {'id', 'task_id', 'source', 'target', 'kind', 'text', 'turn_id', 'status'}:
+        if not isinstance(event, dict) or set(event) - {'session'} != EVENT_FIELDS:
             raise BridgeError('Invalid event fields')
-        for key in ('id', 'task_id', 'turn_id'):
+        for key in ('id', 'task_id', 'turn_id') + (('session',) if 'session' in event else ()):
             identifier(event[key])
         name(event['source']); name(event['target'])
         if event['kind'] not in ('progress', 'final') or event['status'] not in ('progress', 'completed', 'interrupted', 'failed'):
@@ -417,16 +487,12 @@ class Connector:
             raise BridgeError('Invalid event kind/status correlation')
         if not isinstance(event['text'], str) or len(event['text']) > 12000:
             raise BridgeError('Invalid event text')
-        matches = self.store.rows('SELECT request,result FROM operations WHERE id=? AND peer=?',
-                                  (event['task_id'], 'outbound:' + peer))
-        if not matches:
-            raise BridgeError('Event has no matching delegated task')
-        request = decode(matches[0]['request'])
-        if event['source'] != request.get('target') or event['target'] != request.get('source'):
-            raise BridgeError('Event actor does not match delegated task')
-        receipt = decode(matches[0]['result']) if matches[0]['result'] else {}
+        receipt = self.event_task(peer, event)
         if receipt.get('turn_id') and receipt['turn_id'] != event['turn_id']:
             raise BridgeError('Event turn does not match delegated task')
+        if not self.sends_session(peer):
+            # Not rejected: one refused event would stall this peer's cursor for every later event.
+            event = {key: value for key, value in event.items() if key != 'session'}
         with self.store.transaction() as db:
             existing = db.execute('SELECT body FROM inbound WHERE id=?', (event['id'],)).fetchone()
             if existing and existing['body'] != encode(event):
@@ -440,11 +506,30 @@ class Connector:
             rows = self.store.rows('SELECT * FROM inbound WHERE id=?', (event['id'],))
             self.deliver_event(rows[0])
 
+    def event_task(self, peer, event):
+        """Return the receipt of the task this peer's event answers. The event source
+        must be the agent that task was sent to on this same peer, and the target its sender."""
+        matches = self.store.rows('SELECT request,result FROM operations WHERE id=? AND peer=?',
+                                  (event['task_id'], 'outbound:' + peer))
+        if not matches:
+            raise BridgeError('Event has no matching delegated task')
+        request = decode(matches[0]['request'])
+        if event['source'] != request.get('target') or event['target'] != request.get('source'):
+            raise BridgeError('Event actor does not match delegated task')
+        return decode(matches[0]['result']) if matches[0]['result'] else {}
+
     def deliver_event(self, row):
         event = decode(row['body'])
         agent = event['target']
         if row['delivery'] != 'pending' or self.waiters[agent]:
             return
+        try:
+            self.event_task(row['peer'], event)
+        except BridgeError:
+            with self.store.transaction() as db:
+                db.execute("UPDATE inbound SET delivery='rejected' WHERE id=?", (event['id'],))
+            return
+        session = event.get('session') if self.sends_session(row['peer']) else None
         try:
             state = self.current(agent)
             if state['status'] != 'active':
@@ -454,8 +539,7 @@ class Connector:
                 db.execute("UPDATE inbound SET delivery='uncertain' WHERE id=?", (event['id'],))
             self.ready().call('turn/steer', {'threadId': self.agents[agent], 'expectedTurnId': state['turn_id'],
                 'clientUserMessageId': event['id'], 'input': [{'type': 'text', 'text':
-                    '[CSL remote ' + event['kind'] + '; peer=' + row['peer'] + '; task=' + event['task_id'] + ']\n' +
-                    NOTICE + '\n' + event['text']}]})
+                    frame_message(event['source'], event['task_id'], session, event['text'])}]})
             with self.store.transaction() as db:
                 db.execute("UPDATE inbound SET delivery='delivered' WHERE id=?", (event['id'],))
         except RuntimeRejected:
@@ -520,6 +604,9 @@ class Connector:
                 self.peers[peer]=config
                 if previous is None:self.spawn(self.peer_loop,peer)
             return {'paired':peer,'scope':'communication'}
+
+        if op.startswith('mail_'):
+            return self.mailbox.local(request)
         if op == '_incoming' and set(request) == {'local_op', 'trusted_peer', 'request'}:
             return self.incoming(request['trusted_peer'], request['request'])
         if op == 'call' and set(request) == {'local_op', 'peer', 'request'}:
@@ -529,6 +616,14 @@ class Connector:
                 raise BridgeError('Possible secrets detected; select or scrub text locally before sending')
             if peer not in self.peers or body.get('source', next(iter(self.agents), None)) not in self.agents:
                 raise BridgeError('Unknown configured peer or source agent')
+            if body['op'] in SESSION_OPS:
+                # The session is always the source's registered conversation, never a caller claim.
+                registered = self.agents[body['source']]
+                if body.get('session', registered) != registered:
+                    raise BridgeError('Session must be the registered conversation of the source agent')
+                body = {key: value for key, value in body.items() if key != 'session'}
+                if self.sends_session(peer):
+                    body['session'] = registered
             if body['op'] in ('followup', 'send_message', 'interrupt'):
                 previous = self.store.reserve('outbound:' + peer, body)
                 if previous:
@@ -563,7 +658,8 @@ class Connector:
             if contains_findings(request['text']):
                 raise BridgeError('Possible secrets detected; select or scrub progress text locally')
             body = {'task_id': task['id'], 'source': task['target'], 'target': task['source'],
-                    'kind': 'progress', 'text': request['text'], 'turn_id': task['turn'], 'status': 'progress'}
+                    'kind': 'progress', 'text': request['text'], 'turn_id': task['turn'], 'status': 'progress',
+                    'session': self.agents[task['target']]}  # stripped at serve time unless the peer opted in
             existing = self.store.rows('SELECT body FROM outbound WHERE id=?', (request['id'],))
             if existing and decode(existing[0]['body']) != {**body, 'id': request['id']}:
                 raise BridgeError('Progress ID collision')
@@ -582,7 +678,8 @@ class Connector:
                 self.waiters[agent] += 1
                 try:
                     while True:
-                        rows = [r for r in self.store.rows('SELECT * FROM inbound WHERE seq>? ORDER BY seq', (request['after'],))
+                        rows = [r for r in self.store.rows("SELECT * FROM inbound WHERE seq>? AND delivery!='rejected' ORDER BY seq",
+                                                           (request['after'],))
                                 if decode(r['body'])['target'] == agent][:1]
                         if rows or self.stop.is_set() or time.monotonic() >= deadline:
                             # Tool return delivers these events to the waiting conversation.

@@ -84,7 +84,9 @@ def validate_config(config):
     if isinstance(config,dict) and config.get('transport')=='relay':
         from csl_bridge_relay_client import validate_peer_config
         return validate_peer_config(config)
-    if not isinstance(config,dict) or config.get('transport')!='lan' or set(config)!={'transport','endpoint','token_file','allow_agents','allow_ops'}:raise BridgeError('Invalid LAN peer profile')
+    if not isinstance(config,dict) or config.get('transport')!='lan' or not {'transport','endpoint','token_file','allow_agents','allow_ops'} <= set(config) or set(config)-{'transport','endpoint','token_file','allow_agents','allow_ops','allow_sources','send_session'}:raise BridgeError('Invalid LAN peer profile')
+    if 'allow_sources' in config and (not isinstance(config['allow_sources'],list) or any(name(a)!=a for a in config['allow_sources'])):raise BridgeError('Invalid paired source scope')
+    if 'send_session' in config and type(config['send_session']) is not bool:raise BridgeError('Invalid sender session option')
     endpoint(config['endpoint'])
     if not config['allow_agents'] or any(name(a)!=a for a in config['allow_agents']):raise BridgeError('Select registered local agents')
     if set(config['allow_ops'])!=set(COMMUNICATION_OPS):raise BridgeError('LAN scope is communication only')
@@ -209,8 +211,8 @@ class Session:
 
     def validate_endpoint(self, value):return endpoint(value)
 
-    def peer_config(self, remote, token_path):
-        return {'transport':'lan','endpoint':remote,'token_file':str(token_path),'allow_agents':self.agents,'allow_ops':COMMUNICATION_OPS}
+    def peer_config(self, remote, token_path, source_agent):
+        return {'transport':'lan','endpoint':remote,'token_file':str(token_path),'allow_agents':self.agents,'allow_ops':COMMUNICATION_OPS,'allow_sources':[name(source_agent)]}
 
     def invite(self):
         with self.lock:
@@ -265,7 +267,7 @@ class Session:
             if peer not in self.registry.values() and len(self.registry)>=32:raise BridgeError('This session supports at most32 communication peers')
             token=secrets.token_hex(32);token_path=self.state/('to-'+peer+'.json')
             save(token_path,{'token':offer['token']})
-            config=self.peer_config(offer['endpoint'],token_path)
+            config=self.peer_config(offer['endpoint'],token_path,offer['agent'])
             register_peer(self.home,peer,config)
             self.registry={key:owner for key,owner in self.registry.items() if owner!=peer}
             self.registry[hashlib.sha256(token.encode()).hexdigest()]=peer;save(self.state/'registry.json',self.registry)
@@ -384,7 +386,7 @@ def apply_pair_result(session, attempt, result):
     peer=name(result['identity']);name(result['agent']);token_value(result['token'])
     if result['endpoint']!=remote:raise BridgeError('Paired peer identity changed')
     path=session.state/('to-'+peer+'.json');save(path,{'token':result['token']})
-    config=session.peer_config(remote,path)
+    config=session.peer_config(remote,path,result['agent'])
     register_peer(session.home,peer,config)
     session.registry={key:owner for key,owner in session.registry.items() if owner!=peer}
     session.registry[hashlib.sha256(token.encode()).hexdigest()]=peer;save(session.state/'registry.json',session.registry)

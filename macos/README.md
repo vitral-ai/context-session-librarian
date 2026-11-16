@@ -80,10 +80,11 @@ python3.12 source/macos/build_app.py --source source --source-sha SHA \
 ```
 
 Genera .app+ZIP+SHA, Python privado, selftest HOME/PATH vacío, linkage completo y
-firma ad-hoc. No DeveloperID/notarización/publicación. El ZIP04487f7 anterior NO
-incluye pairing. Este nuevo source debe compilar/renderizarse y probarse en dos
-PC reales antes de declarar listo: tests TLS/UDP/IPC loopback y modelo fabricado no
-son una prueba Mac/Linux LAN con agentes reales ni Internet de pairing propio.
+firma ad-hoc. No DeveloperID/notarización/publicación. El candidato anterior a esta integración se compiló y ejecutó en macOS arm64,
+con coordinación real Linux–Mac en LAN y entre redes mediante relay privado.
+Esos ensayos no validan automáticamente un nuevo SHA integrado: todavía requiere
+recompilación y comprobación nativa. No hay binario público firmado/notarizado ni
+prueba humana completa de la interfaz.
 
 ## Relay privado integrado — candidato16Nov
 
@@ -202,3 +203,21 @@ Pruebas del módulo son mocks locales, no ensayo de sleep real. Owner observó S
 DarkWake en el Mac con ACsleep1min y heartbeat congelado; después obtuvo recuperación
 asistida usando una assertion propia temporal. Esa evidencia separada fortalece la
 hipótesis de suspensión, pero no convierte todo fallo previo en causa única probada.
+
+## Relación con CSL actual
+
+Este cliente añade emparejamiento y transporte a la coordinación existente; no
+sustituye la biblioteca, la sincronización ni el buzón independiente de CSL 0.4.
+El emparejamiento admite únicamente el nombre de agente que el otro extremo
+presentó durante la invitación autenticada, conservando el control de remitentes
+de la línea actual. Los perfiles anteriores sin `allow_sources` no adquieren
+admisión automáticamente: el operador debe volver a emparejar o configurar las
+fuentes explícitamente. El UUID de remitente sigue siendo una opción por peer
+(`peer-session --enable`) que debe acordarse en ambos extremos compatibles.
+
+Los perfiles MCP conservan las consultas del buzón y la administración opcional
+existentes. El par LAN/relay autoriza las operaciones de coordinación enumeradas
+arriba; no configura rutas de buzón ni activa sincronización. No habilites `mail`
+editando a mano esa lista: su recorrido sobre estos nuevos perfiles no está
+validado. Ningún servicio, cuenta o credencial de relay se instala por publicar
+este código.

@@ -86,7 +86,8 @@ class BridgeTests(unittest.TestCase):
                 ('runtime_socket', encode(str(self.root / 'never-personal.sock')))])
             db.execute('INSERT INTO agents VALUES(?,?)', ('worker', self.thread))
             db.execute('INSERT INTO peers VALUES(?,?)', ('alice', encode({'transport': 'lab', 'home': str(self.root / 'alice'),
-                'allow_agents': ['worker'], 'allow_ops': ['followup', 'send_message', 'status', 'interrupt', 'watch', 'receipt']})))
+                'allow_agents': ['worker'], 'allow_sources': ['coordinator'],
+                'allow_ops': ['followup', 'send_message', 'status', 'interrupt', 'watch', 'receipt']})))
         store.close()
         self.connector = Connector(self.home)
         self.runtime = FakeRuntime(self.thread)

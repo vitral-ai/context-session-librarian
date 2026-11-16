@@ -20,7 +20,7 @@ class RetryTests(unittest.TestCase):
    with store.transaction() as db:
     db.executemany('INSERT INTO config VALUES(?,?)',[('identity',encode(identity)),('runtime_socket',encode(None))])
     db.execute('INSERT INTO agents VALUES(?,?)',('worker',thread))
-    db.execute('INSERT INTO peers VALUES(?,?)',(peer,encode({'transport':'receive-only','allow_agents':['worker'],'allow_ops':['followup','send_message','receipt','status']})))
+    db.execute('INSERT INTO peers VALUES(?,?)',(peer,encode({'transport':'receive-only','allow_agents':['worker'],'allow_sources':['worker'],'allow_ops':['followup','send_message','receipt','status']})))
    store.close();connector=Connector(home);connector.start();self.connectors.append(connector)
   self.owner,self.receiver=self.connectors;self.receiver.client_only=False;self.receiver.runtime=FakeRuntime(self.receiver.agents['worker'])
   self.owner.peers['bob']={'transport':'lab','home':str(self.receiver.store.home)}

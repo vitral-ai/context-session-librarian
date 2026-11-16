@@ -1,24 +1,36 @@
 # Experimental Agent Coordination
 
-This private candidate adds optional `csl bridge` commands for coordinating
+The optional `csl bridge` commands coordinate
 existing Codex agents. A followup starts an idle agent in its own conversation;
 a message enters active work at a runtime boundary. Progress and completed turns
 return automatically. `wait` blocks on events rather than asking a model to poll.
 Interrupt targets an exact delegated turn; a later followup continues the same
 conversation. A completed turn is not proof that its technical conclusion is valid.
 
-This is an experimental integration, not a supported cross-account Codex feature.
-Native Codex **0.167.1** has been exercised with synthetic loopback Responses
-backends, protocol clients and the actual terminal UI. Two installed Linux
-containers also passed real restricted SSH, simulated network interruption,
-recovery and latency controls. Native model tools reached the connector through
-the optional MCP adapter in both containers. Real inference, native macOS/Windows,
-SSH to another physical computer, and same/different-account operation have
-**not** been validated.
-Synthetic answers in the laboratory are fabricated controls of the real runtime,
-not evidence of model behavior or real colleague collaboration.
+This is an experimental integration using internal runtime interfaces. Do not
+assume compatibility with every Codex version, interface or account combination.
+
+| Check | Evidence and scope |
+| --- | --- |
+| Synthetic runtime and terminal UI | Codex 0.167.1, isolated loopback backends; no real model inference |
+| Linux container transport | Restricted SSH, simulated interruption, recovery and latency controls |
+| Existing-runtime control socket | Codex 0.167.2 direct WebSocket and official byte proxy, isolated no-inference check |
+| Real Linux container coordination | Codex 0.167.1, separately authenticated worker; progress, clarification, final, interrupt and continuation; initial MCP approvals required local assistance |
+| Real Linux–Mac LAN coordination | macOS 27.2 arm64, Codex app-server 0.169.0; actual existing conversations, messages, progress/final, interrupt and context-preserving followup |
+| Internet, Windows, Claude live client | Not validated |
+| Native macOS app bundle | Source prototype only; build, clean installation and GUI interaction not validated |
+
+The real LAN exercise is bounded evidence, not a reliability or compatibility
+guarantee. It used explicitly configured transport and MCP access. Synthetic
+laboratory answers are controls, not evidence of real model behavior. The macOS
+app is separate from the CLI connector used in that exercise.
 
 ## Initial Setup
+
+For task-independent `send`/`receive` messaging available in a development checkout,
+see [Mailbox v1](#task-independent-mailbox-v1--development) below. Those messages do
+not start or steer native work. The coordination setup and commands in the rest of
+this guide retain their existing behavior.
 
 Use Python 3.11+ on a system with Unix domain sockets and `fcntl`. Keep an explicit,
 private bridge home separate from Codex homes, histories and authentication. The
@@ -36,7 +48,6 @@ control endpoint is `$CODEX_HOME/app-server-control/app-server-control.sock`,
 which can be a symlink to a shorter private path. That control endpoint accepts
 WebSocket framing. Resolve the explicit endpoint before connecting, especially
 on Darwin where the original rendezvous path may exceed the Unix path limit.
-The pinned 3122 candidate driver also passed when given the resolved path.
 
 The official `app-server proxy --sock PATH` relays **raw bytes** through its
 stdin/stdout; it does not translate JSON lines into WebSocket frames. The optional
@@ -72,14 +83,24 @@ permissions, account and consumption. Knowing a UUID, using the same login, or
 being on the same LAN does not grant access to the other computer.
 
 Configure each peer offline, explicitly naming which **local** agents and
-operations that peer may access. The following gives Bob access only to Alice's
-coordinator. Bob configures the reciprocal entry allowing Alice's operations on
-his worker. `watch` carries progress/final events; it cannot read native histories.
+operations that peer may access, and which of its **remote** agents may send
+followups and messages. The following gives Bob access only to Alice's
+coordinator, as his agent `worker`. Bob configures the reciprocal entry allowing
+Alice's operations on his worker. `watch` carries progress/final events; it
+cannot read native histories.
 
 ```sh
 csl bridge --home "$ALICE_BRIDGE_HOME" peer bob --ssh-alias bob-bridge \
-  --allow-agent coordinator --allow-op followup --allow-op send_message \
+  --allow-agent coordinator --allow-source worker --allow-op followup --allow-op send_message \
   --allow-op status --allow-op interrupt --allow-op receipt --allow-op watch --allow-op agents
+```
+
+A followup or message whose `source` is not in that peer's `--allow-source`
+list is rejected. To admit senders for a peer configured before this rule,
+replace its list offline (omitting every `--allow-source` admits none):
+
+```sh
+csl bridge --home "$ALICE_BRIDGE_HOME" peer-sources bob --allow-source worker
 ```
 
 The SSH adapter uses a fixed `csl-bridge-receiver` command and JSON on stdin.
@@ -95,7 +116,8 @@ Do not use an unrestricted SSH key as a substitute for this boundary: a remote
 user who can choose the receiver's environment or execute arbitrary commands
 already has broader OS authority. Each direction's trusted setup belongs to
 that machine's owner. Restricted SSH has been tested in isolated Linux
-containers; real colleague devices and Codex-account integration remain untested.
+containers; a separate real Linux–Mac LAN exercise used an owner-authorized
+operator transport as described below.
 
 For a synthetic same-UID laboratory only, `peer --lab-home DIR` selects another
 explicit bridge home instead of SSH. This does not authenticate a real person,
@@ -111,6 +133,63 @@ login profiles or PATH. Operator SSH retains the owner's normal OS authority;
 the selected bridge operations do not reduce that separate key's privileges.
 The helper and its credential storage are local operator setup, not bundled
 credentials or an automatically installed remote service.
+
+### Message Header And Optional Sender Session
+
+Text that a followup, message or progress/final event places in a running
+native conversation starts with one header line, followed by the selected text:
+
+```text
+[Message from=<source agent>; session=<sender conversation UUID>; task=<task/request UUID>]
+```
+
+`from` is the sender's registered agent name. `session` is the conversation UUID
+that the sender's bridge home registers for that agent; a caller cannot choose
+it. `task` is the followup/message request ID, or the task ID of an event. When
+the peer supplies no session, the header is `[Message from=<agent>; task=<UUID>]`;
+none is inferred. The header carries no authorization notice; tool results such
+as `wait` still return a `notice` field. The session is asserted by the peer's
+bridge and authenticated only as far as the peer binding itself.
+
+The header does not name the peer, so `from` and `session` identify a sender
+only together with per-peer `allow_sources`: a receiver accepts a followup or
+message only when its `source` is admitted for the authenticated peer that
+delivered it, so no peer can claim another peer's agent name. Events are
+accepted only from the peer a task was sent to, and only when their `source` is
+the agent that task targeted. Do not treat a name and session as authorization
+on a bridge whose peers share admitted source names.
+
+Every line of the selected text that starts with `[Message ` (after optional
+whitespace, at any line boundary) is prefixed with `> `, so text cannot imitate
+a header. Request text may not contain a carriage return outside a CRLF pair.
+
+Receivers accept requests and events with or without the optional `session`
+field, but honour it only from peers they have enabled. Bridges up to 0.4.2
+reject it, so senders include it only for peers that explicitly opt in. It is
+off by default. Enable it when configuring a peer that runs a compatible
+version, or later, offline, for an existing peer:
+
+```sh
+csl bridge --home "$ALICE_BRIDGE_HOME" peer bob --ssh-alias bob-bridge \
+  --allow-agent coordinator --allow-op followup --send-session
+csl bridge --home "$ALICE_BRIDGE_HOME" peer-session bob --enable   # or --disable
+```
+
+The setting is stored as `send_session: true` in that peer's configuration and
+applies in both directions with that peer:
+
+- Sending: followups and messages sent to that peer, and progress/final events
+  it watches, carry the session. Published events always store the session
+  locally; `watch` removes it at serve time while the setting is off. If a peer
+  that still rejects the field stalls on an event, stop the connector, run
+  `peer-session PEER --disable` and restart: pending events are then served
+  without `session`.
+- Receiving: a followup or message carrying `session` from a peer without the
+  setting is rejected, and a `session` on its events is dropped before storage
+  (rejecting an event would stall every later event from that peer).
+
+Like other configuration, stop the connector first; it reads peers at start.
+Enable it on both sides once both run a compatible version.
 
 Start the connector explicitly in a terminal for the session on each side:
 
@@ -385,3 +464,192 @@ modes are unchanged. Existing live profiles are not migrated by generating one.
 The Swift UI backend wrapper has no shorter subprocess deadline; its3s local
 status/process checks and8s local-start readiness probe remain local-only. Build
 and signing timeouts are unrelated to operational remote calls and remain intact.
+
+## Task-Independent Mailbox V1 — Development
+
+See the standalone [agent communication specification](AGENT_COMMUNICATION.md)
+for the complete envelope, grants, session-bound hooks, optional native queue
+activation, remote transports, failure semantics and verification limits.
+
+This capability is included in CSL 0.4.0, not the earlier v0.3.0 tag. It adds `send`, `receive`, `ack`
+and `reply` independently of delegated tasks. A message is persisted in a private
+inbox even when its recipient is idle or a client-only harness. **No mailbox
+operation starts, resumes, steers or interrupts a model.** The existing
+`followup`/`send_message` coordination operations remain separate and unchanged.
+
+### Register the actual sessions and admit their endpoints
+
+Each session needs its own operator-associated agent name and actual session UUID.
+For example, initialize two private client-only homes on their respective machines:
+
+```sh
+csl bridge --home "$ALICE_HOME" init --id alice-host --client-only
+csl bridge --home "$ALICE_HOME" agent alice --thread "$ALICE_SESSION_UUID"
+csl bridge --home "$BOB_HOME" init --id bob-host --client-only
+csl bridge --home "$BOB_HOME" agent bob --thread "$BOB_SESSION_UUID"
+```
+
+An existing Codex runtime-backed home can also use the mailbox. Claude Code uses
+its actual own session UUID, not another session's borrowed registration. Obtain
+that ID through the session's supported interface; the bridge does not scrape
+histories, copy authentication or create a session to discover it. Fork workers
+sharing a Claude session ID are one endpoint, not independent identities.
+Registration records an operator association; it is **not process attestation**.
+Programs acting as the same OS user are inside the local trust boundary.
+
+Using already-authorized SSH aliases and fixed receivers as described above,
+configure reciprocal admission on each machine:
+
+```sh
+csl bridge --home "$ALICE_HOME" peer bob-host --ssh-alias bob-bridge \
+  --allow-agent alice --allow-source bob --allow-op mail
+csl bridge --home "$BOB_HOME" peer alice-host --ssh-alias alice-bridge \
+  --allow-agent bob --allow-source alice --allow-op mail
+```
+
+`--allow-agent` selects the local inbox; `--allow-source` binds admitted remote
+agent names to the authenticated peer. Neither is inferred from message prose.
+Missing sender admission rejects mail. A peer granted only `mail` does not poll
+the legacy coordination event stream. Replies and acknowledgements need an
+outbound route as well: a receive-only peer cannot create that route automatically.
+Transport and fixed receiver setup remain explicit; no network service is created.
+
+Registering agents or changing peer admission requires a controlled connector
+stop/restart to adopt that configuration; do not restart someone else's live
+connector as an onboarding shortcut. Owner grant changes below are dynamic and
+do not require a connector restart. Start each configured connector explicitly:
+
+```sh
+csl bridge --home "$ALICE_HOME" run
+csl bridge --home "$BOB_HOME" run
+```
+
+Run each command in its own terminal on the appropriate host. The connectors
+deliver queued mail in the background without model calls. No global service,
+autostart or notification hook is installed.
+
+### Send, receive, acknowledge and reply
+
+Choose a message UUID and put selected text in a UTF-8 file. With Alice's home and
+session configured, send information without any outstanding delegated task:
+
+```sh
+csl bridge --home "$ALICE_HOME" send --from alice --peer bob-host --to bob \
+  --message-id "$MESSAGE_UUID" --kind request --text-file question.txt
+csl bridge --home "$BOB_HOME" receive --agent bob
+csl bridge --home "$BOB_HOME" reply --from bob --in-reply-to "$MESSAGE_UUID" \
+  --message-id "$REPLY_UUID" --text-file answer.txt
+csl bridge --home "$BOB_HOME" ack --agent bob --message-id "$MESSAGE_UUID"
+csl bridge --home "$ALICE_HOME" receive --agent alice
+csl bridge --home "$ALICE_HOME" receive --agent alice --outbox
+```
+
+`send` accepts `message` (default) or `request`. `reply` creates the third kind,
+requires a locally known inbox message and derives its destination from that
+message. Only its original registered recipient may reply or acknowledge it.
+Replying before acknowledgement is valid and does not fabricate acknowledgement.
+Receiving does not mark a message acknowledged. `--after CURSOR --limit N` pages
+through inbox/outbox rows; pages are also byte-bounded and may contain fewer than
+the requested limit. Save the returned cursor, not an assumed count.
+
+The envelope has a version, UUID, registered `from`/`to` peer-and-agent endpoints,
+kind, plain-text body, optional `in_reply_to` and `grant_ref`, and bridge-generated
+timestamps. `created_at`/`queued_at` are fixed on first sender acceptance;
+`persisted_at` is set separately by the recipient. Sender time is not evidence of
+recipient delivery or a trustworthy remote clock. Optional timezone-aware
+`--expires-at` bounds delivery: expired, not-yet-persisted mail is not newly sent
+or accepted and has delivery state `expired`. An uncertain expired send is queried
+for prior persistence without sending it again. Already-persisted evidence is
+retained and marked expired. Message expiry is independent of grant expiry:
+an expired grant does not prevent admitted information from being stored.
+The usual partial secret scan applies; opaque
+secrets and missed patterns remain the sender's responsibility.
+
+The facts `queued`, `persisted`, `acknowledged` and `replied` are independent.
+Acknowledgement means only an explicit call by that endpoint, not proof of reading,
+understanding, agreement or successful work. `reply_ids` is bounded to 100 IDs;
+`reply_count` reports the total valid correlated replies. No free-text marker is
+needed to correlate a reply.
+
+Stable IDs bind the operation, endpoints and content. Repeating identical input
+returns its existing message/receipt and current facts, retaining first timestamps;
+changing content, kind or endpoints under the same ID returns explicit
+`state: rejected, reason: id_collision`, nonzero CLI exit and MCP `isError:true`.
+A queued send returns
+promptly without waiting for a remote network timeout. The outbox exposes later
+delivery facts. A lost transport response is `uncertain`, not permanent failure.
+Recovery first queries the recipient's receipt and resends that same immutable
+operation only after confirmed absence (or a confirmed missing acknowledgement).
+An unavailable receipt leaves uncertainty intact. Connector restart preserves
+inboxes, outboxes, acknowledgement timestamps, IDs and queued recovery state.
+
+`undeliverable` requires a confirmed permanent reason, such as a configured inbox
+no longer existing. A generic negative older-peer response records the observed
+fact `peer_rejected: true` and `peer_rejected_reason_unknown`, retaining delivery
+state `uncertain`: that response cannot distinguish unsupported protocol, policy
+rejection or an internal failure. Recovery queries a receipt rather than blindly
+resending the body. Timeouts do not imply a peer rejection or permanent failure.
+
+### Optional locally resolved owner authority
+
+Inbox admission permits communication only. With no `--grant-ref`, received
+authority is `none`, even if a matching grant happens to exist. Unknown, revoked,
+expired or endpoint-mismatched references also yield `none` and a diagnostic
+reason without exposing another grant's scope. Text is never permission.
+
+The recipient's owner may configure a narrow grant through the local CLI:
+
+```sh
+csl bridge --home "$BOB_HOME" grant review-only --peer alice-host --from alice \
+  --to bob --permission communicate --permission work --scope "Review the synthetic fixture"
+csl bridge --home "$BOB_HOME" grant-revoke review-only
+```
+
+An optional grant `--expires-at` is chosen by the owner and must be in the future;
+expiry is not mandatory. Existing references reject unless the owner explicitly
+uses `grant --replace` or MCP `replace:true`, including re-creation after revoke.
+Replacement is reported and affects locally recomputed authority for old mail.
+Registry permissions `communicate`, `activate` and `work` are distinct. `receive`
+recomputes them locally against the authenticated peer and registered endpoints,
+so later revocation/expiry is reflected without erasing the message. Even a valid
+`work` or `activate` grant causes **no execution or model activation** through mail
+operations. A separate owner-opted `notify --wake-codex` can submit headers for
+messages carrying a currently resolved activate grant; it never executes work.
+The local registry, grant contents and operational policy remain in
+the private bridge database. They are not transcript authority, public fixtures,
+remote wire operations. CLI `grant-list`/`grant-show` inspect status and scope.
+MCP own-endpoint inspection is available; create/revoke additionally require the
+explicit owner `--grant-admin` startup capability and cannot mutate another
+recipient's grant.
+
+### MCP and harness boundaries
+
+The bound stdio adapter exposes `send`, `receive`, `ack` and `reply`. `send` uses
+`peer`, `target`, `body`, optional `id`, `kind`, `grant_ref` and `expires_at`;
+`reply` uses `in_reply_to`, `body` and the optional send metadata. `ack` takes
+`message_id`; `receive` takes optional `after`, `limit` and `outbox`. The source
+agent is fixed by the adapter's reviewed local registration, never a model field.
+The MCP `receive` tool is read-only. Other mailbox tools require the harness's
+ordinary local consent; `mcp-config --approve-tool send --approve-tool ack
+--approve-tool reply` can print a bounded profile for explicit review without
+applying it. Owner grant administration is absent unless `--grant-admin` was
+explicitly enabled in that local profile. It grants no native tool permissions.
+
+The wire adds one operation, `op: mail`, with `message_version: 1` and actions
+`send`, `ack`, `receipt`. Existing protocol version and coordination operations
+retain their behavior. Peers running v0.3.0 reject the new operation rather than
+treating it as progress or a task. The mailbox creates additional SQLite tables
+without rewriting native histories or existing coordination rows. Old code does
+not process the new queued mailbox operations; use the new connector for them.
+
+| Harness | Mailbox-v1 behavior | Evidence and limits |
+| --- | --- | --- |
+| Codex | Durable mail; session-bound hooks; separate opted native queue notification | Real CLI mail exchange; real hook CLI with loopback provider; native queue evidence separately scoped |
+| Claude Code | CLI/MCP mailbox; session-bound boundary hooks | Real CLI exchange and real Claude hook sessions; no arbitrary idle-session wake |
+
+Earlier real Codex coordination and a Claude MCP caller reaching a Codex task are
+separate observations. New reciprocal mailbox, scoped agent-action and fault
+tests are described in the standalone specification; they do not establish
+universal OS/runtime support. Native task outcomes (completed, failed, interrupted) remain
+separate from messages; an unobserved cause remains unknown. An agent's prose
+claim such as refusal or need for approval is not a runtime fact or owner grant.

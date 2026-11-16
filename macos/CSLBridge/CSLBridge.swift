@@ -32,7 +32,7 @@ final class App: NSObject, NSApplicationDelegate {
     var pages: NSSegmentedControl!
     var connectView = NSView(), activityView = NSView()
     var sessions = NSPopUpButton()
-    var coordinator = NSTextField(string: "manunruks")
+    var coordinator = NSTextField(string: "coordinator")
     var pairCode = NSSecureTextField(string: "")
     var network = NSPopUpButton()
     var transportMode = NSPopUpButton()

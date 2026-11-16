@@ -1,13 +1,19 @@
 # CLI Coverage And Limits
 
+Experimental mailbox commands, local grant inspection, own-endpoint
+MCP, session-bound boundary hooks and separately opted Codex queue notifications
+are included in CSL 0.4.0 and specified in [agent communication](AGENT_COMMUNICATION.md).
+Physical cross-OS mailbox and WAN tests remain distinct from coordination tests.
+
 CSL supports **native Codex -> Codex and Claude Code -> Claude Code handoffs**.
 Explicit experimental conversion in both directions is integrated through
 canonical v2 for text, references, completed tools, embedded images and PDFs. See
 [conversion and continuity](CONVERSION.md) for the exact profile and commands.
-"Provider" in CSL means the transcript/CLI adapter (`codex` or `claude`), not
+"Provider" in CSL means the transcript/CLI adapter (`codex`, `claude`, or the
+experimental local `antigravity` adapter), not
 the model vendor, API endpoint, subscription or billing account.
 
-This matrix describes shipped CSL commands, not capabilities that exist only
+This matrix describes commands in this checkout, not capabilities that exist only
 in a separate portability experiment. `supported` is bounded by the limits below;
 it does not mean every historical transcript or future CLI version is compatible.
 `experimental` depends on evolving native formats. `not-integrated` is unavailable
@@ -15,46 +21,61 @@ in this public tool, even if a related laboratory experiment has passed.
 
 ## Command Matrix
 
+The experimental `sync` command publishes through the local provider interface
+for Codex, Claude Code and Antigravity CLI to a registry you configure.
+Raw sync uploads transcripts including any secrets they contain. See [sync](SYNC.md)
+and [Antigravity scope and limitations](ANTIGRAVITY.md).
+Codex 0.169.0 external `history_base` chains are included in raw v3 snapshots and
+single-session `export --raw`. Portable/batch export of referenced histories
+rejects rather than omitting ancestors. Native `thread/read` requires rebuilt
+projection caches in a fresh home; import does not activate threads or rebuild
+those caches. See [Codex lineage profile](CODEX_HISTORY_BASE.md).
+Antigravity CLI is a distinct experimental SQLite/protobuf provider. CLI 1.5.9
+has localhost reconstruction evidence and a bounded authenticated owner recall
+check; broader profiles remain unverified. See [scope and limitations](ANTIGRAVITY.md).
+
 The table is mirrored by `csl capabilities` / `csl capabilities --json`.
 Tests require every registered command to appear and this table to match the
 registry. Update implementation, tests and this document in the same change.
 
-| Command | Codex | Claude Code |
-| --- | --- | --- |
-| `annotate` | supported | not-integrated |
-| `backup` | experimental | not-integrated |
-| `bridge` | experimental | not-integrated |
-| `capabilities` | supported | supported |
-| `cockpit` | supported | not-integrated |
-| `convert` | experimental | experimental |
-| `cut` | supported | not-integrated |
-| `doctor` | supported | supported |
-| `export` | supported | supported |
-| `find-work` | supported | not-integrated |
-| `import` | supported | supported |
-| `inbox` | supported | supported |
-| `index` | supported | not-integrated |
-| `migrate` | experimental | not-integrated |
-| `native-clone` | experimental | not-integrated |
-| `native-cut` | experimental | not-integrated |
-| `native-sanitize` | experimental | not-integrated |
-| `patches` | supported | not-integrated |
-| `pinpoint` | supported | not-integrated |
-| `queue` | supported | not-integrated |
-| `recall` | supported | not-integrated |
-| `receive` | supported | supported |
-| `recent` | supported | not-integrated |
-| `related` | supported | not-integrated |
-| `search` | supported | not-integrated |
-| `sessions` | supported | supported |
-| `share` | supported | supported |
-| `show` | supported | not-integrated |
-| `stats` | supported | not-integrated |
-| `summarize` | supported | not-integrated |
-| `team` | supported | supported |
-| `timeline` | supported | not-integrated |
-| `verify-live` | experimental | experimental |
-| `why` | supported | not-integrated |
+| Command | Codex | Claude Code | Antigravity CLI |
+| --- | --- | --- | --- |
+| `annotate` | supported | not-integrated | not-integrated |
+| `backup` | experimental | not-integrated | not-integrated |
+| `bridge` | experimental | experimental | not-integrated |
+| `capabilities` | supported | supported | not-integrated |
+| `cockpit` | supported | not-integrated | not-integrated |
+| `convert` | experimental | experimental | not-integrated |
+| `cut` | supported | not-integrated | not-integrated |
+| `doctor` | supported | supported | not-integrated |
+| `export` | supported | supported | experimental |
+| `find-work` | supported | not-integrated | not-integrated |
+| `import` | supported | supported | experimental |
+| `inbox` | supported | supported | not-integrated |
+| `index` | supported | not-integrated | not-integrated |
+| `migrate` | experimental | not-integrated | not-integrated |
+| `native-clone` | experimental | not-integrated | not-integrated |
+| `native-cut` | experimental | not-integrated | not-integrated |
+| `native-sanitize` | experimental | not-integrated | not-integrated |
+| `patches` | supported | not-integrated | not-integrated |
+| `pinpoint` | supported | not-integrated | not-integrated |
+| `providers` | experimental | experimental | experimental |
+| `queue` | supported | not-integrated | not-integrated |
+| `recall` | supported | not-integrated | not-integrated |
+| `receive` | supported | supported | not-integrated |
+| `recent` | supported | not-integrated | not-integrated |
+| `related` | supported | not-integrated | not-integrated |
+| `search` | supported | not-integrated | not-integrated |
+| `sessions` | supported | supported | experimental |
+| `share` | supported | supported | not-integrated |
+| `show` | supported | not-integrated | not-integrated |
+| `stats` | supported | not-integrated | not-integrated |
+| `summarize` | supported | not-integrated | not-integrated |
+| `sync` | experimental | experimental | experimental |
+| `team` | supported | supported | not-integrated |
+| `timeline` | supported | not-integrated | not-integrated |
+| `verify-live` | experimental | experimental | not-integrated |
+| `why` | supported | not-integrated | not-integrated |
 
 `convert` is an experimental, fail-closed adapter rather than a universal format
 translator. `doctor` reports structural/static/native evidence separately and
@@ -67,8 +88,24 @@ archives/non-interactive sources and does not migrate project files or accounts.
 `migrate cleanup` previews by default and archives unchanged originals only with
 `--confirm-restored`; it never deletes files. See [migration](SHARING.md#computer-migration).
 
-`backup` is included in the published
-[v0.2.2 release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.2.2)
+`bridge` coordinates existing Codex conversations through an explicitly configured
+compatible runtime, transport and peer permissions. Linux–Mac LAN coordination has
+bounded real-model evidence; Internet, Windows and live Claude coordination remain
+unvalidated. The macOS app is source only, not a validated binary. See
+[bridge compatibility and setup](BRIDGE.md).
+
+**Development mailbox v1:** task-independent `bridge send`, `receive`, `ack` and
+`reply` also support shell/MCP clients such as Claude Code, using their own
+registered session endpoint. This capability persists mail without waking or
+steering a model. Explicit receive and session-bound hooks are available;
+bounded real CLI exchanges and Claude hook/MCP sessions have been exercised.
+The separate owner-opted Codex notifier requires a local activate grant and an
+existing owned runtime. Claude support does not imply arbitrary idle wake,
+search or conversion guarantees. See the [communication specification](AGENT_COMMUNICATION.md)
+for evidence boundaries. Earlier v0.3.0 predates this capability, included in 0.4.0.
+
+`backup` is included in the
+[v0.3.0 release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.3.0)
 as an **experimental manual Linux/Codex-only feature**, separate from migration
 and team sharing. It provides encrypted native/portable conversation checkpoints,
 explicit policies, logical-head incremental reuse, partial coverage, multiple
@@ -249,3 +286,18 @@ personal CLI history with synthetic sessions.
 Native behavior references: [Claude session management](https://code.claude.com/docs/en/sessions)
 and [Claude CLI flags](https://code.claude.com/docs/en/cli-reference). Local CLI
 `--help` is authoritative for the installed version's argument set.
+
+
+## Provider reads and native-file packages — experimental, included in 0.4.0
+
+`csl providers list|files|view|package --provider codex|claude|antigravity` exposes the
+local collector interface in [SYNC_PROVIDERS.md](SYNC_PROVIDERS.md). Claude
+session listing includes the shared metadata fields; primary views include
+text, correlated tool blocks and raw offsets. Subagents are preserved as raw
+companions rather than merged into an invented chronology.
+
+Native-file package v3 preserves raw byte prefixes and companions. New CSL can
+inspect/import it; published v0.3.0 cannot. Claude raw export includes its sibling
+session directory when present. Native loader acceptance is not established
+merely by file installation. No network,
+credentials, model calls, or Vitral dependency exist in the provider layer.

@@ -45,6 +45,8 @@ def add_open_argument(parser):
 
 
 def resume_command(sid, cwd, open_args=(), provider="codex"):
+    if provider == 'antigravity':
+        return ['agy','--mode','plan','--conversation',sid,*open_args]
     if provider == "claude":
         return ["claude", "--resume", sid, *open_args]
     if provider != "codex":
@@ -56,7 +58,7 @@ def selected_provider(entries, requested=None):
     providers = set()
     for entry in entries:
         provider = entry.get("provider", "codex") if isinstance(entry, dict) else None
-        if provider not in ("codex", "claude"):
+        if provider not in ("codex", "claude", "antigravity"):
             raise TransferError(f"Unsupported session provider: {provider}")
         providers.add(provider)
     if len(providers) != 1:
@@ -329,10 +331,50 @@ def resolve_sources(needles, csl, db, provider=None):
 
 
 def export_bundle(args, csl, *, quiet=False, scan_secrets=True, extra_metadata=None):
+    if getattr(args,'provider',None)=='claude' and args.raw and len(args.sessions)==1:
+        from csl_sync_providers import provider_home
+        selected=args.sessions[0]
+        sid=Path(selected).stem if Path(selected).is_file() else selected
+        matching=list((provider_home('claude')/'projects').glob('*/'+sid+'.jsonl'))
+        if len(matching)==1 and matching[0].with_suffix('').is_dir():
+            if getattr(args,'scrub_secrets',False):raise TransferError('Native raw file export cannot silently scrub source bytes; use a portable transfer instead')
+            from csl_provider_bundle import export_native
+            result=export_native('claude',sid,args.to,allow_secrets=getattr(args,'allow_secrets',False))
+            if not quiet:print('exported: native Claude raw package including session companions')
+            return result.resolve()
+    if getattr(args, 'provider', None) == 'antigravity':
+        source_provider=args.provider
+        if not args.raw:
+            raise TransferError(source_provider+' native export currently requires --raw; portable conversion is not implemented')
+        if getattr(args,'scrub_secrets',False):raise TransferError('Native raw file export cannot silently scrub source bytes')
+        from csl_sync_providers import list_sessions
+        from csl_provider_bundle import export_native
+        candidates = list_sessions(source_provider)
+        selected = [r for r in candidates if len(args.sessions)==1 and r['native_id'].startswith(args.sessions[0])]
+        if len(selected)!=1:
+            raise TransferError('Specify one unambiguous '+source_provider+' session ID')
+        result=export_native(source_provider,selected[0]['native_id'],args.to,allow_secrets=getattr(args,'allow_secrets',False))
+        if not quiet: print('exported: native '+source_provider+' raw package; resume loading remains experimental')
+        return result.resolve()
     from csl_secrets import SecretReview
     review = SecretReview(args) if scan_secrets else None
     sources = resolve_sources(args.sessions, csl, args.db, getattr(args, "provider", None))
     provider = selected_provider([header for _, header in sources])
+    if provider=='codex':
+        import csl_codex_history
+        if any(csl_codex_history.has_base(path) for path,_ in sources):
+            if not args.raw or len(sources)!=1:
+                raise TransferError('Referenced Codex history requires a single-session --raw export; portable or batch export would omit its base')
+            if getattr(args,'scrub_secrets',False):raise TransferError('Native raw history bases cannot be scrubbed without changing their byte coordinates')
+            from csl_provider_bundle import export_native
+            result=export_native('codex',sources[0][1]['id'],args.to,allow_secrets=getattr(args,'allow_secrets',False))
+            if not quiet:print('exported: native Codex raw package with bounded history bases')
+            return result.resolve()
+    if provider == 'claude' and args.raw and len(sources)==1 and sources[0][0].with_suffix('').is_dir():
+        from csl_provider_bundle import export_native
+        result=export_native('claude',sources[0][1]['id'],args.to,allow_secrets=getattr(args,'allow_secrets',False))
+        if not quiet: print('exported: native Claude raw package including session companions')
+        return result.resolve()
     recovery = getattr(args, "repair_legacy_compaction", False)
     if recovery and (args.raw or provider != "codex"):
         raise TransferError("Legacy compaction recovery requires portable Codex export; do not use --raw")
@@ -346,8 +388,6 @@ def export_bundle(args, csl, *, quiet=False, scan_secrets=True, extra_metadata=N
             review.scan(str(args.to), "output destination")
             review.scan(extra_metadata or {}, "share metadata")
         for session_number, (path, header) in enumerate(sources, 1):
-            if provider == "claude":
-                csl_claude.validate(path, read_records)
             if review:
                 review.scan(header, f"session[{session_number}].metadata")
             snapshot_path = Path(tmp) / f"{session_number}.jsonl"
@@ -399,6 +439,8 @@ def export_bundle(args, csl, *, quiet=False, scan_secrets=True, extra_metadata=N
                     if snapshot_file.tell() + len(data) > MAX_SESSION or total > MAX_TOTAL:
                         raise TransferError("Bundle exceeds the 2 GiB/session or 4 GiB total limit")
                     snapshot_file.write(data)
+            if provider == 'claude':
+                csl_claude.validate(snapshot_path,read_records)
             if not metadata or not messages:
                 raise TransferError("Selected session has no local conversation history; metadata alone cannot be exported")
             if recovered_checkpoints:
@@ -473,6 +515,9 @@ def inspect_bundle(archive):
     if "manifest.json" not in names or archive.getinfo("manifest.json").file_size > MAX_MANIFEST:
         raise TransferError("Missing or oversized manifest")
     manifest = json.loads(archive.read("manifest.json"))
+    if isinstance(manifest, dict) and manifest.get('version') == 3:
+        from csl_provider_bundle import validate
+        return validate(archive)
     if (not isinstance(manifest, dict) or manifest.get("format") != FORMAT
             or manifest.get("version") not in (VERSION, 2) or manifest.get("mode") not in ("raw", "portable")):
         raise TransferError("Unsupported CSL bundle format/version/mode")
@@ -583,6 +628,30 @@ def import_bundle(args, csl):
     with zipfile.ZipFile(args.bundle.expanduser()) as archive, tempfile.TemporaryDirectory(prefix="csl-import-") as tmp:
         manifest = inspect_bundle(archive)
         entries = manifest["sessions"]
+        if manifest.get('version') == 3:
+            if getattr(args,'leaf',None) or getattr(args,'repair_interrupted',False) or getattr(args,'history_policy','active')!='active':
+                raise TransferError('History selection/repair requires explicit conversion; native-file v3 does not convert')
+            if getattr(args,'target',None):
+                raise TransferError('Native-file v3 packages do not support cross-provider conversion')
+            validate_expected_sources(entries,getattr(args,'expected_source_ids',None))
+            provider=selected_provider(entries,getattr(args,'provider',None))
+            if args.list:
+                for entry in entries: print(f"{entry['id']}  [{provider}]  native files: {len(entry['files'])}")
+                return []
+            native_executable='agy' if provider=='antigravity' else provider
+            if args.open and (len(entries)!=1 or not shutil.which(native_executable)):
+                raise TransferError('Opening native-file packages requires one session and its installed CLI')
+            from csl_provider_bundle import import_native
+            rows=import_native(archive,manifest,cwd,name=args.name,max_context_chars=getattr(args,'max_context_chars',None))
+            for row in rows:
+                print(f"imported: {row['id']} (source: {row['source_id']}); native companion files retained")
+                print('continuity: archive checksums verified; identity/cwd/policy rebound; native loading and model recall not tested by this import; history is not execution authority')
+                print('open: '+shlex.join(resume_command(row['id'],cwd,getattr(args,'open_args',()),provider)))
+            if provider=='codex' and getattr(args,'refresh_native_index',True):
+                refresh_native_picker(csl)
+            if args.open:
+                raise SystemExit(subprocess.call(resume_command(rows[0]['id'],cwd,getattr(args,'open_args',()),provider),cwd=cwd))
+            return [row['id'] for row in rows]
         validate_expected_sources(entries, getattr(args, "expected_source_ids", None))
         provider = selected_provider(entries, getattr(args, "provider", None))
         if getattr(args, "target", None):
@@ -596,7 +665,7 @@ def import_bundle(args, csl):
             raise TransferError("--open with multiple sessions needs an interactive terminal; import without --open")
         if args.name and len(entries) != 1:
             raise TransferError("--name requires a single-session bundle")
-        staged = []
+        staged, conservation = [], {}
         # Validate every member, checksum and replay before installing any session.
         for entry in entries:
             sid = str(uuid.uuid4())
@@ -655,7 +724,10 @@ def import_bundle(args, csl):
             if source_bases:
                 print("Note: source fork references an inherited parent history; this import includes only the records present in this package, not missing parent files.")
             from csl_diagnostics import preflight
-            preflight(local, provider, max_context_chars=getattr(args, "max_context_chars", None))
+            observation = {}
+            report = preflight(local, provider, max_context_chars=getattr(args, "max_context_chars", None), observation=observation)
+            conversion = getattr(args, "_conversion_conservation", None)
+            conservation[sid] = (report, observation, conversion[len(staged) - 1] if conversion else None)
         if args.list:
             print("Package validated; no sessions installed.")
             return
@@ -670,6 +742,10 @@ def import_bundle(args, csl):
                 if provider == "codex":
                     csl.register_native_session(conn, target, sid, title, now)
                 print(f"imported: {sid} (source: {entry['id']})")
+                from csl_diagnostics import print_conservation
+                report, observation, conversion = conservation[sid]
+                print_conservation(report, observation, provider=provider, session_id=sid,
+                                   conversion=conversion, entry=entry)
                 command = shlex.join(resume_command(sid, cwd, getattr(args, 'open_args', ()), provider))
                 print(f"open: {'cd ' + shlex.quote(str(cwd)) + ' && ' if provider == 'claude' else ''}{command}")
         except BaseException:
@@ -723,18 +799,18 @@ def add_commands(subparsers, csl):
     export.add_argument("--raw", action="store_true", help="Preserve encrypted reasoning instead of portable cleanup.")
     export.add_argument("--repair-legacy-compaction", action="store_true",
                         help="Explicit recovery of recognized orphaned summary metadata in old portable Codex copies; originals unchanged.")
-    export.add_argument("--provider", choices=("codex", "claude"), help="Limit source lookup to one CLI (default: auto-detect both).")
+    export.add_argument("--provider", choices=("codex", "claude", "antigravity"), help="Limit source lookup; Antigravity requires explicit selection and --raw.")
     from csl_secrets import add_options
     add_options(export)
     export.set_defaults(func=lambda args: run_transfer(args, csl))
-    imp = subparsers.add_parser("import", help="Validate and install a session bundle with fresh local UUIDs.")
+    imp = subparsers.add_parser("import", help="Validate a bundle or install independent copies with fresh UUIDs; direct reimports create more copies.")
     imp.add_argument("bundle", type=Path)
     imp.add_argument("--cwd", type=Path, default=Path.cwd(), help="Local project directory (default: current directory).")
     mode = imp.add_mutually_exclusive_group()
     add_open_argument(mode)
     mode.add_argument("--list", action="store_true", help="Validate and list contents without installing.")
     imp.add_argument("--name", help="Rename a single imported session.")
-    imp.add_argument("--provider", choices=("codex", "claude"), help="Require this native CLI; defaults to the package provider, not conversion.")
+    imp.add_argument("--provider", choices=("codex", "claude", "antigravity"), help="Require this native CLI; defaults to the package provider, not conversion.")
     from csl_conversion import add_conversion_options
     add_conversion_options(imp)
     imp.set_defaults(func=lambda args: run_transfer(args, csl))

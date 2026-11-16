@@ -53,6 +53,17 @@ def configure(args):
     else:
         store = Store(args.home)
     try:
+        if args.action in ('grant', 'grant-revoke', 'grant-list', 'grant-show'):
+            from csl_bridge_mailbox import grant, inspect_grants, MailRejected
+            try:
+                if args.action in ('grant-list', 'grant-show'):
+                    return inspect_grants(store, getattr(args, 'reference', None), getattr(args, 'agent', None),
+                                          getattr(args, 'after', ''), getattr(args, 'limit', 20))
+                return grant(store, args.reference, getattr(args, 'peer', None), getattr(args, 'source', None),
+                             getattr(args, 'target', None), getattr(args, 'permission', None), getattr(args, 'scope', None),
+                             getattr(args, 'expires_at', None), revoke=args.action == 'grant-revoke', replace=getattr(args, 'replace', False))
+            except MailRejected as exc:
+                return {'state': 'rejected', 'reason': exc.reason}
         # Configuration is offline only. Running connector owns its immutable snapshot.
         lock = os.fdopen(os.open(store.home / 'connector.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), 'a')
         try:
@@ -96,7 +107,29 @@ def configure(args):
                     if args.ssh_config:
                         config['ssh_config'] = str(args.ssh_config.expanduser().absolute())
                 config.update(allow_agents=agents, allow_ops=sorted(set(args.allow_op)))
+                config['allow_sources'] = sorted(set(name(value) for value in args.allow_source))
+                if args.send_session:
+                    config['send_session'] = True
                 db.execute('INSERT INTO peers VALUES(?,?)', (peer, encode(config)))
+            elif args.action == 'peer-session':
+                peer = name(args.peer)
+                row = db.execute('SELECT config FROM peers WHERE name=?', (peer,)).fetchone()
+                if row is None:
+                    raise BridgeError('Configure this peer before selecting session headers')
+                config = decode(row['config'])
+                if args.enable:
+                    config['send_session'] = True
+                else:
+                    config.pop('send_session', None)
+                db.execute('UPDATE peers SET config=? WHERE name=?', (encode(config), peer))
+            elif args.action == 'peer-sources':
+                peer = name(args.peer)
+                row = db.execute('SELECT config FROM peers WHERE name=?', (peer,)).fetchone()
+                if row is None:
+                    raise BridgeError('Configure this peer before admitting its source agents')
+                config = decode(row['config'])
+                config['allow_sources'] = sorted(set(name(value) for value in args.allow_source))
+                db.execute('UPDATE peers SET config=? WHERE name=?', (encode(config), peer))
         return {'state': 'configured', 'action': args.action, 'inference': False}
     finally:
         store.close()
@@ -111,8 +144,45 @@ def uncertain_diagnostic(request, peer):
 def run(args):
     request = None
     try:
-        if args.action in ('init', 'agent', 'peer'):
+        if args.action == 'notify':
+            from csl_bridge_notify import main as notify_main
+            values = ['--home', str(args.home), '--agent', args.agent, '--codex', str(args.codex),
+                      '--runtime-socket', str(args.runtime_socket)]
+            if args.wake_codex:
+                values.append('--wake-codex')
+            raise SystemExit(notify_main(values))
+        if args.action == 'hook':
+            from csl_bridge_hooks import main as hook_main
+            values = ['--home', str(args.home), '--agent', args.agent, '--event', args.event, '--limit', str(args.limit)]
+            if args.include_body:
+                values.append('--include-body')
+            if args.session_binding:
+                values += ['--session-binding', args.session_binding]
+            raise SystemExit(hook_main(values))
+        if args.action in ('init', 'agent', 'peer', 'peer-session', 'peer-sources', 'grant', 'grant-revoke', 'grant-list', 'grant-show'):
             result = configure(args)
+        elif args.action in ('send', 'receive', 'ack', 'reply', 'inbox-status'):
+            request = {'local_op': 'mail_' + args.action.replace('-', '_'), 'agent': args.agent}
+            if args.action in ('send', 'reply'):
+                request.update(id=args.message_id or str(uuid.uuid4()), body=reviewed_text(args.text_file, args.scrub_secrets),
+                               grant_ref=args.grant_ref, expires_at=args.expires_at)
+                if args.action == 'send':
+                    request.update(peer=args.peer, target=args.target, kind=args.kind)
+                else:
+                    request['in_reply_to'] = args.in_reply_to
+            elif args.action == 'ack':
+                request['message_id'] = args.message_id
+            elif args.action == 'receive':
+                request.update(after=args.after, limit=args.limit, outbox=args.outbox)
+            else:
+                request.update(after=args.after, limit=args.limit)
+            if args.action == 'inbox-status' and (not 0 <= args.after <= 2**63-1 or not 1 <= args.limit <= 100):
+                result = {'state': 'rejected', 'reason': 'invalid_mail_cursor_or_limit'}
+            else:
+                result = local_call(args.home, request)
+            if args.action == 'inbox-status' and result.get('state') == 'rejected' and result.get('reason') == 'invalid_mail_fields':
+                result = {'state': 'rejected', 'reason': 'connector_does_not_accept_inbox_status',
+                          'observed_reason': 'invalid_mail_fields'}
         elif args.action == 'run':
             from csl_bridge_engine import Connector
             connector = Connector(args.home)
@@ -134,7 +204,7 @@ def run(args):
             return
         elif args.action == 'mcp-config':
             from csl_bridge_mcp import configuration
-            print(configuration(args.home, args.agent, args.approve_tool))
+            print(configuration(args.home, args.agent, args.approve_tool, grant_admin=args.grant_admin))
             return
         elif args.action == 'agents' and not args.peer:
             result = local_call(args.home, {'local_op': 'agents'})
@@ -160,6 +230,11 @@ def run(args):
         print(encode(result))
         if request and args.action in ('followup', 'send_message', 'interrupt') and result.get('state') == 'uncertain':
             uncertain_diagnostic(request, args.peer)
+        if args.action in ('send', 'receive', 'ack', 'reply', 'inbox-status', 'grant', 'grant-revoke', 'grant-list', 'grant-show'):
+            if result.get('state') in ('rejected', 'undeliverable', 'expired'):
+                raise SystemExit(1)
+            if args.action in ('send', 'ack', 'reply') and result.get('delivery', {}).get('state') in ('rejected', 'undeliverable', 'expired'):
+                raise SystemExit(1)
     except BridgeError as exc:
         print('Bridge: ' + str(exc), file=sys.stderr)
         if request and args.action in ('followup', 'send_message', 'interrupt') and 'uncertain' in str(exc).lower():
@@ -176,7 +251,7 @@ def add_commands(subparsers, csl):
         description='Coordinate existing Codex agents through a foreground session connector. '
                     'Followup activates idle; messages/events enter active work automatically. '
                     'No native attach to standalone TUI, no cloning, no automatic approvals. '
-                    'Advanced setup uses endpoint/agent/peer. Private csl-pair provides session LAN invitation pairing; real-device pairing is a separate pending gate.')
+                    'Requires endpoint/agent/peer setup. Experimental csl-pair adds LAN/private-relay pairing. See macos/README.md for validation limits.')
     parser.add_argument('--home', type=Path, required=True, help='Explicit private bridge home, separate from Codex histories/auth.')
     sub = parser.add_subparsers(dest='action', required=True)
     init = sub.add_parser('init', help='Initialize explicit private state; does not start anything.')
@@ -196,12 +271,82 @@ def add_commands(subparsers, csl):
     transport.add_argument('--operator-helper', type=Path, help='Trusted local executable with fixed operator SSH endpoint; JSON stdin only, no credentials in bridge.')
     peer.add_argument('--ssh-config', type=Path, help='Explicit private trusted SSH config file, separate from personal SSH setup.')
     peer.add_argument('--allow-agent', action='append', required=True)
+    peer.add_argument('--allow-source', action='append', default=[],
+                      help='Admit this remote registered agent name as a sender from this peer (followup, send_message, mail); '
+                           'no implicit sender admission.')
     peer.add_argument('--allow-op', action='append', required=True,
-                      choices=['followup', 'send_message', 'status', 'interrupt', 'receipt', 'watch', 'agents'])
+                      choices=['followup', 'send_message', 'status', 'interrupt', 'receipt', 'watch', 'agents', 'mail'])
+    peer.add_argument('--send-session', action='store_true',
+                      help='Include the sender\'s registered conversation UUID in followups, messages and events to this peer. '
+                           'Enable only for peers that accept the optional session field.')
+    peer_session = sub.add_parser('peer-session', help='Enable or disable the optional sender session field for an existing peer, offline.')
+    peer_session.add_argument('peer')
+    toggle = peer_session.add_mutually_exclusive_group(required=True)
+    toggle.add_argument('--enable', action='store_true', help='Send the registered sender conversation UUID to this peer.')
+    toggle.add_argument('--disable', action='store_true', help='Stop sending it (default for every peer).')
+    peer_sources = sub.add_parser('peer-sources', help='Replace the admitted remote source agents of an existing peer, offline.')
+    peer_sources.add_argument('peer')
+    peer_sources.add_argument('--allow-source', action='append', default=[],
+                              help='Admit this remote registered agent name; repeat for several, omit all to admit none.')
+    grant = sub.add_parser('grant', help='Owner-only local mailbox authority registry; never activates or executes work.')
+    grant.add_argument('reference')
+    grant.add_argument('--peer', required=True)
+    grant.add_argument('--from', dest='source', required=True)
+    grant.add_argument('--to', dest='target', required=True)
+    grant.add_argument('--permission', action='append', choices=['communicate', 'activate', 'work'], required=True)
+    grant.add_argument('--scope', required=True)
+    grant.add_argument('--expires-at', help='Optional owner-chosen timezone-aware ISO8601 grant expiry.')
+    grant.add_argument('--replace', action='store_true', help='Explicitly replace an existing reference, including revoked grants; changes authority of earlier messages that reference it.')
+    revoke = sub.add_parser('grant-revoke', help='Owner-only local revocation; stored messages remain intact.')
+    revoke.add_argument('reference')
+    grant_list = sub.add_parser('grant-list', help='Inspect local owner grants, including expiry, revocation and descriptive scope.')
+    grant_list.add_argument('--agent', help='Optional recipient endpoint filter.')
+    grant_list.add_argument('--after', default='')
+    grant_list.add_argument('--limit', type=int, default=20)
+    grant_show = sub.add_parser('grant-show', help='Inspect one locally configured owner grant.')
+    grant_show.add_argument('reference')
+    grant_show.add_argument('--agent')
+    status = sub.add_parser('inbox-status', help='Read counts and bounded pending headers only; no bodies, scopes, acknowledgement or wake.')
+    status.add_argument('--agent', required=True)
+    status.add_argument('--after', type=int, default=0)
+    status.add_argument('--limit', type=int, default=20)
+    hook = sub.add_parser('hook', help='Claude turn-boundary hook; metadata by default, never acknowledgement, model wake or work authority.')
+    hook.add_argument('--agent', required=True)
+    hook.add_argument('--event', required=True, choices=['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop'])
+    hook.add_argument('--limit', type=int, default=10)
+    hook.add_argument('--session-binding', help='Explicit owner-supplied UUID binding override for isolated tests; never inferred from message contents.')
+    hook.add_argument('--include-body', action='store_true', help='Explicit local owner opt-in to surface bounded untrusted message bodies at this turn boundary.')
+    notify = sub.add_parser('notify', help='Owner-run Codex native queue notification; opt-in and local activate grant required, no work execution.')
+    notify.add_argument('--agent', required=True)
+    notify.add_argument('--codex', type=Path, required=True)
+    notify.add_argument('--runtime-socket', type=Path, required=True)
+    notify.add_argument('--wake-codex', action='store_true')
+    for action in ('send', 'receive', 'ack', 'reply'):
+        mail = sub.add_parser(action, help='Task-independent mailbox v1 '+action+'; never starts or steers a model.')
+        mail.add_argument('--agent' if action in ('receive', 'ack') else '--from', dest='agent', required=True)
+        if action in ('send', 'reply'):
+            mail.add_argument('--message-id', help='Stable UUID; retry with identical endpoints/content.')
+            mail.add_argument('--text-file', type=Path, required=True)
+            mail.add_argument('--scrub-secrets', action='store_true')
+            mail.add_argument('--grant-ref')
+            mail.add_argument('--expires-at', help='Optional message expiry; distinct from grant expiry; never erases stored mail.')
+        if action == 'send':
+            mail.add_argument('--peer', required=True)
+            mail.add_argument('--to', dest='target', required=True)
+            mail.add_argument('--kind', choices=['message', 'request'], default='message')
+        elif action == 'reply':
+            mail.add_argument('--in-reply-to', required=True)
+        elif action == 'ack':
+            mail.add_argument('--message-id', required=True)
+        else:
+            mail.add_argument('--after', type=int, default=0)
+            mail.add_argument('--limit', type=int, default=20)
+            mail.add_argument('--outbox', action='store_true')
     sub.add_parser('run', help='Run connector in foreground for this session; Ctrl-C stops it, not Codex work.')
     mcp_config = sub.add_parser('mcp-config', help='Print a reviewable local MCP profile; never applies consent/configuration.')
     mcp_config.add_argument('--agent', required=True, help='Explicit registered local identity bound to the tools.')
-    mcp_config.add_argument('--approve-tool', action='append', default=[], choices=['send_progress', 'send_message', 'followup_task'],
+    mcp_config.add_argument('--grant-admin', action='store_true', help='Explicit local owner capability for grant mutation scoped to this bound recipient; does not apply configuration or approve execution.')
+    mcp_config.add_argument('--approve-tool', action='append', default=[], choices=['send_progress', 'send_message', 'followup_task', 'send', 'ack', 'reply'],
         help='Explicit initial local consent for this message tool only; other side-effecting tools remain unavailable.')
     agents = sub.add_parser('agents', help='List registered local agents, or the agents a peer permits you to inspect.')
     agents.add_argument('--peer')

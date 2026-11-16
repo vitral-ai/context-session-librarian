@@ -1,6 +1,111 @@
 # Release operation and published state
 
+## Current provider scope
+
+The current provider set is Codex, Claude Code and Antigravity CLI. Removed
+providers are rejected, including in existing v3 packages; see [CHANGELOG](CHANGELOG.md).
+The version records below refer to their original published tags, which are unchanged.
+
 ## Version records
+
+### v0.4.2
+
+This release removes Gemini CLI support. Current native provider profiles are
+Codex, Claude Code and Antigravity CLI. Commands selecting the removed provider
+fail explicitly; existing v3 packages naming it are rejected before installation
+or native launch. No automatic conversion or replacement is performed. Historical
+tags and Release notes retain their original contents.
+
+Run the full isolated regression suite, available offline native gates, isolated
+installation and synthetic demo at the selected SHA. Publication is established
+by the annotated tag and [v0.4.2 Release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.4.2).
+Mailbox and raw sync remain experimental; raw sync uploads secrets unchanged.
+Updating the backup producer starts a fresh capture; finish pending runs with
+their original version and keep historical recovery keys.
+
+### v0.4.1
+
+Patch release for raw-sync snapshot identity: metadata-only changes now receive
+distinct identities, and canonical JSON requests support stable retries after
+lost responses or process restart. Provider coverage and communication transports
+are unchanged. The experimental status and privacy limits of v0.4.0 still apply:
+raw sync uploads selected bytes, including secrets, unchanged.
+
+Validate the fixed candidate with the full isolated suite and available offline
+native gates, isolated installation and synthetic demo. Publication is established
+by the annotated tag and [v0.4.1 Release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.4.1),
+not by this preparation record. No historical tag or Release is changed.
+Updating the backup producer version starts a fresh capture; finish pending runs
+with their original producer and retain historical recovery keys.
+
+### v0.4.0
+
+This version packages task-independent agent messaging, opt-in raw session sync,
+multi-file native provider reads/packages and bounded Codex history-base graphs.
+Mailbox and sync remain experimental. Mail persists independently from tasks;
+ACK, recipient persistence and reply are separate facts. Optional hooks and
+native notifications require explicit owner setup; installation grants no work
+authority and does not start a service.
+
+Sync has no default registry and requires explicit authentication/configuration.
+It uploads selected raw transcripts and supported companion files **including
+their secrets, unchanged**. It does not scrub them or apply backup encryption.
+Incremental reuse and crash-contained foreground watch passes do not constitute
+a durability SLA or model-continuity guarantee.
+
+Local provider reads and raw v3 packages were added in this release. See the
+[tagged provider matrix](https://github.com/vitral-ai/context-session-librarian/blob/v0.4.0/docs/PROVIDER_MATRIX.md)
+for its historical provider set and limits.
+Antigravity has bounded CLI 1.5.9 reconstruction and text-recall evidence, not
+universal compatibility. Codex 0.169.0 bounded history-base import preserves
+references, but cold-home `thread/read` needs explicit activation to reconstruct
+the native projection cache. Import never activates a model to hide that step.
+CSL 0.3.0 cannot import v3 packages.
+
+Backup remains experimental/manual with its existing key and age requirements.
+The new producer version starts a fresh capture; finish pending runs/recipient
+plans with their original version and retain older checkpoints' recovery keys.
+Historical tags, notes and checkpoints are not rewritten.
+
+Validate this release's fixed candidate SHA with the full isolated suite and
+available offline native gates, isolated prefix installation/help/capabilities
+and the offline synthetic demo. The GitHub Release records final commit, counts,
+skips, CLI versions and clean installation from the published annotated tag.
+Preparation or a merged PR alone is not proof of publication. See
+[v0.4.0](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.4.0),
+[sync privacy](docs/SYNC.md), [provider limits](docs/SYNC_PROVIDERS.md) and
+[communication](docs/AGENT_COMMUNICATION.md).
+
+### v0.3.0
+
+This version adds experimental live coordination of existing Codex conversations,
+an optional bound MCP adapter and explicit client-only origins. The bridge does
+not create a model, native runtime, SSH service or account. Clients and peers keep
+their own permissions. Client-only callers receive events in tool results and do
+not gain automatic idle wakeup.
+
+Bounded real Linux–Mac LAN and separately authenticated Linux-container exercises
+covered delegation, progress/final responses, interruption and continued context.
+These checks are distinct from synthetic runtime tests and do not establish
+Internet, Windows or live Claude–Codex compatibility. Native Mac app source and
+packaging tools are included, without a validated binary or clean-install claim.
+See [bridge compatibility and setup](docs/BRIDGE.md) and [app status](macos/README.md).
+
+Conversion/import now reports recognized content, known omissions and structural
+validation separately from native acceptance or live model recall. The native
+import comparison explains which use cases require a conversation copy rather
+than configuration migration.
+
+Backup remains experimental, manual and Linux/Codex only, with the same external
+age v1.3.2 and recovery-key requirements. Updating the producing CSL version starts
+a fresh backup capture. Finish pending runs and recipient-change plans using their
+original version before upgrading; older checkpoints retain their original keys.
+Historical backup data, tags and Release notes are not rewritten.
+
+The release owner must verify this candidate's exact SHA, checks, isolated install
+and publication. This preparation record alone is not proof of availability;
+the [v0.3.0 Release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.3.0)
+and its fixed tag establish the published version.
 
 ### v0.2.2 — release candidate
 
@@ -122,7 +227,7 @@ its version is explicitly changed; never mix participant versions silently.
 4. Install from the published tag in a fresh isolated environment. Check version,
    resolved SHA and demo. Align README, web and user documentation with reality.
 
-Use the operator's own authorized GitHub identity (Manunruks uses gh-manunruks).
+Use the operator's own authorized GitHub identity.
 Repository access does not itself authorize a new version, a transfer or scope
 expansion. Package-registry publication requires its own plan and verification.
 
@@ -130,7 +235,7 @@ expansion. Package-registry publication requires its own plan and verification.
 
 Ordinary CI covers Python 3.11/3.13 and optional media in process mode; it does not
 by itself establish native CLI loading or migration E2E. The manual isolated native
-workflow pins Codex 0.166.0 and Claude Code 2.1.308, enables native/migration opt-ins
+workflow pins Codex 0.169.0 and Claude Code 2.1.308, enables native/migration opt-ins
 and requires bubblewrap for media. Use synthetic temporary homes, no personal
 credentials and no model inference. Record actual results, not workflow existence.
 Paid continuations are a separate explicitly authorized stage.
