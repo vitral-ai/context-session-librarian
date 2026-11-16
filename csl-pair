@@ -8,13 +8,13 @@ sys.path.insert(0,str(source))
 sys.path.insert(0,str(source/'macos/CSLBridge'))
 from app_service import main
 if len(sys.argv)<2 or sys.argv[1] in ('-h','--help'):
-    print('CSL private LAN pairing: select an already-open conversation, share a manual code/link, connect.\n'
-          'csl-pair share --thread EXISTING_UUID [--interface NAME]\n'
-          'csl-pair connect --thread EXISTING_UUID --pair-code-stdin [--interface NAME]\n'
+    print('CSL private session pairing: select an already-open conversation, share a manual code/link, connect.\n'
+          'csl-pair share --thread EXISTING_UUID [--mode auto|lan|relay] [--interface NAME]\n'
+          'csl-pair connect --thread EXISTING_UUID --pair-code-stdin [--mode auto|lan|relay] [--interface NAME]\n'
           'csl-pair task --text-file TASK | message --text-file ANSWER | receipt --operation-id ID\n'
           'csl-pair wait --after CURSOR --timeout 20 | status | reconcile | stop | events\n'
           'Paste the one-use 26-character code or private link through stdin. LAN/OS permission required.\n'
-          'No QR, public relay, WAN guarantee, new model, login or OS service. SSH remains advanced.\n'
+          'Auto uses an operator-provisioned private relay profile for mobility; otherwise LAN.\nNo QR, arbitrary public relay, new model, login or OS service. No automatic ambiguous replay. SSH remains advanced.\n'
           'A valid pair is not proof of model continuation or completion.')
     raise SystemExit(0)
 commands={'share':'lan-share','connect':'lan-connect','status':'lan-status','stop':'lan-stop','reconcile':'lan-reconcile','task':'lan-followup','message':'lan-message','receipt':'lan-receipt','wait':'lan-wait'}

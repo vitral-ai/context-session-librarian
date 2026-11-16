@@ -474,7 +474,7 @@ class Connector:
             if peer==self.identity or not set(config['allow_agents'])<=set(self.agents):
                 raise BridgeError('Invalid local pairing identity/scope')
             previous=self.peers.get(peer)
-            if previous is not None and previous!=config and previous.get('transport')!='lan':
+            if previous is not None and previous!=config and previous.get('transport') not in ('lan','relay'):
                 raise BridgeError('Existing non-LAN peer profile is preserved')
             if previous!=config:
                 with self.store.transaction() as db:

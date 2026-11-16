@@ -64,6 +64,9 @@ def ssh_argv(alias, config=None):
 
 def exchange(config, local_peer, request):
     validate(request)
+    if config['transport'] == 'relay':
+        from csl_bridge_relay_client import exchange as relay_exchange
+        return relay_exchange(config, local_peer, request)
     if config['transport'] == 'lan':
         from csl_bridge_lan import exchange as lan_exchange
         return lan_exchange(config, local_peer, request)

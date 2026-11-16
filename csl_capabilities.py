@@ -54,7 +54,7 @@ def coverage():
                 "commands": ["export", "share", "migrate upload"], "mode": "portable-only",
                 "scope": "explicit recognized orphaned-summary-metadata recovery; exact hidden context not restored"},
             "bridge_pairing": {"status": "private-candidate", "cli": "csl-pair", "provider": "codex",
-                "transport": "pinned-TLS-session", "discovery": "LAN-UDP-HMAC",
+                "transport": "pinned-TLS-session", "private_relay_candidate": "nested-TLS-outgoing-operator-enrolled", "automatic_transport": "provisioned-relay-else-LAN; no ambiguous fallback", "discovery": "LAN-UDP-HMAC",
                 "invitation": "manual-copy-paste-128bit-single-use-5min", "qr": False,
                 "requires": ["existing-loaded-session", "OS-local-network-permission", "existing-openssl"],
                 "tests": "local-loopback-only; real-two-device-gate-pending",

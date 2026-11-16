@@ -113,13 +113,19 @@ class Service:
             saved=json.loads(proof.read_text());age=time.time()-saved.get('observed_at',0)
             if 0<=age<=45:
                 peer={**saved,'age_seconds':round(age,1)}
+        channel=None
+        if self.settings.get('connection_mode')=='relay':
+            path=self.state/'relay/relay-status.json'
+            channel=json.loads(path.read_text()) if path.exists() else {'phase':'not_started'}
+            if channel.get('phase')!='relay_connected_peer_unverified' or peer.get('observed_at',0)<channel.get('connected_at',0):
+                peer={'ready':False,'phase':'relay_peer_unverified','note':'Relay disconnected or rejoined; an authenticated peer response is required again.'}
         try:
             data = local_call(self.home, {'local_op':'agents'}, timeout=3)
             agents = data['agents']; active = any(x.get('status')=='active' for x in agents)
             connected=bool(agents) and all(x.get('status')!='disconnected' for x in agents)
             ready=connected and peer['ready']
             return {'connected':ready,'runtime_ready':connected,'connector_running':True,'peer':peer,
-                    'task_phase':self.task_phase(),'headline':('Listo · turno activo' if active else 'Listo · intercambio verificado') if ready else (('Sesión lista · enlace remoto no responde' if peer.get('phase')=='peer_unreachable' else 'Sesión disponible · peer sin verificar') if connected else 'Conector esperando al runtime'),
+                    'channel':channel,'task_phase':self.task_phase(),'headline':('Listo · turno activo' if active else 'Listo · intercambio verificado') if ready else (('Sesión lista · enlace remoto no responde' if peer.get('phase')=='peer_unreachable' else 'Sesión disponible · peer sin verificar') if connected else 'Conector esperando al runtime'),
                     'agents':agents,'owned':bool(self.owned()),'adopted':not bool(self.owned()),
                     'note':peer.get('note','La conversación original sigue en su runtime.') if not ready else 'Respuesta autenticada reciente; la conversación original sigue en su runtime.'}
         except (BridgeError,OSError):
@@ -201,9 +207,9 @@ class Service:
             pending={'ready':False,'phase':'receive_only_not_verified','observed_at':time.time(),'note':'Este perfil recibe al coordinador. Su proceso vivo no acredita la ruta de vuelta; falta verificarla desde el otro equipo.'}
             json_file(self.state/'peer-proof.json',pending)
             return pending
-        if remote_agent is None and config.get('transport')=='lan':
+        if remote_agent is None and config.get('transport') in ('lan','relay'):
             from csl_bridge_lan import private_json
-            remote_agent=private_json(self.state/'lan/peers.json').get(selected)
+            remote_agent=private_json(self.state/('relay' if config['transport']=='relay' else 'lan')/'peers.json').get(selected)
         remote_agent=remote_agent or self.settings.get('remote_agent','coordinator')
         name(remote_agent)
         result=exchange(config,identity,{'version':1,'op':'status','id':str(uuid.uuid4()),'target':remote_agent})
@@ -213,6 +219,43 @@ class Service:
                'agent':remote_agent,'remote_status':result['status'],'note':'Respuesta de aplicación por el transporte configurado, no sólo PID o banner SSH.'}
         json_file(self.state/'peer-proof.json',proof)
         return proof
+
+    def relay_profile_path(self):
+        # Operator provisions this private file; no host/pin/token typing in the UI.
+        local=self.state/'relay-profile.json'
+        bundled=RESOURCE/'relay-profile.json'
+        if local.exists():return local
+        if bundled.exists():return bundled
+        return None
+
+    def connection_mode(self, requested='auto'):
+        if requested not in ('auto','lan','relay'):raise AppError('Choose auto, lan or relay')
+        if requested=='auto':return 'relay' if self.relay_profile_path() else 'lan'
+        if requested=='relay' and self.relay_profile_path() is None:raise AppError('Relay profile not provisioned. Install the owner-provided private profile; no manual host/key input is required.')
+        return requested
+
+    def relay_share(self, thread=None):
+        from csl_bridge_relay_client import ensure_session, session_control
+        connector=self.start(thread,None)
+        session=ensure_session(self.state/'relay',self.home,self.relay_profile_path())
+        self.settings['connection_mode']='relay';json_file(self.settings_path,self.settings)
+        result=session_control(self.state/'relay','share')
+        return {**result,'lan_session_owned':session['started_by_caller'],'connector_owned':connector.get('started_by_this_call',False)}
+
+    def relay_connect(self, code, thread=None):
+        from csl_bridge_relay_client import ensure_session, session_control
+        connector=self.start(thread,None)
+        session=ensure_session(self.state/'relay',self.home,self.relay_profile_path())
+        self.settings['connection_mode']='relay';json_file(self.settings_path,self.settings)
+        result=session_control(self.state/'relay','connect',code=code.strip())
+        ownership={'lan_session_owned':session['started_by_caller'],'connector_owned':connector.get('started_by_this_call',False)}
+        if result.get('state')!='paired':
+            json_file(self.state/'peer-proof.json',{'ready':False,'phase':'pairing_uncertain','observed_at':time.time(),'note':'Relay pairing not confirmed; reconcile before retrying.'})
+            return {**result,**ownership}
+        self.settings.update(coordinator=result['paired'],remote_agent=result['remote_agent']);json_file(self.settings_path,self.settings)
+        # A relay lease is not a peer response or model progress.
+        proof=self.peer_check(result['remote_agent'])
+        return {**result,**ownership,'verified':proof['ready'],'note':'Peer application response authenticated. Accepted, model activity and final remain separate states.'}
 
     def lan_share(self, thread=None, bind=None):
         from csl_bridge_lan import ensure_session, control
@@ -236,13 +279,20 @@ class Service:
 
     def lan_status(self):
         from csl_bridge_lan import control, interfaces
+        if self.settings.get('connection_mode')=='relay':
+            from csl_bridge_relay_client import session_control
+            try:return {**session_control(self.state/'relay','status'),'interfaces':[]}
+            except (BridgeError,OSError):return {'running':False,'mode':'relay','interfaces':[]}
         try:result=control(self.state/'lan','status')
         except (BridgeError,OSError):result={'running':False}
         return {**result,'interfaces':interfaces()}
 
     def lan_reconcile(self):
         from csl_bridge_lan import control
-        result=control(self.state/'lan','reconcile')
+        if self.settings.get('connection_mode')=='relay':
+            from csl_bridge_relay_client import session_control
+            result=session_control(self.state/'relay','reconcile')
+        else:result=control(self.state/'lan','reconcile')
         if result.get('state')=='paired':
             self.settings.update(coordinator=result['paired'],remote_agent=result['remote_agent'])
             json_file(self.settings_path,self.settings)
@@ -252,6 +302,9 @@ class Service:
     def lan_stop(self):
         from csl_bridge_lan import control
         json_file(self.state/'peer-proof.json',{'ready':False,'phase':'stopping','observed_at':time.time(),'note':'Desconexión solicitada; no es cancelación del trabajo ya aceptado.'})
+        if self.settings.get('connection_mode')=='relay':
+            from csl_bridge_relay_client import session_control
+            return session_control(self.state/'relay','stop')
         return control(self.state/'lan','stop')
 
     def lan_call(self, action, text_file=None, request_id=None, operation_id=None, after=0, timeout=20):
@@ -259,7 +312,10 @@ class Service:
         source=next(iter(self.registered()),None)
         if not source:raise AppError('Selecciona una conversación existente primero.')
         if action=='wait':return local_call(self.home,{'local_op':'wait','agent':source,'after':after,'timeout':timeout})
-        peers=control(self.state/'lan','status')['peers']
+        if self.settings.get('connection_mode')=='relay':
+            from csl_bridge_relay_client import session_control
+            peers=session_control(self.state/'relay','status')['peers']
+        else:peers=control(self.state/'lan','status')['peers']
         selected=self.settings.get('coordinator')
         peer=next((p for p in peers if p['identity']==selected),None) or (peers[0] if len(peers)==1 else None)
         if not peer:raise AppError('Selecciona un par conectado; no se eligió un destino arbitrario.')
@@ -382,6 +438,7 @@ def main():
     parser.add_argument('--operation-id')
     from csl_bridge import wait_seconds
     parser.add_argument('--timeout',type=wait_seconds,default=20)
+    parser.add_argument('--mode',choices=['auto','lan','relay'],default='auto',help='Auto uses provisioned relay for mobility, otherwise LAN. No automatic task retransmission/fallback.')
     parser.add_argument('--bind','--interface',dest='bind',help='Select a local IPv4 interface, no firewall changes')
     parser.add_argument('--pair-code-stdin',action='store_true',help='Read one private manual code/link from stdin, never argv')
     parser.add_argument('--thread');parser.add_argument('--coordinator',default='manunruks');parser.add_argument('--after',type=int,default=0)
@@ -405,12 +462,14 @@ def main():
             action={'lan-followup':'followup','lan-message':'send_message','lan-receipt':'receipt','lan-wait':'wait'}[args.action]
             result=service.lan_call(action,args.text_file,args.request_id,args.operation_id,args.after,args.timeout)
         elif args.action=='lan-share':
-            result=service.lan_share(args.thread,args.bind)
+            mode=service.connection_mode(args.mode)
+            result=service.relay_share(args.thread) if mode=='relay' else service.lan_share(args.thread,args.bind)
             result=optional_communication(result)
         elif args.action=='lan-connect':
             if not args.pair_code_stdin:raise AppError('Paste the private code/link through stdin; never command arguments.')
             invitation=sys.stdin.readline(4096)
-            result=service.lan_connect(invitation,args.thread,args.bind)
+            mode=service.connection_mode(args.mode)
+            result=service.relay_connect(invitation,args.thread) if mode=='relay' else service.lan_connect(invitation,args.thread,args.bind)
             result=optional_communication(result)
         elif args.action=='transport-run':
             if not args.transport_profile:raise AppError('Selecciona un perfil SSH ya autorizado; no se configura red automáticamente.')

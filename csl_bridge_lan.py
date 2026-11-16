@@ -81,6 +81,9 @@ def token_value(value):
 
 
 def validate_config(config):
+    if isinstance(config,dict) and config.get('transport')=='relay':
+        from csl_bridge_relay_client import validate_peer_config
+        return validate_peer_config(config)
     if not isinstance(config,dict) or config.get('transport')!='lan' or set(config)!={'transport','endpoint','token_file','allow_agents','allow_ops'}:raise BridgeError('Invalid LAN peer profile')
     endpoint(config['endpoint'])
     if not config['allow_agents'] or any(name(a)!=a for a in config['allow_agents']):raise BridgeError('Select registered local agents')
@@ -128,7 +131,7 @@ def register_peer(home, peer, config):
             except BlockingIOError:raise BridgeError('Existing connector does not support pairing; update it under its owner, never start a second writer') from None
             if peer==store.setting('identity') or not set(config['allow_agents'])<=set(store.agents()):raise BridgeError('Invalid local pairing identity/scope')
             previous=store.peers().get(peer)
-            if previous is not None and previous!=config and previous.get('transport')!='lan':raise BridgeError('Existing non-LAN peer profile is preserved')
+            if previous is not None and previous!=config and previous.get('transport') not in ('lan','relay'):raise BridgeError('Existing non-LAN peer profile is preserved')
             with store.transaction() as db:db.execute('INSERT OR REPLACE INTO peers VALUES(?,?)',(peer,encode(config)))
         finally:lock.close();store.close()
         return {'paired':peer,'scope':'communication'}
@@ -202,6 +205,11 @@ class Session:
         self.remote={'host':bind,'port':self.server.server_address[1],'fingerprint':self.fingerprint}
         self.discovery_port=discovery_port;self.udp=None
 
+    def validate_endpoint(self, value):return endpoint(value)
+
+    def peer_config(self, remote, token_path):
+        return {'transport':'lan','endpoint':remote,'token_file':str(token_path),'allow_agents':self.agents,'allow_ops':COMMUNICATION_OPS}
+
     def invite(self):
         with self.lock:
             code=base64.b32encode(secrets.token_bytes(16)).decode().rstrip('=')
@@ -248,14 +256,14 @@ class Session:
             if not hmac.compare_digest(value['proof'],mac(secret,{'offer':offer,'endpoint':self.remote})):
                 invite['failures']+=1;save(self.state/'invitation.json',invite);raise BridgeError('Invalid pairing code')
             if set(offer)!={'identity','endpoint','token','agent','pair_id'}:raise BridgeError('Invalid communication offer')
-            peer=name(offer['identity']);name(offer['agent']);endpoint(offer['endpoint']);token_value(offer['token']);identifier(offer['pair_id'])
-            if source_address is not None and offer['endpoint']['host']!=source_address:
+            peer=name(offer['identity']);name(offer['agent']);self.validate_endpoint(offer['endpoint']);token_value(offer['token']);identifier(offer['pair_id'])
+            if source_address is not None and offer['endpoint'].get('host')!=source_address:
                 raise BridgeError('Return endpoint must belong to the connected LAN peer')
             if peer==self.identity:raise BridgeError('Pair with a different bridge identity')
             if peer not in self.registry.values() and len(self.registry)>=32:raise BridgeError('This session supports at most32 communication peers')
             token=secrets.token_hex(32);token_path=self.state/('to-'+peer+'.json')
             save(token_path,{'token':offer['token']})
-            config={'transport':'lan','endpoint':offer['endpoint'],'token_file':str(token_path),'allow_agents':self.agents,'allow_ops':COMMUNICATION_OPS}
+            config=self.peer_config(offer['endpoint'],token_path)
             register_peer(self.home,peer,config)
             self.registry={key:owner for key,owner in self.registry.items() if owner!=peer}
             self.registry[hashlib.sha256(token.encode()).hexdigest()]=peer;save(self.state/'registry.json',self.registry)
@@ -372,7 +380,7 @@ def apply_pair_result(session, attempt, result):
     peer=name(result['identity']);name(result['agent']);token_value(result['token'])
     if result['endpoint']!=remote:raise BridgeError('Paired peer identity changed')
     path=session.state/('to-'+peer+'.json');save(path,{'token':result['token']})
-    config={'transport':'lan','endpoint':remote,'token_file':str(path),'allow_agents':session.agents,'allow_ops':COMMUNICATION_OPS}
+    config=session.peer_config(remote,path)
     register_peer(session.home,peer,config)
     session.registry={key:owner for key,owner in session.registry.items() if owner!=peer}
     session.registry[hashlib.sha256(token.encode()).hexdigest()]=peer;save(session.state/'registry.json',session.registry)

@@ -75,3 +75,52 @@ firma ad-hoc. No DeveloperID/notarización/publicación. El ZIP04487f7 anterior 
 incluye pairing. Este nuevo source debe compilar/renderizarse y probarse en dos
 PC reales antes de declarar listo: tests TLS/UDP/IPC loopback y modelo fabricado no
 son una prueba Mac/Linux LAN con agentes reales ni Internet de pairing propio.
+
+## Relay privado integrado — candidato16Nov
+
+Si el owner instaló `relay-profile.json` privado en el directorio de estado de esta
+utilidad, Automático usa ese relay para movilidad entre redes. Sin perfil usa LAN.
+`--mode lan` permite elegir directo explícitamente; `--mode relay` exige el perfil.
+Esta versión NO mide LAN y cambia automáticamente a relay: evita repetir un envío
+incierto por otro transporte. No ofrece NAT traversal propio ni relay público.
+
+El perfil contiene host, port, fingerprint y enrollment_file (ruta local privada).
+El enrollment de prueba es256bit, archivo600, nunca argumento/URL/Git. El owner lo
+provisiona en ambos equipos; el usuario sólo selecciona conversación, comparte código
+y conecta. No se distribuye ese secreto global en un ZIP público. El relay requiere
+TLS exterior fijado ANTES de enviar enrollment, y dentro transporta TLS peer↔peer.
+El relay no termina esa segunda capa: ve IPs/rutas/tamaños/tiempos, no mensajes,
+tokens de los pares, código de invitación ni claves privadas del peer.
+
+Discovery Internet es rendezvous por locator derivado del código aleatorio128bit.
+Descriptor HMAC autenticado liga identidad, ruta, pin y caducidad. El código se
+comparte manualmente; nunca se manda al relay. La invitación dura cinco minutos y
+el endpoint receptor consume una vez. El relay no se vuelve autoridad del agente.
+
+CLI se mantiene: `csl-pair share` / `connect --pair-code-stdin`, opcional
+`--approve-communication --approve-delegation`. El perfil inicial se lee de
+`~/Library/Application Support/CSLBridge/relay-profile.json` en Mac y
+`${XDG_STATE_HOME:-~/.local/state}/csl-bridge/relay-profile.json` en Linux.
+`--state-root` permite al operador instalarlo en otro estado explícito. No se
+extraen credenciales Codex, no se arranca daemon nuevo ni se copia la conversación.
+
+Un proceso de sesión mantiene accept/lease salientes con backoff1..30s. Lease180s
+se renueva; un corte puede reanudar la MISMA ruta con su lease, sin código nuevo ni
+vencimiento artificial2h. Stop revoca ruta/grants y no cancela modelos ya activos.
+La pérdida del transporte de una tarea queda incierta: consulta receipt con el mismo
+ID; no se reenvía el encargo automáticamente. Register/renew sólo significa relay
+conectado: después de reconectar hace falta una respuesta de aplicación autenticada
+para marcar peer listo. Aceptación, actividad y final siguen separados.
+
+Servidor self-host de ensayo: Python>=3.11, openssl/cert TLS y enrollment privados;
+`python3 csl_bridge_relay.py serve --bind IP --port PUERTO --certificate CERT
+--private-key KEY --enrollment-file FILE`. El owner instala sólo relay+store en un
+usuario dedicado, publica el pin confiablemente y decide límites del OS. Defaults:
+32rutas,16conexiones (waiters incluidos; no32pares simultáneos), control4KiB,
+60conexiones/min/IP, invitation300s, pending8/ruta, idle60s, túnel180s/8MiB.
+No SLA/DoS garantizado; el límite externo de memoria/CPU corresponde al operador.
+No logs de payload, código, tokens ni respuesta OAuth. El pin no es TOFU.
+
+Los tests nuevos usan nestedTLS real/MemoryBIO y relay loopback. No sustituyen
+prueba pública real, modelo entre redes o revisión nativa de esta UI. El owner
+maneja esos gates; no confundirlos con el InternetSSH previo de ee74.

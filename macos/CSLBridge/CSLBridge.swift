@@ -35,6 +35,7 @@ final class App: NSObject, NSApplicationDelegate {
     var coordinator = NSTextField(string: "manunruks")
     var pairCode = NSSecureTextField(string: "")
     var network = NSPopUpButton()
+    var transportMode = NSPopUpButton()
     var allowDelegation = NSButton(checkboxWithTitle: "Permitir encargos automáticos (puede consumir tokens)", target: nil, action: nil)
     var networkIDs: [String] = []
     var statusLabel = NSTextField(labelWithString: "Detectando sesión local…")
@@ -73,9 +74,9 @@ final class App: NSObject, NSApplicationDelegate {
         return view
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
-        window = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 780,height: 880), styleMask: [.titled,.closable,.miniaturizable,.resizable], backing: .buffered, defer: false)
+        window = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 800,height: 960), styleMask: [.titled,.closable,.miniaturizable,.resizable], backing: .buffered, defer: false)
         window.title = "CSL Bridge · privado"
-        window.center(); window.minSize = NSSize(width: 740,height: 840)
+        window.center(); window.minSize = NSSize(width: 760,height: 920)
         let root = window.contentView!
         let title = label("CSL Bridge", bold: true, size: 27)
         let subtitle = label("Tu agente, en su conversación de siempre", size: 15)
@@ -102,14 +103,15 @@ final class App: NSObject, NSApplicationDelegate {
         connectionNote.textColor = .secondaryLabelColor
         let tools = button("Herramientas de comunicación…",#selector(installTools))
         let info = button("Copiar conexión",#selector(copyConnection))
+        transportMode.addItems(withTitles:["Automático · relay provisionado, si existe", "Sólo LAN directa", "Relay Internet provisionado"])
         pairCode.placeholderString="Pega el código de 26 caracteres o enlace privado"
         network.addItem(withTitle:"Detectar red local automáticamente")
-        let pairNote=label("Ambas utilidades deben estar en la misma LAN. Comparte el código manualmente: copiar y pegar. Un uso, cinco minutos; sin QR ni relay público.")
+        let pairNote=label("Comparte el código manualmente: copiar y pegar. Un uso, cinco minutos; sin QR. Automático usa el relay privado provisionado para redes distintas; sin perfil, usa LAN. No cambia de canal ni repite tareas inciertas automáticamente.")
         pairNote.textColor = .secondaryLabelColor
         let share=button("Compartir código…",#selector(shareLAN))
         let join=button("Conectar con código…",#selector(joinLAN))
         let reconcile=button("Revisar recibo",#selector(reconcileLAN))
-        let body = stack([label("Sesión existente",bold: true),intro,horizontal([sessions,find]),label("Red local",bold: true),network,pairNote,label("Código o enlace privado"),pairCode,allowDelegation,horizontal([share,join,reconcile]),label("Conexión avanzada ya configurada",bold: true),horizontal([connect,tools,info])],spacing: 12)
+        let body = stack([label("Sesión existente",bold: true),intro,horizontal([sessions,find]),label("Canal de conexión",bold: true),transportMode,network,pairNote,label("Código o enlace privado"),pairCode,allowDelegation,horizontal([share,join,reconcile]),label("Conexión avanzada ya configurada",bold: true),horizontal([connect,tools,info])],spacing: 12)
         body.translatesAutoresizingMaskIntoConstraints = false;connectView.addSubview(body)
         NSLayoutConstraint.activate([body.leadingAnchor.constraint(equalTo: connectView.leadingAnchor),body.trailingAnchor.constraint(equalTo: connectView.trailingAnchor),body.topAnchor.constraint(equalTo: connectView.topAnchor),sessions.widthAnchor.constraint(greaterThanOrEqualToConstant: 390),coordinator.widthAnchor.constraint(equalToConstant: 280)])
         activity.isEditable = false;activity.isSelectable = true;activity.font = .systemFont(ofSize: 13)
@@ -182,7 +184,8 @@ final class App: NSObject, NSApplicationDelegate {
     func lanArguments(_ action: String) -> [String]? {
         let index=sessions.indexOfSelectedItem
         guard index>=0 && index<sessionIDs.count else {noteLabel.stringValue="Selecciona tu conversación existente.";return nil}
-        var args=[action,"--thread",sessionIDs[index],"--approve-communication"]
+        let modes=["auto","lan","relay"]
+        var args=[action,"--thread",sessionIDs[index],"--approve-communication","--mode",modes[max(0,transportMode.indexOfSelectedItem)]]
         if allowDelegation.state == .on {args += ["--approve-delegation"]}
         let selected=network.indexOfSelectedItem-1
         if selected>=0 && selected<networkIDs.count {args += ["--bind",networkIDs[selected]]}
@@ -190,7 +193,7 @@ final class App: NSObject, NSApplicationDelegate {
     }
     func communicationConsent() -> Bool {
         let alert=NSAlert();alert.messageText="Conectar estos agentes"
-        alert.informativeText="Permite encargos, aclaraciones, avances, estado y resultados entre este par. Activa sólo herramientas de comunicación de esta conversación. No concede shell, historial, login ni aprobaciones remotas. La red local puede requerir permiso del sistema. Si seleccionaste encargos automáticos, followup puede activar al agente inactivo y consumir tokens/costo; no incluye interrupt automático."
+        alert.informativeText="Permite encargos, aclaraciones, avances, estado y resultados entre este par. Activa sólo herramientas de comunicación de esta conversación. No concede shell, historial, login ni aprobaciones remotas. El sistema puede solicitar permiso de red; relay sólo abre conexiones salientes. Si seleccionaste encargos automáticos, followup puede activar al agente inactivo y consumir tokens/costo; no incluye interrupt automático."
         alert.addButton(withTitle:"Permitir y continuar");alert.addButton(withTitle:"Cancelar")
         return alert.runModal() == .alertFirstButtonReturn
     }
@@ -204,7 +207,7 @@ final class App: NSObject, NSApplicationDelegate {
             let alert=NSAlert();alert.messageText="Código privado: "+code
             let tools=data["communication_tools"] as? [String:Any]
             let warning=(tools?["installed"] as? Bool == false) ? "ATENCIÓN: herramientas del agente no instaladas; revisa la configuración local. CLI sigue disponible.\n\n" : ""
-            alert.informativeText=warning+"Copia y pega el código en la otra utilidad. Caduca en cinco minutos y funciona una vez. Si UDP está bloqueado, copia el enlace privado. Emparejar no demuestra que el modelo haya avanzado."
+            alert.informativeText=warning+"Copia y pega el código en la otra utilidad. Caduca en cinco minutos y funciona una vez. Si usas LAN y UDP está bloqueado, copia el enlace privado. Relay usa el mismo código y requiere el perfil privado provisionado. Emparejar no demuestra que el modelo haya avanzado."
             alert.addButton(withTitle:"Copiar código");alert.addButton(withTitle:"Copiar enlace")
             let response=alert.runModal()
             let selected=response == .alertFirstButtonReturn ? code : data["link"] as? String ?? code
