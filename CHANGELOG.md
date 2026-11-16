@@ -12,6 +12,20 @@
 - Send `session` only to peers that opt in with `peer --send-session` or
   `peer-session PEER --enable`. It is off by default because 0.4.2 and earlier
   receivers reject the field; enable it after the peer is upgraded.
+- Breaking: followup and send_message requests are accepted only when their
+  `source` is in the delivering peer's `allow_sources` (previously mailbox-only),
+  because the header no longer names the peer. Admit senders for existing peers
+  offline with the new `peer-sources PEER --allow-source NAME`. Held requests
+  from sources that are not admitted are marked rejected instead of injected.
+- A `session` is accepted only from peers with `send_session` enabled: requests
+  carrying it are rejected, events have it dropped. Events must come from the
+  agent the task targeted on the same peer; stored events that no longer match
+  are never injected or returned by `wait`.
+- Published events store the session; `watch` strips it while the peer's
+  `send_session` is off, so `peer-session PEER --disable` recovers a peer that
+  rejects the field.
+- Body lines starting with `[Message ` are prefixed with `> ` in injected text,
+  and request text with a carriage return outside CRLF is rejected.
 
 ## 0.4.2 — 2026-11-15
 

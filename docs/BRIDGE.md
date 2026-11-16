@@ -83,14 +83,24 @@ permissions, account and consumption. Knowing a UUID, using the same login, or
 being on the same LAN does not grant access to the other computer.
 
 Configure each peer offline, explicitly naming which **local** agents and
-operations that peer may access. The following gives Bob access only to Alice's
-coordinator. Bob configures the reciprocal entry allowing Alice's operations on
-his worker. `watch` carries progress/final events; it cannot read native histories.
+operations that peer may access, and which of its **remote** agents may send
+followups and messages. The following gives Bob access only to Alice's
+coordinator, as his agent `worker`. Bob configures the reciprocal entry allowing
+Alice's operations on his worker. `watch` carries progress/final events; it
+cannot read native histories.
 
 ```sh
 csl bridge --home "$ALICE_BRIDGE_HOME" peer bob --ssh-alias bob-bridge \
-  --allow-agent coordinator --allow-op followup --allow-op send_message \
+  --allow-agent coordinator --allow-source worker --allow-op followup --allow-op send_message \
   --allow-op status --allow-op interrupt --allow-op receipt --allow-op watch --allow-op agents
+```
+
+A followup or message whose `source` is not in that peer's `--allow-source`
+list is rejected. To admit senders for a peer configured before this rule,
+replace its list offline (omitting every `--allow-source` admits none):
+
+```sh
+csl bridge --home "$ALICE_BRIDGE_HOME" peer-sources bob --allow-source worker
 ```
 
 The SSH adapter uses a fixed `csl-bridge-receiver` command and JSON on stdin.
@@ -141,10 +151,23 @@ none is inferred. The header carries no authorization notice; tool results such
 as `wait` still return a `notice` field. The session is asserted by the peer's
 bridge and authenticated only as far as the peer binding itself.
 
+The header does not name the peer, so `from` and `session` identify a sender
+only together with per-peer `allow_sources`: a receiver accepts a followup or
+message only when its `source` is admitted for the authenticated peer that
+delivered it, so no peer can claim another peer's agent name. Events are
+accepted only from the peer a task was sent to, and only when their `source` is
+the agent that task targeted. Do not treat a name and session as authorization
+on a bridge whose peers share admitted source names.
+
+Every line of the selected text that starts with `[Message ` (after optional
+whitespace, at any line boundary) is prefixed with `> `, so text cannot imitate
+a header. Request text may not contain a carriage return outside a CRLF pair.
+
 Receivers accept requests and events with or without the optional `session`
-field. Bridges up to 0.4.2 reject it, so senders include it only for peers that
-explicitly opt in. It is off by default. Enable it when configuring a peer that
-runs a compatible version, or later, offline, for an existing peer:
+field, but honour it only from peers they have enabled. Bridges up to 0.4.2
+reject it, so senders include it only for peers that explicitly opt in. It is
+off by default. Enable it when configuring a peer that runs a compatible
+version, or later, offline, for an existing peer:
 
 ```sh
 csl bridge --home "$ALICE_BRIDGE_HOME" peer bob --ssh-alias bob-bridge \
@@ -153,9 +176,20 @@ csl bridge --home "$ALICE_BRIDGE_HOME" peer-session bob --enable   # or --disabl
 ```
 
 The setting is stored as `send_session: true` in that peer's configuration and
-applies to followups and messages sent to that peer and to progress/final events
-published for it. Like other configuration, stop the connector first; it reads
-peers at start. Each side enables it separately for the direction it sends.
+applies in both directions with that peer:
+
+- Sending: followups and messages sent to that peer, and progress/final events
+  it watches, carry the session. Published events always store the session
+  locally; `watch` removes it at serve time while the setting is off. If a peer
+  that still rejects the field stalls on an event, stop the connector, run
+  `peer-session PEER --disable` and restart: pending events are then served
+  without `session`.
+- Receiving: a followup or message carrying `session` from a peer without the
+  setting is rejected, and a `session` on its events is dropped before storage
+  (rejecting an event would stall every later event from that peer).
+
+Like other configuration, stop the connector first; it reads peers at start.
+Enable it on both sides once both run a compatible version.
 
 Start the connector explicitly in a terminal for the session on each side:
 

@@ -29,6 +29,22 @@ def message_header(source, task, session=None):
     return '[Message ' + '; '.join(parts) + ']\n'
 
 
+HEADER_PREFIX = '[Message '
+QUOTE_MARK = '> '
+
+
+def neutralize_headers(text):
+    """Prefix every body line that could read as a bridge header. Any line
+    boundary counts (splitlines), so a lone CR or Unicode separator cannot hide one."""
+    return ''.join(QUOTE_MARK + line if line.lstrip().startswith(HEADER_PREFIX) else line
+                   for line in text.splitlines(keepends=True))
+
+
+def frame_message(source, task, session, text):
+    """The only framing of bridge text placed in a native turn (requests and events)."""
+    return message_header(source, task, session) + neutralize_headers(text)
+
+
 def contains_findings(text):
     from csl_secrets import SecretReview
     from types import SimpleNamespace
@@ -107,6 +123,8 @@ def validate(request):
             raise BridgeError('Invalid bridge text')
         if any(ord(c) < 32 and c not in '\r\n\t' for c in value):
             raise BridgeError('Bridge text contains control characters')
+        if '\r' in value.replace('\r\n', ''):
+            raise BridgeError('Bridge text contains a bare carriage return')
     if 'after' in request and (type(request['after']) is not int or not 0 <= request['after'] <= 2**63 - 1):
         raise BridgeError('Invalid bridge cursor')
     try:
