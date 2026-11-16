@@ -139,3 +139,39 @@ maneja esos gates; no confundirlos con el InternetSSH previo de ee74.
 el peer del canal residente para renovar esa prueba; no selecciona un peer histórico
 por orden de la base. Si hay varios pares y ninguno seleccionado, pide selección
 explícita. Lease/register no acredita peer listo ni avance del modelo.
+
+## Diagnóstico de recuperación y reenvío explícito
+
+El heartbeat del cliente renueva su lease en un hilo independiente del accept y de
+la llamada IPC/nativa. Normalmente renueva cada lease/3, máximo45s; la lease sigue
+siendo renovable, no infinita ni una autorización nueva. Estado privado del cliente
+registra heartbeat_stage, accept_stage, últimos intentos/éxitos y categorías de error.
+No incluye IP/ruta/ID de operación/token/payload. No inferir bloqueo por un connected_at
+antiguo: ahora hay observaciones periódicas. La reproducción local lease0.12s frente
+a accept0.45s demuestra la fragilidad anterior y el arreglo; no determina por sí sola
+la causa del fallo real con lease180s.
+
+Servidor: `--diagnostics-file /DIRECTORIO_PRIVADO/diagnostics.json` escribe contadores
+agregados por razón (lease_expired, route_missing, accept_busy, rate_ip/global,
+capacity, etc.), sin IP/route/token/payload. Directorio propiedad del servicio0700;
+archivo atómico0600. El rechazo exterior puede incluir reasoncode estático, nunca
+texto de excepción del OS. No cambia la autenticación ni el cifrado.
+
+Una tarea/mensaje con resultado incierto no se vuelve a emitir por repetir task.
+Si el operador decide recuperar el MISMO contenido ya autorizado:
+
+```sh
+./csl-pair retry --operation-id ORIGINAL_ID --confirm-same-request
+```
+
+Carga el ID, cuerpo y hash de la reserva durable local; comprueba hash en el conector
+y consulta primero un receipt autenticado. Delivered/pending/rejected recuperan su
+recibo sin enviar; invoking/uncertain o falta de respuesta NO permiten envío. Sólo
+not_found permite UN envío del ID/cuerpo exactos. Not_found es una foto: un frame viejo
+podría llegar después; la reserva/hash del receptor deduplica esa carrera. No garantiza
+exactly-once si un operador destruye la base receptora. Si vuelve a perderse el recibo,
+sigue incierto. Sin IDs nuevos, cambios de payload, replay nativo, retry MCP automático
+ni reenvío de interrupt: una interrupción exige una nueva decisión sobre el turno actual.
+El presupuesto sólo de este control explícito es185s (dos exchanges90s+margen5);
+wait0..20, IPC local25, operaciones remotas95 y hostMCP105 permanecen intactos.
+No reintentar mensajes/interrupciones de tareas ya terminadas para rehacer el ensayo.

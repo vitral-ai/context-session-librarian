@@ -15,7 +15,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parent))
 
 from csl_bridge_store import BridgeError, Store, decode, encode, name, validate
 from csl_bridge_lan import Session, save, private_json, code_bytes, mac, token_value, apply_pair_result, register_peer, COMMUNICATION_OPS
-from csl_bridge_relay import rpc, open_tunnel, InnerTLS, read_line, send_line, hex_value, validate_profile
+from csl_bridge_relay import rpc, open_tunnel, InnerTLS, read_line, send_line, hex_value, validate_profile, RelayFailure
 
 
 def relay_endpoint(value):
@@ -58,7 +58,7 @@ def exchange(config,identity,body):
 
 
 class RelaySession(Session):
-    def __init__(self,state,home,profile_path):
+    def __init__(self,state,home,profile_path,heartbeat_interval=None):
         self.profile_path=Path(profile_path).absolute();self.profile=validate_profile(private_json(self.profile_path))
         super().__init__(state,home,bind='127.0.0.1',discovery_port=0)
         # No LAN listener starts. Reuse only the private peer TLS identity and grant logic.
@@ -75,7 +75,8 @@ class RelaySession(Session):
         hex_value(self.route['route']);hex_value(self.route['lease'])
         self.remote={'route':self.route['route'],'fingerprint':self.fingerprint}
         self.workers=[];self.peer_slots=threading.BoundedSemaphore(8)
-        self.relay_status={'phase':'disconnected','peer_ready':False,'last_error':None}
+        self.needs_reverification=threading.Event();self.status_lock=threading.RLock();self.registered=threading.Event();self.heartbeat_wakeup=threading.Event();self.heartbeat_interval=heartbeat_interval
+        self.relay_status={'phase':'disconnected','peer_ready':False,'last_error':None,'heartbeat_last_success':None,'accept_last_success':None,'loop_observed_at':time.time()}
 
     def validate_endpoint(self,value):return relay_endpoint(value)
 
@@ -129,7 +130,7 @@ class RelaySession(Session):
             value=read_line(inner,65536)
             result=self.incoming(value)
             send_line(inner,{'ok':True,'data':result})
-            self.relay_status.update(last_peer_response=time.time())
+            self.observe(last_peer_response=time.time())
         except (BridgeError,OSError,ValueError,TypeError,KeyError,ssl.SSLError):
             if inner:
                 try:send_line(inner,{'ok':False,'data':{'error':'Peer request rejected'}})
@@ -139,28 +140,70 @@ class RelaySession(Session):
             else:outer.close()
             self.peer_slots.release()
 
-    def run(self):
+    def error_reason(self,exc):
+        if isinstance(exc,RelayFailure):return exc.reason
+        if isinstance(exc,TimeoutError):return 'transport_timeout'
+        if isinstance(exc,ssl.SSLError):return 'tls_error'
+        if isinstance(exc,OSError):return 'transport_io'
+        return 'protocol_error'
+
+    def heartbeat_loop(self):
         retry=1
         while not self.stop.is_set():
+            method='renew' if self.registered.is_set() else 'register'
+            self.observe(heartbeat_stage=method,heartbeat_last_attempt=time.time())
             try:
-                rpc(self.profile,{'op':'register',**self.route})
-                self.relay_status.update(phase='relay_connected_peer_unverified',last_error=None,connected_at=time.time())
-                self.publish_status()
-                while not self.stop.is_set():
-                    rpc(self.profile,{'op':'renew',**self.route})
+                reply=rpc(self.profile,{'op':method,**self.route},timeout=10)
+                was_registered=self.registered.is_set()
+                self.registered.set()
+                values={'heartbeat_stage':'waiting','heartbeat_last_success':time.time(),'heartbeat_last_error':None,'phase':'relay_connected_peer_unverified','last_error':None}
+                if not was_registered or self.needs_reverification.is_set():
+                    values['connected_at']=time.time();self.needs_reverification.clear()
+                self.observe(**values)
+                retry=1
+                lease=reply.get('lease_seconds',self.relay_status.get('lease_seconds',180))
+                if type(lease) not in (int,float) or not .03<=lease<=3600:raise BridgeError('Invalid relay lease budget')
+                self.observe(lease_seconds=lease)
+                interval=self.heartbeat_interval if self.heartbeat_interval is not None else min(45,lease/3)
+                self.heartbeat_wakeup.wait(interval);self.heartbeat_wakeup.clear()
+            except (BridgeError,OSError,ValueError,TypeError,KeyError,ssl.SSLError) as exc:
+                self.registered.clear()
+                self.observe(phase='reconnecting',heartbeat_stage='backoff',heartbeat_last_error=self.error_reason(exc),last_error=self.error_reason(exc),peer_ready=False)
+                self.heartbeat_wakeup.wait(retry);self.heartbeat_wakeup.clear();retry=min(retry*2,30)
+
+    def run(self):
+        heartbeat=threading.Thread(target=self.heartbeat_loop,daemon=True);heartbeat.start()
+        retry=1
+        try:
+            while not self.stop.is_set():
+                if not self.registered.wait(.2):continue
+                try:
+                    self.observe(accept_stage='waiting',accept_last_attempt=time.time())
                     outer=open_tunnel(self.profile,{'op':'accept',**self.route},timeout=35)
+                    self.observe(accept_stage='returned',accept_last_success=time.time(),accept_last_error=None)
                     if outer:
-                        if not self.peer_slots.acquire(blocking=False):outer.close();continue
+                        if not self.peer_slots.acquire(blocking=False):
+                            self.observe(accept_last_error='local_peer_capacity');outer.close();continue
                         thread=threading.Thread(target=self.handle_peer,args=(outer,),daemon=True);thread.start();self.workers.append(thread)
                         self.workers=[t for t in self.workers if t.is_alive()]
                     retry=1
-            except (BridgeError,OSError,ValueError,ssl.SSLError):
-                self.relay_status.update(phase='reconnecting',last_error='relay_unavailable',peer_ready=False);self.publish_status()
-                if self.stop.wait(retry):break
-                retry=min(retry*2,30)
-        self.relay_status.update(phase='stopped',peer_ready=False);self.publish_status()
+                except (BridgeError,OSError,ValueError,TypeError,KeyError,ssl.SSLError) as exc:
+                    self.needs_reverification.set()
+                    self.observe(phase='reconnecting',accept_stage='backoff',accept_last_error=self.error_reason(exc),last_error=self.error_reason(exc),peer_ready=False)
+                    if isinstance(exc,RelayFailure) and exc.reason in ('route_missing','route_revoked','route_auth_failed'):self.registered.clear()
+                    self.heartbeat_wakeup.set()
+                    if self.stop.wait(retry):break
+                    retry=min(retry*2,30)
+        finally:
+            self.stop.set();self.heartbeat_wakeup.set();heartbeat.join(11)
+            self.observe(phase='stopped',peer_ready=False,accept_stage='stopped',heartbeat_stage='stopped')
 
-    def publish_status(self):save(self.state/'relay-status.json',self.relay_status)
+    def observe(self,**values):
+        with self.status_lock:
+            self.relay_status.update(values,loop_observed_at=time.time())
+            save(self.state/'relay-status.json',dict(self.relay_status))
+
+    def publish_status(self):self.observe()
 
     def revoke_credentials(self):
         with self.lock:
@@ -172,7 +215,7 @@ class RelaySession(Session):
             for path in self.state.glob('to-*.json'):save(path,{'token':''})
 
     def close(self,revoke=True):
-        self.stop.set()
+        self.stop.set();self.heartbeat_wakeup.set()
         if revoke:
             self.revoke_credentials()
             try:rpc(self.profile,{'op':'revoke',**self.route},timeout=5)

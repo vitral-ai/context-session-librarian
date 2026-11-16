@@ -15,7 +15,7 @@ import uuid
 
 from csl_bridge import run
 from csl_bridge_store import BridgeError
-from csl_bridge_transport import local_call, exchange, CALL_TIMEOUT, EXCHANGE_TIMEOUT, RECEIVER_TIMEOUT, LOCAL_TIMEOUT
+from csl_bridge_transport import local_call, exchange, CALL_TIMEOUT, EXCHANGE_TIMEOUT, RECEIVER_TIMEOUT, LOCAL_TIMEOUT, RETRY_CALL_TIMEOUT
 
 
 class DeadlineTests(unittest.TestCase):
@@ -60,7 +60,7 @@ class DeadlineTests(unittest.TestCase):
             Path(tmp).chmod(0o700)
             sock=factory.return_value
             sock.makefile.return_value.__enter__.return_value.readline.return_value=b'{"ok":true,"data":{}}\n'
-            for op,expected in [('call',CALL_TIMEOUT),('_incoming',RECEIVER_TIMEOUT),('wait',LOCAL_TIMEOUT)]:
+            for op,expected in [('call',CALL_TIMEOUT),('_incoming',RECEIVER_TIMEOUT),('wait',LOCAL_TIMEOUT),('retry_operation',RETRY_CALL_TIMEOUT)]:
                 local_call(tmp,{'local_op':op})
                 sock.settimeout.assert_called_with(expected)
 

@@ -16,11 +16,13 @@ RECEIVER_TIMEOUT = 60
 EXCHANGE_TIMEOUT = 90
 CALL_TIMEOUT = 95
 LOCAL_TIMEOUT = 25
+# Explicit recovery performs receipt then (only if absent) one exact send. No MCP path.
+RETRY_CALL_TIMEOUT = 2 * EXCHANGE_TIMEOUT + 5
 
 
 def local_call(home, request, timeout=None):
     if timeout is None:
-        timeout = CALL_TIMEOUT if request.get('local_op') == 'call' else (RECEIVER_TIMEOUT if request.get('local_op') == '_incoming' else LOCAL_TIMEOUT)
+        timeout = RETRY_CALL_TIMEOUT if request.get('local_op')=='retry_operation' else CALL_TIMEOUT if request.get('local_op') == 'call' else (RECEIVER_TIMEOUT if request.get('local_op') == '_incoming' else LOCAL_TIMEOUT)
     home = private_directory(home)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:

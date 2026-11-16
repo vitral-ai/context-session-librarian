@@ -4,7 +4,7 @@ The relay forwards inner TLS bytes and sees routing metadata, IPs and lengths.
 It never receives invitation codes, peer private keys, or application credentials.
 """
 import argparse
-from collections import defaultdict, deque
+from collections import defaultdict, deque, Counter
 import hashlib
 import hmac
 import os
@@ -15,12 +15,27 @@ import socketserver
 import ssl
 import sys
 import threading
+import tempfile
 import time
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from csl_bridge_store import BridgeError, decode, encode
 
 CONTROL_LIMIT=4096
+
+
+class RelayFailure(BridgeError):
+    def __init__(self,reason):
+        self.reason=reason
+        super().__init__('Relay operation rejected: '+reason)
+
+
+def remote_reason(answer):
+    allowed={'route_missing','route_auth_failed','route_queue_full','accept_busy','accept_timeout','route_revoked','capacity','rate_ip','rate_global','rate_table_capacity','route_capacity','invite_capacity','invite_missing','enrollment_rejected','malformed','io_timeout','io_error'}
+    if not isinstance(answer,dict) or not isinstance(answer.get('data'),dict):return 'peer_rejected'
+    value=answer['data'].get('reason')
+    return value if value in allowed else 'peer_rejected'
+
 
 
 def read_line(stream, limit=CONTROL_LIMIT):
@@ -51,13 +66,22 @@ class Broker:
     def __init__(self,limits=None,clock=time.monotonic,enrollment=None):
         self.enrollment=enrollment
         self.limits=limits or Limits();self.clock=clock;self.lock=threading.RLock()
-        self.routes={};self.invitations={};self.rate=defaultdict(deque);self.global_rate=deque();self.active=0
+        self.routes={};self.invitations={};self.rate=defaultdict(deque);self.global_rate=deque();self.active=0;self.reasons=Counter()
+
+    def count(self,reason):
+        with self.lock:self.reasons[reason]+=1
+
+    def diagnostics(self):
+        with self.lock:
+            return {'observed_at':time.time(),'active_connections':self.active,'routes':len(self.routes),
+                    'pending_connections':sum(len(row['pending']) for row in self.routes.values()),
+                    'reason_counts':dict(self.reasons)}
 
     def cleanup(self):
         now=self.clock()
         for key,row in list(self.routes.items()):
             if row['expires']<now:
-                row['revoked']=True;row['condition'].notify_all();del self.routes[key]
+                self.count('lease_expired');row['revoked']=True;row['condition'].notify_all();del self.routes[key]
         for key,row in list(self.invitations.items()):
             if row['expires']<now:del self.invitations[key]
         while self.global_rate and now-self.global_rate[0]>=60:self.global_rate.popleft()
@@ -68,11 +92,11 @@ class Broker:
     def admit(self,address):
         with self.lock:
             self.cleanup()
-            if self.active>=self.limits.connections:raise BridgeError('Relay capacity reached')
-            if address not in self.rate and len(self.rate)>=1024:raise BridgeError('Relay rate table capacity reached')
-            if len(self.global_rate)>=self.limits.rate*4:raise BridgeError('Relay global rate limit')
+            if self.active>=self.limits.connections:raise RelayFailure('capacity')
+            if address not in self.rate and len(self.rate)>=1024:raise RelayFailure('rate_table_capacity')
+            if len(self.global_rate)>=self.limits.rate*4:raise RelayFailure('rate_global')
             values=self.rate[address]
-            if len(values)>=self.limits.rate:raise BridgeError('Relay rate limit')
+            if len(values)>=self.limits.rate:raise RelayFailure('rate_ip')
             values.append(self.clock());self.global_rate.append(self.clock());self.active+=1
 
     def release(self):
@@ -81,7 +105,8 @@ class Broker:
     def authenticated(self,route,lease):
         hex_value(route);hex_value(lease)
         row=self.routes.get(route)
-        if not row or not hmac.compare_digest(row['lease'],lease):raise BridgeError('Relay route unavailable')
+        if not row:raise RelayFailure('route_missing')
+        if not hmac.compare_digest(row['lease'],lease):raise RelayFailure('route_auth_failed')
         row['expires']=self.clock()+self.limits.lease
         return row
 
@@ -95,7 +120,7 @@ class Broker:
                 if route in self.routes:
                     self.authenticated(route,lease)
                 else:
-                    if len(self.routes)>=self.limits.routes:raise BridgeError('Relay route capacity reached')
+                    if len(self.routes)>=self.limits.routes:raise RelayFailure('route_capacity')
                     self.routes[route]={'lease':lease,'expires':self.clock()+self.limits.lease,'pending':deque(),'condition':threading.Condition(self.lock),'revoked':False,'accepting':False}
                 return {'registered':route,'lease_seconds':self.limits.lease}
             if op in ('renew','revoke') and set(value)=={'op','route','lease'}:
@@ -108,12 +133,12 @@ class Broker:
             if op=='publish' and set(value)=={'op','route','lease','locator','descriptor'}:
                 self.authenticated(value['route'],value['lease']);locator=hex_value(value['locator'])
                 if len(encode(value['descriptor']).encode())>2048:raise BridgeError('Invitation metadata too large')
-                if len(self.invitations)>=self.limits.routes*2 and locator not in self.invitations:raise BridgeError('Invitation capacity reached')
+                if len(self.invitations)>=self.limits.routes*2 and locator not in self.invitations:raise RelayFailure('invite_capacity')
                 self.invitations[locator]={'route':value['route'],'descriptor':value['descriptor'],'expires':self.clock()+self.limits.invite}
                 return {'published':True}
             if op=='lookup' and set(value)=={'op','locator'}:
                 row=self.invitations.get(hex_value(value['locator']))
-                if not row:raise BridgeError('Invitation unavailable')
+                if not row:raise RelayFailure('invite_missing')
                 return row['descriptor']
             raise BridgeError('Invalid relay operation')
 
@@ -124,20 +149,21 @@ class Broker:
             self.cleanup()
             if op=='accept' and set(value)=={'op','route','lease'}:
                 row=self.authenticated(value['route'],value['lease'])
-                if row['accepting']:raise BridgeError('Route already has an accept waiter')
+                if row['accepting']:raise RelayFailure('accept_busy')
                 row['accepting']=True;deadline=self.clock()+self.limits.wait
                 try:
                     while not row['pending'] and not row['revoked']:
                         left=deadline-self.clock()
                         if left<=0:send_line(stream,{'ok':True,'data':{'waiting':True}});return
                         row['condition'].wait(left)
-                    if row['revoked']:raise BridgeError('Route revoked')
+                    if row['revoked']:raise RelayFailure('route_revoked')
                     pending=row['pending'].popleft();pending['server']=stream
                     pending['ready'].set()
                 finally:row['accepting']=False
             elif op=='connect' and set(value)=={'op','route'}:
                 row=self.routes.get(hex_value(value['route']))
-                if not row or len(row['pending'])>=8:raise BridgeError('Route unavailable or busy')
+                if not row:raise RelayFailure('route_missing')
+                if len(row['pending'])>=8:raise RelayFailure('route_queue_full')
                 pending={'client':stream,'server':None,'ready':threading.Event(),'done':threading.Event()}
                 row['pending'].append(pending);row['condition'].notify_all()
             else:raise BridgeError('Invalid tunnel operation')
@@ -146,7 +172,7 @@ class Broker:
         if not pending['ready'].wait(self.limits.wait):
             with self.lock:
                 if pending in row['pending']:row['pending'].remove(pending)
-            raise BridgeError('Peer is not connected; no application request was sent')
+            raise RelayFailure('accept_timeout')
         other=pending['server']
         try:
             send_line(stream,{'ok':True,'data':{'tunnel':True}});send_line(other,{'ok':True,'data':{'tunnel':True}})
@@ -160,13 +186,14 @@ class Broker:
             try:
                 while not stop.is_set():
                     now=self.clock()
-                    if now-started>self.limits.lifetime or now-last[0]>self.limits.idle:break
+                    if now-started>self.limits.lifetime:self.count('tunnel_lifetime');break
+                    if now-last[0]>self.limits.idle:self.count('tunnel_idle');break
                     try:data=source.recv(16384)
                     except socket.timeout:continue
                     if not data:break
                     with lock:
                         count[0]+=len(data)
-                        if count[0]>self.limits.bytes:break
+                        if count[0]>self.limits.bytes:self.count('tunnel_bytes');break
                         last[0]=self.clock()
                     target.sendall(data)
             except (OSError,ssl.SSLError):pass
@@ -180,7 +207,7 @@ class Broker:
 class RelayServer(socketserver.ThreadingTCPServer):
     daemon_threads=True;allow_reuse_address=True
     def process_request(self, request, client_address):
-        if not self.slots.acquire(blocking=False):request.close();return
+        if not self.slots.acquire(blocking=False):self.broker.count('capacity');request.close();return
         try:super().process_request(request,client_address)
         except BaseException:self.slots.release();raise
 
@@ -188,8 +215,22 @@ class RelayServer(socketserver.ThreadingTCPServer):
         try:super().process_request_thread(request,client_address)
         finally:self.slots.release()
 
-    def __init__(self,address,context,broker=None):
-        self.context=context;self.broker=broker or Broker()
+    def service_actions(self):
+        try:self.write_diagnostics()
+        except OSError:self.broker.count('diagnostics_write_failed')
+
+    def write_diagnostics(self):
+        if self.diagnostics_file:
+            path=Path(self.diagnostics_file)
+            fd,temp=tempfile.mkstemp(prefix='.relay-status-',dir=path.parent)
+            try:
+                with os.fdopen(fd,'w') as file:file.write(encode(self.broker.diagnostics()))
+                os.replace(temp,path)
+            finally:
+                if os.path.exists(temp):os.unlink(temp)
+
+    def __init__(self,address,context,broker=None,diagnostics_file=None):
+        self.context=context;self.broker=broker or Broker();self.diagnostics_file=diagnostics_file
         owner=self
         class Handler(socketserver.BaseRequestHandler):
             def handle(self):
@@ -200,13 +241,15 @@ class RelayServer(socketserver.ThreadingTCPServer):
                     stream=owner.context.wrap_socket(self.request,server_side=True)
                     envelope=read_line(stream)
                     if not isinstance(envelope,dict) or set(envelope)!={'enrollment','request'}:raise BridgeError('Enrollment required')
-                    if owner.broker.enrollment is None or not hmac.compare_digest(hex_value(envelope['enrollment']),owner.broker.enrollment):raise BridgeError('Enrollment rejected')
+                    if owner.broker.enrollment is None or not hmac.compare_digest(hex_value(envelope['enrollment']),owner.broker.enrollment):raise RelayFailure('enrollment_rejected')
                     value=envelope['request']
                     if isinstance(value,dict) and value.get('op') in ('accept','connect'):owner.broker.tunnel(stream,value)
                     else:send_line(stream,{'ok':True,'data':owner.broker.control(value)})
-                except (BridgeError,OSError,ValueError,TypeError,KeyError):
+                except (BridgeError,OSError,ValueError,TypeError,KeyError) as exc:
+                    reason=exc.reason if isinstance(exc,RelayFailure) else ('io_timeout' if isinstance(exc,TimeoutError) else 'io_error' if isinstance(exc,OSError) else 'malformed')
+                    owner.broker.count(reason)
                     if stream:
-                        try:send_line(stream,{'ok':False,'data':{'error':'Relay request rejected'}})
+                        try:send_line(stream,{'ok':False,'data':{'error':'Relay request rejected','reason':reason}})
                         except OSError:pass
                 finally:
                     if stream:stream.close()
@@ -247,7 +290,7 @@ def dial(profile, timeout=90):
 def rpc(profile,value, timeout=30):
     with dial(profile,timeout) as stream:
         send_line(stream,envelope(profile,value));answer=read_line(stream)
-    if answer.get('ok') is not True:raise BridgeError('Relay refused operation; preserve IDs and inspect state')
+    if not isinstance(answer,dict) or answer.get('ok') is not True:raise RelayFailure(remote_reason(answer))
     return answer['data']
 
 
@@ -255,7 +298,7 @@ def open_tunnel(profile,value,timeout=90):
     stream=dial(profile,timeout)
     try:
         send_line(stream,envelope(profile,value));answer=read_line(stream)
-        if answer.get('ok') is not True:raise BridgeError('Relay peer unavailable; outcome uncertain')
+        if not isinstance(answer,dict) or answer.get('ok') is not True:raise RelayFailure(remote_reason(answer))
         if not answer['data'].get('tunnel'):stream.close();return None
         return stream
     except BaseException:stream.close();raise
@@ -306,6 +349,7 @@ def main():
     parser.add_argument('action',choices=['serve']);parser.add_argument('--bind',required=True);parser.add_argument('--port',required=True,type=int)
     parser.add_argument('--certificate',required=True,type=Path);parser.add_argument('--private-key',required=True,type=Path)
     parser.add_argument('--enrollment-file',required=True,type=Path,help='Private256bithex enrollment file; never a command argument token')
+    parser.add_argument('--diagnostics-file',type=Path,help='Private aggregate reason counts only; no IP/route/token/payload')
     parser.add_argument('--max-routes',type=int,default=32);parser.add_argument('--max-connections',type=int,default=16)
     parser.add_argument('--idle-seconds',type=int,default=60);parser.add_argument('--tunnel-seconds',type=int,default=180);parser.add_argument('--tunnel-bytes',type=int,default=8*1024*1024)
     args=parser.parse_args()
@@ -314,8 +358,12 @@ def main():
     for path in (args.certificate,args.private_key):
         info=path.lstat()
         if path.is_symlink() or info.st_uid!=os.getuid() or info.st_mode&0o077:parser.error('TLS files must be private and owned by the service user')
+    if args.diagnostics_file:
+        parent=args.diagnostics_file.parent;info=parent.stat()
+        if info.st_uid!=os.getuid() or info.st_mode&0o077:parser.error('Diagnostics directory must be private and owned')
+        if args.diagnostics_file.is_symlink():parser.error('Diagnostics file must not be a symlink')
     context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2;context.load_cert_chain(args.certificate,args.private_key)
-    server=RelayServer((args.bind,args.port),context,Broker(Limits(routes=args.max_routes,connections=args.max_connections,idle=args.idle_seconds,lifetime=args.tunnel_seconds,bytes=args.tunnel_bytes),enrollment=enrollment_value({'enrollment_file':str(args.enrollment_file)})))
+    server=RelayServer((args.bind,args.port),context,Broker(Limits(routes=args.max_routes,connections=args.max_connections,idle=args.idle_seconds,lifetime=args.tunnel_seconds,bytes=args.tunnel_bytes),enrollment=enrollment_value({'enrollment_file':str(args.enrollment_file)})),diagnostics_file=args.diagnostics_file)
     try:server.serve_forever()
     except KeyboardInterrupt:pass
     finally:server.server_close()

@@ -34,11 +34,12 @@ if len(sys.argv)<2 or sys.argv[1] in ('-h','--help'):
           'csl-pair connect --thread EXISTING_UUID --pair-code-stdin [--mode auto|lan|relay] [--interface NAME]\n'
           'csl-pair task --text-file TASK | message --text-file ANSWER | receipt --operation-id ID\n'
           'csl-pair wait --after CURSOR --timeout 20 | status | reconcile | stop | events\n'
+          'csl-pair retry --operation-id ID --confirm-same-request (explicit same-ID recovery only)\n'
           'Paste the one-use 26-character code through stdin (private link is a LAN fallback).\n'
           'Auto uses an operator-provisioned private relay profile for mobility; otherwise LAN.\nNo QR, arbitrary public relay, new model, login or OS service. No automatic ambiguous replay. SSH remains advanced.\n'
           'A valid pair is not proof of model continuation or completion.')
     raise SystemExit(0)
-commands={'share':'lan-share','connect':'lan-connect','status':'lan-status','stop':'lan-stop','reconcile':'lan-reconcile','task':'lan-followup','message':'lan-message','receipt':'lan-receipt','wait':'lan-wait'}
+commands={'share':'lan-share','connect':'lan-connect','status':'lan-status','stop':'lan-stop','reconcile':'lan-reconcile','retry':'retry-original','task':'lan-followup','message':'lan-message','receipt':'lan-receipt','wait':'lan-wait'}
 sys.argv[1]=commands.get(sys.argv[1],sys.argv[1])
 if sys.platform!='darwin' and '--state-root' not in sys.argv:
     sys.argv.extend(['--state-root',str(Path(os.environ.get('XDG_STATE_HOME',Path.home()/'.local/state'))/'csl-bridge')])

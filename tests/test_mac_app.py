@@ -144,6 +144,16 @@ class AppTests(unittest.TestCase):
   status.assert_called_once_with(True)
   self.assertTrue(result['peer_ready']);self.assertTrue(result['peer']['ready'])
   self.assertFalse(result['channel']['peer_ready']);self.assertEqual(result['task_phase'],'accepted_only')
+ def test_retry_original_requires_explicit_confirmation_and_uses_durable_hash(self):
+  from csl_bridge_store import Store,encode
+  store=Store(self.service.home,create=True);task=str(uuid.uuid4())
+  body={'version':1,'op':'followup','id':task,'source':'worker','target':'worker','text':'Selected original synthetic instruction.'}
+  store.reserve('outbound:mac',body);store.operation(task,'uncertain',{'state':'uncertain','request_id':task})
+  digest=store.rows('SELECT hash FROM operations WHERE id=?',(task,))[0]['hash'];store.close()
+  with patch.object(app,'local_call',return_value={'state':'delivered'}) as call:
+   with self.assertRaisesRegex(app.AppError,'confirm-same-request'):self.service.retry_original(task)
+   call.assert_not_called();self.service.retry_original(task,True)
+  self.assertEqual(call.call_args.args[1],{'local_op':'retry_operation','operation_id':task,'expected_hash':digest,'confirmed':True})
  def test_only_owned_mcp_sections_replaced_other_text_preserved(self):
   old='model="owner-model"\n\n[mcp_servers.other]\ncommand="owner"\n\n[mcp_servers.csl_bridge]\ncommand="old"\n[mcp_servers.csl_bridge.tools.send_progress]\napproval_mode="prompt"\n'
   new,previous=app.Service.replace_owned(old,self.service.mcp_profile())

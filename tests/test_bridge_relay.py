@@ -70,7 +70,7 @@ class RelayTests(unittest.TestCase):
         broker.control({'op':'revoke','route':'4'*64,'lease':'2'*64});self.assertFalse(broker.routes)
         global_broker=Broker(Limits(rate=1))
         for index in range(4):global_broker.admit(str(index));global_broker.release()
-        with self.assertRaisesRegex(BridgeError,'global rate'):global_broker.admit('other')
+        with self.assertRaisesRegex(BridgeError,'rate_global'):global_broker.admit('other')
         for malformed in ({'op':'shell'},{'op':'lookup','locator':'invalid'},[],{'op':'register','route':2,'lease':None}):
             with self.assertRaises(BridgeError):broker.control(malformed)
 
@@ -169,6 +169,37 @@ class RelayTests(unittest.TestCase):
             for connector in connectors:
                 for thread in connector.threads:thread.join(1)
                 if all(not t.is_alive() for t in connector.threads):connector.store.close()
+
+    def test_short_lease_expires_during_old_accept_wait_but_independent_heartbeat_survives(self):
+        from csl_bridge_relay import open_tunnel, RelayFailure
+        old_lease=self.broker.limits.lease;old_wait=self.broker.limits.wait
+        self.broker.limits.lease=.12;self.broker.limits.wait=.45
+        route={'route':secrets.token_hex(32),'lease':secrets.token_hex(32)};errors=[]
+        def accept_old():
+            try:open_tunnel(self.profile,{'op':'accept',**route},timeout=2)
+            except BridgeError as exc:errors.append(getattr(exc,'reason','unknown'))
+        session=thread=None
+        try:
+            rpc(self.profile,{'op':'register',**route})
+            waiter=threading.Thread(target=accept_old);waiter.start();time.sleep(.2)
+            with self.assertRaises(RelayFailure) as rejected:open_tunnel(self.profile,{'op':'connect','route':route['route']},timeout=1)
+            self.assertEqual(rejected.exception.reason,'route_missing');waiter.join(1)
+            self.assertGreaterEqual(self.broker.diagnostics()['reason_counts']['lease_expired'],1)
+            session,thread=self.make_session('leaseguard')
+            time.sleep(.3)
+            self.assertIn(session.route['route'],self.broker.routes)
+            self.assertGreater(session.relay_status['heartbeat_last_success'],session.relay_status['accept_last_attempt'])
+            self.assertEqual(peer_request(self.profile,session.remote,{'op':'health'},timeout=2)['identity'],'leaseguard')
+            # A slow application/native IPC handler does not block renewal either.
+            def slow(value):time.sleep(.25);return {'synthetic_ipc':'completed'}
+            with patch.object(session,'incoming',side_effect=slow):
+                self.assertEqual(peer_request(self.profile,session.remote,{'op':'health'},timeout=2)['synthetic_ipc'],'completed')
+            self.assertIn(session.route['route'],self.broker.routes)
+            observed=encode(self.broker.diagnostics())
+            self.assertNotIn(session.route['route'],observed);self.assertNotIn(session.route['lease'],observed);self.assertNotIn('127.0.0.1',observed)
+        finally:
+            if session:session.close();thread.join(2)
+            self.broker.limits.lease=old_lease;self.broker.limits.wait=old_wait
 
     def test_fragmented_inner_tls_read_and_write_large_data(self):
         # Actual MemoryBIO TLS over a fragmenting socketpair; no relay plaintext.

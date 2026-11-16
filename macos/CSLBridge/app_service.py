@@ -340,6 +340,15 @@ class Service:
         json_file(self.state/'peer-proof.json',{'ready':False,'phase':'stopping','observed_at':time.time(),'note':'Desconexión solicitada; no es cancelación del trabajo ya aceptado.'})
         return result
 
+    def retry_original(self, operation_id, confirmed=False):
+        identifier(operation_id)
+        if not confirmed:raise AppError('Use --confirm-same-request after reviewing this original operation; no automatic retry.')
+        store=Store(self.home)
+        try:rows=store.rows("SELECT hash FROM operations WHERE id=? AND peer LIKE 'outbound:%'",(operation_id,))
+        finally:store.close()
+        if not rows:raise AppError('Original outgoing operation not found; no replacement task was created.')
+        return local_call(self.home,{'local_op':'retry_operation','operation_id':operation_id,'expected_hash':rows[0]['hash'],'confirmed':True})
+
     def lan_call(self, action, text_file=None, request_id=None, operation_id=None, after=0, timeout=20):
         from csl_bridge_lan import control
         source=next(iter(self.registered()),None)
@@ -465,10 +474,11 @@ class Service:
 
 def main():
     parser=argparse.ArgumentParser(description='CSL Bridge app: existing sessions only, no model/server/login creation.')
-    parser.add_argument('action',choices=['lan-reconcile','lan-followup','lan-message','lan-receipt','lan-wait','lan-share','lan-connect','lan-status','lan-stop','discover','status','configure','connect','start','stop','events','peer-check','mcp-plan','mcp-install','mcp-rollback','connection-info','transport-run','transport-status','selftest'])
+    parser.add_argument('action',choices=['retry-original','lan-reconcile','lan-followup','lan-message','lan-receipt','lan-wait','lan-share','lan-connect','lan-status','lan-stop','discover','status','configure','connect','start','stop','events','peer-check','mcp-plan','mcp-install','mcp-rollback','connection-info','transport-run','transport-status','selftest'])
     parser.add_argument('--text-file',type=Path)
     parser.add_argument('--request-id')
     parser.add_argument('--operation-id')
+    parser.add_argument('--confirm-same-request',action='store_true',help='Explicitly retry only the original stored ID/body/hash after an authenticated not_found receipt; never replaces work.')
     from csl_bridge import wait_seconds
     parser.add_argument('--timeout',type=wait_seconds,default=20)
     parser.add_argument('--mode',choices=['auto','lan','relay'],default='auto',help='Auto uses provisioned relay for mobility, otherwise LAN. No automatic task retransmission/fallback.')
@@ -491,7 +501,8 @@ def main():
         return result
     try:
         if args.approve_delegation and not args.approve_communication:raise AppError('Delegation requires explicit initial communication consent.')
-        if args.action in ('lan-followup','lan-message','lan-receipt','lan-wait'):
+        if args.action=='retry-original':result=service.retry_original(args.operation_id,args.confirm_same_request)
+        elif args.action in ('lan-followup','lan-message','lan-receipt','lan-wait'):
             action={'lan-followup':'followup','lan-message':'send_message','lan-receipt':'receipt','lan-wait':'wait'}[args.action]
             result=service.lan_call(action,args.text_file,args.request_id,args.operation_id,args.after,args.timeout)
         elif args.action=='lan-share':
