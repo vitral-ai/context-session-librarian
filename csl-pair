@@ -15,6 +15,7 @@ def step_help(action):
     parser.add_argument('--mode',choices=['auto','lan','relay'],default='auto',help='auto: provisioned relay if present, otherwise LAN. Relay needs the owner-provisioned private profile; LAN needs a common reachable LAN.')
     parser.add_argument('--interface','--bind',dest='interface',metavar='NAME',help='LAN only: interface name or local IPv4 if the OS default route is ambiguous.')
     if action=='connect':parser.add_argument('--pair-code-stdin',action='store_true',required=True,help='Required: paste one26-character code (or LAN private link), then Enter. Never put the code in argv/env.')
+    parser.add_argument('--keep-awake',action=argparse.BooleanOptionalAction,default=None,help='macOS only, explicit opt-in: keep this client available while connected; uses energy, display sleep unchanged. --no-keep-awake releases it; no global settings.')
     parser.add_argument('--approve-communication',action='store_true',help='Explicit initial local consent for progress and query tools only; no login/model/shell permission changes.')
     parser.add_argument('--approve-delegation',action='store_true',help='Optional with --approve-communication: adds followup_task and send_message. Can activate idle work and consume model tokens/cost; no interrupt auto-grant.')
     parser.add_argument('--state-root',metavar='DIRECTORY',help='Operator override for private state and relay-profile.json; no token in arguments.')

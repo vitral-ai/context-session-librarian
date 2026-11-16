@@ -175,3 +175,30 @@ ni reenvío de interrupt: una interrupción exige una nueva decisión sobre el t
 El presupuesto sólo de este control explícito es185s (dos exchanges90s+margen5);
 wait0..20, IPC local25, operaciones remotas95 y hostMCP105 permanecen intactos.
 No reintentar mensajes/interrupciones de tareas ya terminadas para rehacer el ensayo.
+
+## Mantener disponible este Mac mientras el cliente está conectado
+
+La GUI muestra una opción visible, marcada inicialmente, aplicada al compartir o
+conectar mediante código: **Mantener este Mac disponible mientras está conectado
+(usa energía)**. CLI es opt-in con `--keep-awake` en share/connect; sin el flag no
+cambia una assertion ya existente. `--no-keep-awake` libera sólo la assertion de
+este cliente. Linux no requiere ni ejecuta caffeinate.
+
+En macOS el proceso residente inicia `/usr/bin/caffeinate -i -s -w CLIENT_PID`.
+Evita idle sleep del sistema (la assertion-s sólo es efectiva con alimentación AC),
+no impide que se apague la pantalla y no cambia pmset, ajustes globales, root o
+servicios. Puede aumentar consumo. `status` incluye power.supported/enabled/error
+del canal; enabled significa proceso de assertion activo, no garantía de conexión,
+de respuesta del peer ni que el OS nunca suspenda por tapa cerrada/sleep explícito.
+
+Stop libera inmediatamente su hijo caffeinate y el cierre normal también. Si el
+cliente cae por SIGKILL, caffeinate observa CLIENT_PID con-w y termina al desaparecer
+ese proceso: la assertion no queda atada a la duración de una consola o key2h. No
+se mata ni altera un caffeinate creado por el owner u otra aplicación. Una caída
+seguida de recovery requiere seleccionar --keep-awake de nuevo en la acción local
+si se desea; no se reconstruye una autorización global ni se cambian políticas.
+
+Pruebas del módulo son mocks locales, no ensayo de sleep real. Owner observó Sleep/
+DarkWake en el Mac con ACsleep1min y heartbeat congelado; después obtuvo recuperación
+asistida usando una assertion propia temporal. Esa evidencia separada fortalece la
+hipótesis de suspensión, pero no convierte todo fallo previo en causa única probada.

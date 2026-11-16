@@ -36,6 +36,7 @@ final class App: NSObject, NSApplicationDelegate {
     var pairCode = NSSecureTextField(string: "")
     var network = NSPopUpButton()
     var transportMode = NSPopUpButton()
+    var keepAwake = NSButton(checkboxWithTitle: "Mantener este Mac disponible mientras está conectado (usa energía)", target: nil, action: nil)
     var allowDelegation = NSButton(checkboxWithTitle: "Permitir encargos automáticos (puede consumir tokens)", target: nil, action: nil)
     var networkIDs: [String] = []
     var statusLabel = NSTextField(labelWithString: "Detectando sesión local…")
@@ -104,6 +105,7 @@ final class App: NSObject, NSApplicationDelegate {
         let tools = button("Herramientas de comunicación…",#selector(installTools))
         let info = button("Copiar conexión",#selector(copyConnection))
         transportMode.addItems(withTitles:["Automático · relay provisionado, si existe", "Sólo LAN directa", "Relay Internet provisionado"])
+        keepAwake.state = .on
         pairCode.placeholderString="Pega el código de 26 caracteres o enlace privado"
         network.addItem(withTitle:"Detectar red local automáticamente")
         let pairNote=label("Comparte el código manualmente: copiar y pegar. Un uso, cinco minutos; sin QR. Automático usa el relay privado provisionado para redes distintas; sin perfil, usa LAN. No cambia de canal ni repite tareas inciertas automáticamente.")
@@ -111,7 +113,7 @@ final class App: NSObject, NSApplicationDelegate {
         let share=button("Compartir código…",#selector(shareLAN))
         let join=button("Conectar con código…",#selector(joinLAN))
         let reconcile=button("Revisar recibo",#selector(reconcileLAN))
-        let body = stack([label("Sesión existente",bold: true),intro,horizontal([sessions,find]),label("Canal de conexión",bold: true),transportMode,network,pairNote,label("Código o enlace privado"),pairCode,allowDelegation,horizontal([share,join,reconcile]),label("Conexión avanzada ya configurada",bold: true),horizontal([connect,tools,info])],spacing: 12)
+        let body = stack([label("Sesión existente",bold: true),intro,horizontal([sessions,find]),label("Canal de conexión",bold: true),transportMode,network,pairNote,label("Código o enlace privado"),pairCode,allowDelegation,keepAwake,horizontal([share,join,reconcile]),label("Conexión avanzada ya configurada",bold: true),horizontal([connect,tools,info])],spacing: 12)
         body.translatesAutoresizingMaskIntoConstraints = false;connectView.addSubview(body)
         NSLayoutConstraint.activate([body.leadingAnchor.constraint(equalTo: connectView.leadingAnchor),body.trailingAnchor.constraint(equalTo: connectView.trailingAnchor),body.topAnchor.constraint(equalTo: connectView.topAnchor),sessions.widthAnchor.constraint(greaterThanOrEqualToConstant: 390),coordinator.widthAnchor.constraint(equalToConstant: 280)])
         activity.isEditable = false;activity.isSelectable = true;activity.font = .systemFont(ofSize: 13)
@@ -186,6 +188,7 @@ final class App: NSObject, NSApplicationDelegate {
         guard index>=0 && index<sessionIDs.count else {noteLabel.stringValue="Selecciona tu conversación existente.";return nil}
         let modes=["auto","lan","relay"]
         var args=[action,"--thread",sessionIDs[index],"--approve-communication","--mode",modes[max(0,transportMode.indexOfSelectedItem)]]
+        args += [keepAwake.state == .on ? "--keep-awake" : "--no-keep-awake"]
         if allowDelegation.state == .on {args += ["--approve-delegation"]}
         let selected=network.indexOfSelectedItem-1
         if selected>=0 && selected<networkIDs.count {args += ["--bind",networkIDs[selected]]}
@@ -193,7 +196,7 @@ final class App: NSObject, NSApplicationDelegate {
     }
     func communicationConsent() -> Bool {
         let alert=NSAlert();alert.messageText="Conectar estos agentes"
-        alert.informativeText="Permite encargos, aclaraciones, avances, estado y resultados entre este par. Activa sólo herramientas de comunicación de esta conversación. No concede shell, historial, login ni aprobaciones remotas. El sistema puede solicitar permiso de red; relay sólo abre conexiones salientes. Si seleccionaste encargos automáticos, followup puede activar al agente inactivo y consumir tokens/costo; no incluye interrupt automático."
+        alert.informativeText="Permite encargos, aclaraciones, avances, estado y resultados entre este par. Activa sólo herramientas de comunicación de esta conversación. No concede shell, historial, login ni aprobaciones remotas. El sistema puede solicitar permiso de red; relay sólo abre conexiones salientes. Si marcas mantener disponible, se evita suspensión inactiva del sistema mientras ese cliente vive, sin impedir apagar pantalla; consume energía y no modifica ajustes globales. Si seleccionaste encargos automáticos, followup puede activar al agente inactivo y consumir tokens/costo; no incluye interrupt automático."
         alert.addButton(withTitle:"Permitir y continuar");alert.addButton(withTitle:"Cancelar")
         return alert.runModal() == .alertFirstButtonReturn
     }

@@ -251,18 +251,20 @@ class Service:
         if requested=='relay' and self.relay_profile_path() is None:raise AppError('Relay profile not provisioned. Install the owner-provided private profile; no manual host/key input is required.')
         return requested
 
-    def relay_share(self, thread=None):
+    def relay_share(self, thread=None, keep_awake=None):
         from csl_bridge_relay_client import ensure_session, session_control
         connector=self.start(thread,None)
         session=ensure_session(self.state/'relay',self.home,self.relay_profile_path())
+        if keep_awake is not None:session_control(self.state/'relay','keep_awake',enabled=keep_awake)
         self.settings['connection_mode']='relay';json_file(self.settings_path,self.settings)
         result=session_control(self.state/'relay','share')
         return {**result,'lan_session_owned':session['started_by_caller'],'connector_owned':connector.get('started_by_this_call',False)}
 
-    def relay_connect(self, code, thread=None):
+    def relay_connect(self, code, thread=None, keep_awake=None):
         from csl_bridge_relay_client import ensure_session, session_control
         connector=self.start(thread,None)
         session=ensure_session(self.state/'relay',self.home,self.relay_profile_path())
+        if keep_awake is not None:session_control(self.state/'relay','keep_awake',enabled=keep_awake)
         self.settings['connection_mode']='relay';json_file(self.settings_path,self.settings)
         result=session_control(self.state/'relay','connect',code=code.strip())
         ownership={'lan_session_owned':session['started_by_caller'],'connector_owned':connector.get('started_by_this_call',False)}
@@ -274,20 +276,24 @@ class Service:
         proof=self.peer_check(result['remote_agent'])
         return {**result,**ownership,'verified':proof['ready'],'note':'Peer application response authenticated. Accepted, model activity and final remain separate states.'}
 
-    def lan_share(self, thread=None, bind=None):
+    def lan_share(self, thread=None, bind=None, keep_awake=None):
         from csl_bridge_lan import ensure_session, control
         connector=self.start(thread,None)
         session=ensure_session(self.state/'lan',self.home,bind)
+        if keep_awake is not None:control(self.state/'lan','keep_awake',enabled=keep_awake)
         self.settings['connection_mode']='lan';json_file(self.settings_path,self.settings)
         invitation=control(self.state/'lan','invite')
         return {**invitation,'lan_session_owned':session['started_by_caller'],'connector_owned':connector.get('started_by_this_call',False),'note':'Comparte manualmente el código o enlace privado. Un uso, cinco minutos. Sin QR. Permite encargos, mensajes, avances y resultados; no shell/historial/aprobaciones.'}
 
-    def lan_connect(self, invitation, thread=None, bind=None):
+    def lan_connect(self, invitation, thread=None, bind=None, keep_awake=None):
         from csl_bridge_lan import invitation_input, connect_code
         code,link=invitation_input(invitation)
         connector=self.start(thread,None)
         self.settings['connection_mode']='lan';json_file(self.settings_path,self.settings)
         result=connect_code(self.state/'lan',self.home,code,bind,link)
+        if keep_awake is not None:
+            from csl_bridge_lan import control
+            result['power']=control(self.state/'lan','keep_awake',enabled=keep_awake)
         if result.get('state')!='paired':
             json_file(self.state/'peer-proof.json',{'ready':False,'phase':'pairing_uncertain','observed_at':time.time(),'note':'Emparejamiento sin confirmar; consulta el recibo antes de repetir.'})
             return {**result,'connector_owned':connector.get('started_by_this_call',False)}
@@ -481,6 +487,7 @@ def main():
     parser.add_argument('--confirm-same-request',action='store_true',help='Explicitly retry only the original stored ID/body/hash after an authenticated not_found receipt; never replaces work.')
     from csl_bridge import wait_seconds
     parser.add_argument('--timeout',type=wait_seconds,default=20)
+    parser.add_argument('--keep-awake',action=argparse.BooleanOptionalAction,default=None,help='macOS only: keep this session client available while connected; increases energy use, no display/global power changes. CLI opt-in; --no-keep-awake releases its assertion.')
     parser.add_argument('--mode',choices=['auto','lan','relay'],default='auto',help='Auto uses provisioned relay for mobility, otherwise LAN. No automatic task retransmission/fallback.')
     parser.add_argument('--bind','--interface',dest='bind',help='Select a local IPv4 interface, no firewall changes')
     parser.add_argument('--pair-code-stdin',action='store_true',help='Read one private manual code/link from stdin, never argv')
@@ -507,13 +514,13 @@ def main():
             result=service.lan_call(action,args.text_file,args.request_id,args.operation_id,args.after,args.timeout)
         elif args.action=='lan-share':
             mode=service.connection_mode(args.mode)
-            result=service.relay_share(args.thread) if mode=='relay' else service.lan_share(args.thread,args.bind)
+            result=service.relay_share(args.thread,args.keep_awake) if mode=='relay' else service.lan_share(args.thread,args.bind,args.keep_awake)
             result=optional_communication(result)
         elif args.action=='lan-connect':
             if not args.pair_code_stdin:raise AppError('Paste the private code/link through stdin; never command arguments.')
             invitation=sys.stdin.readline(4096)
             mode=service.connection_mode(args.mode)
-            result=service.relay_connect(invitation,args.thread) if mode=='relay' else service.lan_connect(invitation,args.thread,args.bind)
+            result=service.relay_connect(invitation,args.thread,args.keep_awake) if mode=='relay' else service.lan_connect(invitation,args.thread,args.bind,args.keep_awake)
             result=optional_communication(result)
         elif args.action=='transport-run':
             if not args.transport_profile:raise AppError('Selecciona un perfil SSH ya autorizado; no se configura red automáticamente.')

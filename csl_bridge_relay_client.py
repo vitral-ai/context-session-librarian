@@ -215,6 +215,7 @@ class RelaySession(Session):
             for path in self.state.glob('to-*.json'):save(path,{'token':''})
 
     def close(self,revoke=True):
+        self.power.close()
         self.stop.set();self.heartbeat_wakeup.set()
         if revoke:
             self.revoke_credentials()
@@ -250,14 +251,16 @@ def start_control(session):
                 if value=={'op':'share'}:data=session.publish()
                 elif isinstance(value,dict) and set(value)=={'op','code'} and value['op']=='connect':data=session.connect_code(value['code'])
                 elif value=={'op':'reconcile'}:data=session.reconcile_pair()
+                elif isinstance(value,dict) and value.get('op')=='keep_awake' and set(value)=={'op','enabled'}:data=session.power.set(value['enabled'])
                 elif value=={'op':'stop'}:
+                    session.power.close()
                     session.revoke_credentials()
                     session.stop.set()
                     try:rpc(session.profile,{'op':'revoke',**session.route},timeout=5)
                     except (BridgeError,OSError,ValueError):pass
                     data={'stopping':True,'revocation':'local grants revoked; relay revoke best effort; accepted work is not cancelled'}
                 elif value=={'op':'status'}:
-                    data={'running':True,'identity':session.identity,'bridge_home':str(session.home),'mode':'relay',**session.relay_status,
+                    data={'running':True,'identity':session.identity,'bridge_home':str(session.home),'mode':'relay','power':session.power.status(),**session.relay_status,
                           'peers':[{'identity':p,'agent':a} for p,a in session.peer_agents.items()]}
                 else:raise BridgeError('Invalid local relay operation')
                 self.wfile.write((encode({'ok':True,'data':data})+'\n').encode())
@@ -292,7 +295,7 @@ def main():
     import signal
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('action',choices=['serve']);parser.add_argument('--state',required=True);parser.add_argument('--home',required=True);parser.add_argument('--profile',required=True)
     args=parser.parse_args();session=RelaySession(args.state,args.home,args.profile)
-    for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,lambda *_:session.stop.set())
+    for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,lambda *_:(session.power.close(),session.stop.set()))
     server,thread=start_control(session)
     try:session.run()
     finally:server.shutdown();server.server_close();thread.join(2);session.close()

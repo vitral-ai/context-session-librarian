@@ -154,6 +154,12 @@ class AppTests(unittest.TestCase):
    with self.assertRaisesRegex(app.AppError,'confirm-same-request'):self.service.retry_original(task)
    call.assert_not_called();self.service.retry_original(task,True)
   self.assertEqual(call.call_args.args[1],{'local_op':'retry_operation','operation_id':task,'expected_hash':digest,'confirmed':True})
+ def test_mac_availability_option_is_forwarded_only_to_local_session_control(self):
+  with patch.object(self.service,'start',return_value={'started_by_this_call':False}),patch('csl_bridge_relay_client.ensure_session',return_value={'started_by_caller':False}),patch('csl_bridge_relay_client.session_control',side_effect=[{'enabled':True},{'code':'synthetic'}]) as control:
+   self.service.relay_share(keep_awake=True)
+  self.assertEqual(control.call_args_list[0].args,(self.service.state/'relay','keep_awake'))
+  self.assertEqual(control.call_args_list[0].kwargs,{'enabled':True})
+  self.assertEqual(control.call_args_list[1].args,(self.service.state/'relay','share'))
  def test_only_owned_mcp_sections_replaced_other_text_preserved(self):
   old='model="owner-model"\n\n[mcp_servers.other]\ncommand="owner"\n\n[mcp_servers.csl_bridge]\ncommand="old"\n[mcp_servers.csl_bridge.tools.send_progress]\napproval_mode="prompt"\n'
   new,previous=app.Service.replace_owned(old,self.service.mcp_profile())

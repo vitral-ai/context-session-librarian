@@ -154,6 +154,8 @@ class Session:
             old=private_json(self.state/'session.json')
             if old.get('bridge_home')!=str(self.home) or old.get('thread_id')!=self.thread_id:
                 raise BridgeError('This LAN state belongs to another conversation; preserve it and select its original session')
+        from csl_bridge_power import Availability
+        self.power=Availability()
         self.lock=threading.RLock();self.stop=threading.Event();self.threads=[];self.discovery_window=[]
         self.invitation=private_json(self.state/'invitation.json') if (self.state/'invitation.json').exists() else None
         self.registry=private_json(self.state/'registry.json') if (self.state/'registry.json').exists() else {}
@@ -298,8 +300,9 @@ class Session:
                         remote=link_endpoint(value['link'],value['code']) if value['link'] else discover(value['code'])
                         data=pair(session,value['code'],remote)
                     elif value=={'op':'reconcile'}:data=reconcile_pair(session)
-                    elif value=={'op':'status'}:data={'identity':session.identity,'bridge_home':str(session.home),'endpoint':session.remote,'paired_count':len(session.registry),'peers':[{'identity':p,'agent':a} for p,a in session.peer_agents.items()],'running':True}
-                    elif value=={'op':'stop'}:session.stop.set();data={'stopping':True,'tokens_revoked_when_stopped':True}
+                    elif value=={'op':'status'}:data={'identity':session.identity,'bridge_home':str(session.home),'endpoint':session.remote,'paired_count':len(session.registry),'peers':[{'identity':p,'agent':a} for p,a in session.peer_agents.items()],'running':True,'power':session.power.status()}
+                    elif value.get('op')=='keep_awake' and set(value)=={'op','enabled'}:data=session.power.set(value['enabled'])
+                    elif value=={'op':'stop'}:session.power.close();session.stop.set();data={'stopping':True,'tokens_revoked_when_stopped':True}
                     else:raise BridgeError('Invalid local session control')
                     self.wfile.write((encode({'ok':True,'data':data})+'\n').encode())
                 except (BridgeError,OSError,ValueError):pass
@@ -315,6 +318,7 @@ class Session:
         save(self.state/'session.json',{'pid':os.getpid(),'endpoint':self.remote,'identity':self.identity,'agent':self.agents[0],'bridge_home':str(self.home),'thread_id':self.thread_id})
 
     def close(self, revoke=True):
+        self.power.close()
         self.stop.set()
         if self.udp:self.udp.close()
         self.server.shutdown();self.server.server_close()
@@ -399,11 +403,11 @@ def reconcile_pair(session):
     except (BridgeError,OSError,ValueError):return {'state':'uncertain','pair_id':pair_id,'note':'Peer accepted this pairing; local profile needs review. Non-LAN profiles are never overwritten automatically.'}
 
 
-def control(state, op):
+def control(state, op, **values):
     state=private_directory(state)
     with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as stream:
         stream.settimeout(20 if op=='reconcile' else 5);stream.connect(str(state/'session-control.sock'))
-        stream.sendall((encode({'op':op})+'\n').encode())
+        stream.sendall((encode({'op':op,**values})+'\n').encode())
         with stream.makefile('rb') as file:answer=decode(file.readline(MAX_WIRE+1))
     if answer.get('ok') is not True:raise BridgeError('Local LAN session unavailable')
     return answer['data']
@@ -495,7 +499,7 @@ def serve_main():
     parser=argparse.ArgumentParser(description='Session-owned LAN channel; no global service or model')
     parser.add_argument('action',choices=['serve']);parser.add_argument('--state',required=True);parser.add_argument('--home',required=True);parser.add_argument('--bind',required=True)
     args=parser.parse_args();session=Session(args.state,args.home,args.bind)
-    for sig in (signal.SIGTERM,signal.SIGINT):signal.signal(sig,lambda *_:session.stop.set())
+    for sig in (signal.SIGTERM,signal.SIGINT):signal.signal(sig,lambda *_:(session.power.close(),session.stop.set()))
     try:
         session.start()
         while not session.stop.wait(.5):pass

@@ -18,7 +18,7 @@ class PairHelpTests(unittest.TestCase):
    for step in ('share','connect'):
     result=self.invoke([step,'--help'],home)
     self.assertEqual(result.returncode,0);self.assertIn('usage: csl-pair '+step,result.stdout)
-    for text in ('--mode','--approve-communication','--approve-delegation','tokens/cost','Example:'):
+    for text in ('--mode','--approve-communication','--approve-delegation','tokens/cost','Example:','--keep-awake','energy'):
      self.assertIn(text,result.stdout)
     for text in ('lan-share','mcp-install','transport-run','selftest'):
      self.assertNotIn(text,result.stdout)
