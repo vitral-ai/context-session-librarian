@@ -202,11 +202,28 @@ class Service:
             peers=store.peers();identity=store.setting('identity')
         finally:store.close()
         selected=self.settings.get('coordinator') or next(iter(peers),None)
+        resident_peer=None
+        mode=self.settings.get('connection_mode')
+        if mode in ('lan','relay'):
+            if mode=='relay':
+                from csl_bridge_relay_client import session_control
+                active=session_control(self.state/'relay','status').get('peers',[])
+            else:
+                from csl_bridge_lan import control
+                active=control(self.state/'lan','status').get('peers',[])
+            preferred=self.settings.get('coordinator')
+            resident_peer=next((entry for entry in active if entry['identity']==preferred),None)
+            if resident_peer is None:
+                if len(active)==1:resident_peer=active[0]
+                elif not active:raise AppError('No confirmed peer in this session channel; pair first. Historical peers were not selected.')
+                else:raise AppError('Multiple session peers are paired; select the coordinator explicitly. No arbitrary peer was queried.')
+            selected=resident_peer['identity']
         config=peers.get(selected,{})
         if config.get('transport') in (None,'receive-only'):
             pending={'ready':False,'phase':'receive_only_not_verified','observed_at':time.time(),'note':'Este perfil recibe al coordinador. Su proceso vivo no acredita la ruta de vuelta; falta verificarla desde el otro equipo.'}
             json_file(self.state/'peer-proof.json',pending)
             return pending
+        if remote_agent is None and resident_peer is not None:remote_agent=resident_peer['agent']
         if remote_agent is None and config.get('transport') in ('lan','relay'):
             from csl_bridge_lan import private_json
             remote_agent=private_json(self.state/('relay' if config['transport']=='relay' else 'lan')/'peers.json').get(selected)
@@ -261,6 +278,7 @@ class Service:
         from csl_bridge_lan import ensure_session, control
         connector=self.start(thread,None)
         session=ensure_session(self.state/'lan',self.home,bind)
+        self.settings['connection_mode']='lan';json_file(self.settings_path,self.settings)
         invitation=control(self.state/'lan','invite')
         return {**invitation,'lan_session_owned':session['started_by_caller'],'connector_owned':connector.get('started_by_this_call',False),'note':'Comparte manualmente el código o enlace privado. Un uso, cinco minutos. Sin QR. Permite encargos, mensajes, avances y resultados; no shell/historial/aprobaciones.'}
 
@@ -268,6 +286,7 @@ class Service:
         from csl_bridge_lan import invitation_input, connect_code
         code,link=invitation_input(invitation)
         connector=self.start(thread,None)
+        self.settings['connection_mode']='lan';json_file(self.settings_path,self.settings)
         result=connect_code(self.state/'lan',self.home,code,bind,link)
         if result.get('state')!='paired':
             json_file(self.state/'peer-proof.json',{'ready':False,'phase':'pairing_uncertain','observed_at':time.time(),'note':'Emparejamiento sin confirmar; consulta el recibo antes de repetir.'})
@@ -277,15 +296,20 @@ class Service:
         proof=self.peer_check(result['remote_agent'])
         return {**result,'connector_owned':connector.get('started_by_this_call',False),'verified':proof['ready'],'note':'Par autenticado. Esto no demuestra que un modelo haya avanzado o finalizado.'}
 
-    def lan_status(self):
+    def lan_status(self, verify_peer=False):
         from csl_bridge_lan import control, interfaces
         if self.settings.get('connection_mode')=='relay':
             from csl_bridge_relay_client import session_control
-            try:return {**session_control(self.state/'relay','status'),'interfaces':[]}
-            except (BridgeError,OSError):return {'running':False,'mode':'relay','interfaces':[]}
-        try:result=control(self.state/'lan','status')
-        except (BridgeError,OSError):result={'running':False}
-        return {**result,'interfaces':interfaces()}
+            try:channel={**session_control(self.state/'relay','status'),'interfaces':[]}
+            except (BridgeError,OSError):channel={'running':False,'mode':'relay','interfaces':[]}
+        else:
+            try:channel=control(self.state/'lan','status')
+            except (BridgeError,OSError):channel={'running':False}
+            channel={**channel,'interfaces':interfaces()}
+        status=self.status(verify_peer)
+        return {**channel,'channel':channel,'peer':status['peer'],'peer_ready':status['connected'],
+                'runtime_ready':status['runtime_ready'],'task_phase':status.get('task_phase','none'),
+                'note':status['note']}
 
     def lan_reconcile(self):
         from csl_bridge_lan import control
@@ -499,6 +523,7 @@ def main():
                 result['peer_verification']=service.peer_check(args.remote_agent)
                 result.update(service.status())
             result=optional_communication(result)
+        elif args.action=='lan-status':result=service.lan_status(args.verify_peer)
         elif args.action=='peer-check':result=service.peer_check(args.remote_agent)
         elif args.action=='events':result=service.events(args.after)
         elif args.action=='status':result=service.status(args.verify_peer)

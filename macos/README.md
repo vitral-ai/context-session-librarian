@@ -47,7 +47,7 @@ un par válido por sí solo no acredita agentes autónomos. La vía CLI sigue di
 ./csl-pair message --text-file aclaracion.txt
 ./csl-pair wait --after 0 --timeout 20
 ./csl-pair receipt --operation-id ID
-./csl-pair status
+./csl-pair status --verify-peer
 ./csl-pair reconcile
 ./csl-pair stop
 ```
@@ -133,3 +133,9 @@ No logs de payload, código, tokens ni respuesta OAuth. El pin no es TOFU.
 Los tests nuevos usan nestedTLS real/MemoryBIO y relay loopback. No sustituyen
 prueba pública real, modelo entre redes o revisión nativa de esta UI. El owner
 maneja esos gates; no confundirlos con el InternetSSH previo de ee74.
+
+`status` separa `channel` (proceso/lease del transporte), `peer`/`peer_ready`
+(respuesta de aplicación autenticada) y `task_phase`. `status --verify-peer` consulta
+el peer del canal residente para renovar esa prueba; no selecciona un peer histórico
+por orden de la base. Si hay varios pares y ninguno seleccionado, pide selección
+explícita. Lease/register no acredita peer listo ni avance del modelo.

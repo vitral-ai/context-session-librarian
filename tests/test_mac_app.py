@@ -115,6 +115,35 @@ class AppTests(unittest.TestCase):
     self.assertTrue(self.service.lan_stop()['already_stopped'])
    local.assert_not_called();relayed.assert_not_called()
    self.assertFalse(self.service.state.exists())
+ def test_resident_pair_is_selected_before_historical_operator_peer(self):
+  from csl_bridge_store import Store,encode
+  store=Store(self.service.home,create=True)
+  with store.transaction() as db:
+   db.executemany('INSERT INTO config VALUES(?,?)',[('identity',encode('owner')),('runtime_socket',encode(None))])
+   db.execute('INSERT INTO agents VALUES(?,?)',('coordinator',str(uuid.uuid4())))
+   db.execute('INSERT INTO peers VALUES(?,?)',('ubuntu-old',encode({'transport':'operator','helper':'/old-profile'})))
+   db.execute('INSERT INTO peers VALUES(?,?)',('mac',encode({'transport':'relay','marker':'CURRENT'})))
+  store.close()
+  for mode,control in (('relay','csl_bridge_relay_client.session_control'),('lan','csl_bridge_lan.control')):
+   self.service.settings={'connection_mode':mode,'coordinator':'ubuntu-old'}
+   with patch(control,return_value={'peers':[{'identity':'mac','agent':'agent-mac'}]}) as resident,patch.object(app,'exchange',return_value={'agent':'agent-mac','thread_id':str(uuid.uuid4()),'status':'idle'}) as exchange:
+    proof=self.service.peer_check()
+   self.assertTrue(proof['ready']);self.assertEqual(proof['peer'],'mac')
+   self.assertEqual(exchange.call_args.args[0]['marker'],'CURRENT')
+   self.assertEqual(exchange.call_args.args[2]['target'],'agent-mac')
+  self.service.settings={'connection_mode':'relay'}
+  with patch('csl_bridge_relay_client.session_control',return_value={'peers':[{'identity':'mac','agent':'agent-mac'},{'identity':'another','agent':'worker'}]}),patch.object(app,'exchange') as exchange:
+   with self.assertRaisesRegex(app.AppError,'Multiple session peers'):self.service.peer_check()
+  exchange.assert_not_called()
+ def test_cli_channel_status_verification_includes_application_proof_and_task(self):
+  self.service.settings={'connection_mode':'relay'}
+  channel={'running':True,'phase':'relay_connected_peer_unverified','peer_ready':False}
+  verified={'connected':True,'runtime_ready':True,'peer':{'ready':True,'peer':'mac'},'task_phase':'accepted_only','note':'Accepted is not continuation.'}
+  with patch('csl_bridge_relay_client.session_control',return_value=channel),patch.object(self.service,'status',return_value=verified) as status:
+   result=self.service.lan_status(True)
+  status.assert_called_once_with(True)
+  self.assertTrue(result['peer_ready']);self.assertTrue(result['peer']['ready'])
+  self.assertFalse(result['channel']['peer_ready']);self.assertEqual(result['task_phase'],'accepted_only')
  def test_only_owned_mcp_sections_replaced_other_text_preserved(self):
   old='model="owner-model"\n\n[mcp_servers.other]\ncommand="owner"\n\n[mcp_servers.csl_bridge]\ncommand="old"\n[mcp_servers.csl_bridge.tools.send_progress]\napproval_mode="prompt"\n'
   new,previous=app.Service.replace_owned(old,self.service.mcp_profile())
