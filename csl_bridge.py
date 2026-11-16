@@ -108,7 +108,28 @@ def configure(args):
                         config['ssh_config'] = str(args.ssh_config.expanduser().absolute())
                 config.update(allow_agents=agents, allow_ops=sorted(set(args.allow_op)))
                 config['allow_sources'] = sorted(set(name(value) for value in args.allow_source))
+                if args.send_session:
+                    config['send_session'] = True
                 db.execute('INSERT INTO peers VALUES(?,?)', (peer, encode(config)))
+            elif args.action == 'peer-session':
+                peer = name(args.peer)
+                row = db.execute('SELECT config FROM peers WHERE name=?', (peer,)).fetchone()
+                if row is None:
+                    raise BridgeError('Configure this peer before selecting session headers')
+                config = decode(row['config'])
+                if args.enable:
+                    config['send_session'] = True
+                else:
+                    config.pop('send_session', None)
+                db.execute('UPDATE peers SET config=? WHERE name=?', (encode(config), peer))
+            elif args.action == 'peer-sources':
+                peer = name(args.peer)
+                row = db.execute('SELECT config FROM peers WHERE name=?', (peer,)).fetchone()
+                if row is None:
+                    raise BridgeError('Configure this peer before admitting its source agents')
+                config = decode(row['config'])
+                config['allow_sources'] = sorted(set(name(value) for value in args.allow_source))
+                db.execute('UPDATE peers SET config=? WHERE name=?', (encode(config), peer))
         return {'state': 'configured', 'action': args.action, 'inference': False}
     finally:
         store.close()
@@ -131,7 +152,7 @@ def run(args):
             if args.session_binding:
                 values += ['--session-binding', args.session_binding]
             raise SystemExit(hook_main(values))
-        if args.action in ('init', 'agent', 'peer', 'grant', 'grant-revoke', 'grant-list', 'grant-show'):
+        if args.action in ('init', 'agent', 'peer', 'peer-session', 'peer-sources', 'grant', 'grant-revoke', 'grant-list', 'grant-show'):
             result = configure(args)
         elif args.action in ('send', 'receive', 'ack', 'reply', 'inbox-status'):
             request = {'local_op': 'mail_' + args.action.replace('-', '_'), 'agent': args.agent}
@@ -240,9 +261,23 @@ def add_commands(subparsers, csl):
     transport.add_argument('--operator-helper', type=Path, help='Trusted local executable with fixed operator SSH endpoint; JSON stdin only, no credentials in bridge.')
     peer.add_argument('--ssh-config', type=Path, help='Explicit private trusted SSH config file, separate from personal SSH setup.')
     peer.add_argument('--allow-agent', action='append', required=True)
-    peer.add_argument('--allow-source', action='append', default=[], help='Admit this remote registered agent name for mailbox v1 only; no implicit sender admission.')
+    peer.add_argument('--allow-source', action='append', default=[],
+                      help='Admit this remote registered agent name as a sender from this peer (followup, send_message, mail); '
+                           'no implicit sender admission.')
     peer.add_argument('--allow-op', action='append', required=True,
                       choices=['followup', 'send_message', 'status', 'interrupt', 'receipt', 'watch', 'agents', 'mail'])
+    peer.add_argument('--send-session', action='store_true',
+                      help='Include the sender\'s registered conversation UUID in followups, messages and events to this peer. '
+                           'Enable only for peers that accept the optional session field.')
+    peer_session = sub.add_parser('peer-session', help='Enable or disable the optional sender session field for an existing peer, offline.')
+    peer_session.add_argument('peer')
+    toggle = peer_session.add_mutually_exclusive_group(required=True)
+    toggle.add_argument('--enable', action='store_true', help='Send the registered sender conversation UUID to this peer.')
+    toggle.add_argument('--disable', action='store_true', help='Stop sending it (default for every peer).')
+    peer_sources = sub.add_parser('peer-sources', help='Replace the admitted remote source agents of an existing peer, offline.')
+    peer_sources.add_argument('peer')
+    peer_sources.add_argument('--allow-source', action='append', default=[],
+                              help='Admit this remote registered agent name; repeat for several, omit all to admit none.')
     grant = sub.add_parser('grant', help='Owner-only local mailbox authority registry; never activates or executes work.')
     grant.add_argument('reference')
     grant.add_argument('--peer', required=True)
