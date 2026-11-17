@@ -135,6 +135,49 @@ class EnrollmentTests(unittest.TestCase):
             self.assertEqual(connector.peers['env-a']['transport'], 'light')
         finally: connector.close()
 
+    def test_connector_applies_deleted_and_rolled_back_light_rows(self):
+        connector=Connector(self.host)
+        try:
+            before=enroll.adopt_peers(self.config,'env-a','worker')
+            connector.reload_light_peers();self.assertIn('env-a',connector.peers)
+            enroll.restore_peers(self.config,'env-a',before)
+            connector.reload_light_peers();self.assertNotIn('env-a',connector.peers)
+            store=Store(self.host)
+            try:
+                with store.transaction()as db:db.execute('INSERT INTO peers VALUES(?,?)',('env-a',encode({'transport':'ssh','alias':'original'})))
+            finally:store.close()
+            before=enroll.adopt_peers(self.config,'env-a','worker')
+            connector.reload_light_peers()
+            enroll.restore_peers(self.config,'env-a',before)
+            connector.reload_light_peers();self.assertEqual(connector.peers['env-a']['transport'],'ssh')
+        finally:connector.close()
+
+    def test_retention_compacts_payload_but_keeps_duplicate_and_collision_guard(self):
+        journal=light.Journal(self.home/'light.sqlite');identifier=str(uuid.uuid4());payload={'synthetic':'x'*48000}
+        journal.put('in','env-a',identifier,payload);journal.finish('in','env-a',identifier,{'ok':True,'data':{'state':'delivered'}})
+        with journal.db()as db:db.execute('UPDATE rpc SET updated=?',(time.time()-31*86400,))
+        journal.prune(30)
+        with journal.db()as db:self.assertEqual(db.execute('SELECT count(*) FROM rpc').fetchone()[0],0)
+        self.assertEqual(journal.put('in','env-a',identifier,payload)['state'],'done')
+        with self.assertRaisesRegex(ValueError,'collision'):journal.put('in','env-a',identifier,{'changed':True})
+        self.assertEqual(json.loads(journal.get('in','env-a',identifier)['result'])['ok'],True)
+
+    def test_retry_backoff_is_per_message_capped_and_does_not_block_other_peers(self):
+        node=light.Node(self.config);self.addCleanup(node.pool.shutdown,False)
+        bad,good=str(uuid.uuid4()),str(uuid.uuid4())
+        node.journal.put('in','offline',bad,{'synthetic':True})
+        node.journal.put('in','active',good,{'synthetic':True})
+        for _ in range(10):node.journal.error('in','offline',bad,RuntimeError())
+        self.assertFalse(node.journal.retry_due('offline',bad))
+        self.assertEqual([r['id']for r in node.journal.pending('in')],[good])
+        with node.journal.db()as db:
+            when=db.execute('SELECT next FROM delivery_retries WHERE id=?',(bad,)).fetchone()[0]
+        self.assertLessEqual(when-time.time(),60)
+        node.executing={('offline',str(i))for i in range(4)}
+        with patch.object(node.pool,'submit')as submit:
+            node.schedule('offline',bad);submit.assert_not_called()
+            node.schedule('active',good);submit.assert_called_once()
+
     def test_config_reload_seeds_new_routes_without_closing_existing_channel(self):
         node = light.Node(self.config); self.addCleanup(node.pool.shutdown, False)
         class Channel:
@@ -155,6 +198,61 @@ class EnrollmentTests(unittest.TestCase):
             rows = list(pool.map(lambda _: journal.put('out', 'env-a', identifier, {'synthetic': True}), range(24)))
         self.assertEqual(len({row['hash'] for row in rows}), 1)
         with journal.db() as db: self.assertEqual(db.execute('SELECT count(*) FROM rpc').fetchone()[0], 1)
+
+    def test_reenrollment_replaces_managed_authorized_key(self):
+        source=list(ROOT.glob('csl_bridge*.py'))+[ROOT/n for n in ('enroll_light.py','csl_light.py','csl_light_cli.py','csl_secrets.py')]
+        guest_home=self.root/'guest';authorized=guest_home/'.ssh/authorized_keys'
+        authorized.parent.mkdir();authorized.write_text('ssh-ed25519 AAAA unrelated-owner-key\n')
+        payload={'files':{p.name:base64.b64encode(p.read_bytes()).decode()for p in source},
+                 'light_home':str(guest_home/'light'),'bridge_home':str(self.guest),
+                 'first_brief_marker':str(self.marker),'agent':'worker','peer':'env-a',
+                 'host_node':'hub','host_agents':['coordinator'],'host_bridges':{'host-core':['coordinator']},
+                 'authorize_key':True,'service':False,'public_key':'ssh-ed25519 AAAAold synthetic'}
+        env=dict(os.environ,HOME=str(guest_home))
+        for key in ('AAAAold','AAAAnew'):
+            payload['public_key']='ssh-ed25519 '+key+' synthetic'
+            result=subprocess.run([sys.executable,'-I','-B','-c',enroll.REMOTE_INSTALL],
+                input=encode(payload).encode(),env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr.decode())
+        text=authorized.read_text();self.assertIn('unrelated-owner-key',text)
+        self.assertNotIn('AAAAold',text);self.assertEqual(text.count(' csl-light-env-a'),1)
+        self.assertIn('AAAAnew',text)
+
+    def test_remote_revocation_parks_reconnect_until_reenrollment(self):
+        node=light.Node(self.config);self.addCleanup(node.pool.shutdown,False)
+        link={'key':str(self.key),'agents':['worker'],'connect_command':[
+            sys.executable,'-c','print(\'{"type":"revoked"}\',flush=True)']}
+        node.config['links']['env-a']=link
+        node.ssh_loop('env-a',link)
+        self.assertTrue((self.home/'revoked-env-a').exists())
+        with patch('csl_light.subprocess.Popen')as popen:
+            node.ssh_loop('env-a',link);popen.assert_not_called()
+
+    def test_deleted_guest_marker_emits_revocation_on_next_attach(self):
+        import socket,threading
+        listener=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+        listener.bind(str(self.home/'light.sock'));listener.listen(1)
+        def accept():
+            connection,_=listener.accept()
+            with connection:connection.recv(1)
+        t=threading.Thread(target=accept,daemon=True);t.start()
+        try:
+            result=subprocess.run([sys.executable,'-I','-B',str(ROOT/'csl_light.py'),
+                '--home',str(self.home),'attach','--peer','hub','--key-file',str(self.root/'deleted.pub')],
+                stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=3)
+            self.assertEqual(result.returncode,0);self.assertEqual(json.loads(result.stdout),{'type':'revoked'})
+        finally:listener.close();t.join(1)
+
+    def test_large_inbox_uses_sqlite_without_wire_size_limit(self):
+        from csl_light_cli import inbox
+        journal=light.Journal(self.home/'light.sqlite')
+        for _ in range(3):
+            identifier=str(uuid.uuid4())
+            request={'op':'mail','action':'send','id':identifier,'source':'worker','target':'coordinator',
+                     'envelope':{'body':'😀'*12000}}
+            journal.put('in','env-a',identifier,{'type':'request','id':identifier,'request':request})
+        messages=inbox(self.home)['messages'];self.assertEqual(len(messages),3)
+        self.assertTrue(all(len(m['body'])==12000 for m in messages))
 
     def test_stop_terminates_a_stubborn_owned_process_group(self):
         child = subprocess.Popen([sys.executable, '-c',

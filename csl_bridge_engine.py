@@ -67,6 +67,7 @@ class Connector:
         self.server = None
         self.light_lock = threading.Lock()
         self.watched_peers = set()
+        self.light_peers = {p for p, c in self.peers.items() if c.get('transport') == 'light'}
         import os
         descriptor = os.open(self.store.home / 'connector.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         self.owner_lock = os.fdopen(descriptor, 'a')
@@ -468,16 +469,22 @@ class Connector:
                     self.flush(agent)
 
     def reload_light_peers(self):
-        """Owner-enrolled light rows are live data; legacy transports stay offline-only."""
+        """Adopt enrollment and exact rollback/removal without restarting a connector."""
         with self.light_lock:
-            for row in self.store.rows('SELECT name,config FROM peers'):
-                try:
-                    peer, config = row['name'], decode(row['config'])
-                except (BridgeError, ValueError):
-                    continue
-                if not isinstance(config, dict) or config.get('transport') != 'light':
-                    continue
-                self.peers[peer] = config
+            fresh = self.store.peers()
+            current = {p for p, c in fresh.items() if c.get('transport') == 'light'}
+            for peer in self.light_peers | current:
+                if peer in fresh:
+                    self.peers[peer] = fresh[peer]
+                else:
+                    self.peers.pop(peer, None)
+            self.light_peers = current
+            if self.server is not None:
+                for peer, config in list(self.peers.items()):
+                    ops = config.get('allow_ops', [])
+                    if config['transport'] not in ('light','receive-only') and not ('mail' in ops and 'watch' not in ops) and peer not in self.watched_peers:
+                        self.watched_peers.add(peer)
+                        self.spawn(self.peer_loop, peer)
 
 
     def mail_loop(self):
@@ -492,10 +499,17 @@ class Connector:
             self.stop.wait(1)
 
     def peer_loop(self, peer):
+        try:
+            self._peer_loop(peer)
+        finally:
+            with self.light_lock:
+                self.watched_peers.discard(peer)
+
+    def _peer_loop(self, peer):
         retry = 1
         while not self.stop.is_set():
             try:
-                if self.peers[peer]['transport'] == 'light':
+                if peer not in self.peers or self.peers[peer]['transport'] == 'light':
                     return
                 cursor = self.store.rows('SELECT value FROM cursors WHERE peer=?', (peer,))
                 after = cursor[0]['value'] if cursor else 0

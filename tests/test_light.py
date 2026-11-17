@@ -99,7 +99,11 @@ class Tests(unittest.TestCase):
         writer = Writer()
         channel = light.Channel(self.node, 'hub', None, writer, lambda: None)
         channel.send({'type': 'ping'})
+        until = time.monotonic() + 1
+        while not writer.data.endswith(b'\n') and time.monotonic() < until:
+            time.sleep(.01)
         self.assertEqual(json.loads(writer.data), {'type': 'ping'})
+        channel.close()
 
     def test_native_crash_after_accept_reconciles_client_id_before_retry(self):
         r = self.req()
@@ -122,6 +126,21 @@ class Tests(unittest.TestCase):
         result = self.node.native.inject('worker', r)
         self.assertTrue(result['reconciled'])
         self.assertEqual(accepted, [r['id']])
+
+    def test_native_reconcile_finds_duplicate_beyond_twenty_newer_turns(self):
+        request=self.req();calls=[]
+        class RPC:
+            def call(inner,method,params):
+                calls.append((method,params))
+                if method=='thread/read':return {'thread':{'id':self.thread}}
+                if method=='thread/turns/list':
+                    if 'cursor'not in params:return {'data':[{'id':str(i),'items':[]}for i in range(20)],'nextCursor':'older'}
+                    return {'data':[{'id':'original','items':[{'type':'userMessage','clientId':request['id']}]}]}
+                raise AssertionError('Must reconcile before creating a turn')
+        self.node.native.client=lambda home:RPC()
+        result=self.node.native.inject('worker',request,request['session'])
+        self.assertEqual(result['turn_id'],'original');self.assertTrue(result['reconciled'])
+        self.assertEqual(len([m for m,_ in calls if m=='thread/turns/list']),2)
 
     def test_disconnect_reconnect_replays_pending_over_real_socketpair(self):
         r = self.req()

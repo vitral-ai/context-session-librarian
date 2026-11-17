@@ -76,6 +76,8 @@ class Journal:
         private_dir(self.path.parent)
         with self.db() as db:
             db.executescript('CREATE TABLE IF NOT EXISTS rpc(direction TEXT,peer TEXT,id TEXT,payload TEXT,hash TEXT,state TEXT,result TEXT,error TEXT,created REAL,updated REAL,PRIMARY KEY(direction,peer,id));CREATE TABLE IF NOT EXISTS routes(agent TEXT PRIMARY KEY,peer TEXT,thread TEXT);')
+            db.execute('CREATE TABLE IF NOT EXISTS delivery_retries(peer TEXT,id TEXT,attempts INTEGER,next REAL,PRIMARY KEY(peer,id))')
+            db.execute('CREATE TABLE IF NOT EXISTS tombstones(direction TEXT,peer TEXT,id TEXT,hash TEXT,result TEXT,updated REAL,PRIMARY KEY(direction,peer,id))')
         self.path.chmod(0o600)
 
     @contextmanager
@@ -93,7 +95,12 @@ class Journal:
         digest = hashlib.sha256(raw.encode()).hexdigest()
         now = time.time()
         with self.db() as db:
-            db.execute('INSERT OR IGNORE INTO rpc VALUES(?,?,?,?,?,?,NULL,NULL,?,?)',
+            old = db.execute('SELECT * FROM tombstones WHERE direction=? AND peer=? AND id=?', (direction, peer, identifier)).fetchone()
+            if old:
+                if old['hash'] != digest:
+                    raise ValueError('Message id collision')
+                return {**dict(old), 'payload': raw, 'state': 'done'}
+            db.execute('INSERT OR IGNORE INTO rpc(direction,peer,id,payload,hash,state,result,error,created,updated) VALUES(?,?,?,?,?,?,NULL,NULL,?,?)',
                        (direction, peer, identifier, raw, digest, 'queued', now, now))
             row = db.execute('SELECT * FROM rpc WHERE direction=? AND peer=? AND id=?',
                              (direction, peer, identifier)).fetchone()
@@ -104,24 +111,49 @@ class Journal:
     def get(self, direction, peer, identifier):
         with self.db() as db:
             row = db.execute('SELECT * FROM rpc WHERE direction=? AND peer=? AND id=?', (direction, peer, identifier)).fetchone()
-            return dict(row) if row else None
+            if row:
+                return dict(row)
+            old = db.execute('SELECT * FROM tombstones WHERE direction=? AND peer=? AND id=?', (direction, peer, identifier)).fetchone()
+            return {**dict(old), 'state':'done', 'payload':'null'} if old else None
 
     def finish(self, direction, peer, identifier, result):
         with self.db() as db:
             db.execute("UPDATE rpc SET state='done',result=?,error=NULL,updated=? WHERE direction=? AND peer=? AND id=?", (wire(result), time.time(), direction, peer, identifier))
+            if direction == 'in':
+                db.execute('DELETE FROM delivery_retries WHERE peer=? AND id=?',(peer,identifier))
+
+    def retry_due(self, peer, identifier):
+        with self.db() as db:
+            row = db.execute('SELECT next FROM delivery_retries WHERE peer=? AND id=?',(peer,identifier)).fetchone()
+            return row is None or row[0] <= time.time()
 
     def error(self, direction, peer, identifier, error):
         with self.db() as db:
-            db.execute('UPDATE rpc SET error=?,updated=? WHERE direction=? AND peer=? AND id=?', (type(error).__name__, time.time(), direction, peer, identifier))
+            row = db.execute('SELECT attempts FROM delivery_retries WHERE peer=? AND id=?',(peer,identifier)).fetchone()
+            count = row[0] if row else 0
+            delay = min(60, 2 ** min(6, count))
+            db.execute('INSERT INTO delivery_retries VALUES(?,?,?,?) ON CONFLICT(peer,id)DO UPDATE SET attempts=excluded.attempts,next=excluded.next',(peer,identifier,count+1,time.time()+delay))
+            db.execute('UPDATE rpc SET error=?,updated=? WHERE direction=? AND peer=? AND id=?',(type(error).__name__,time.time(),direction,peer,identifier))
 
     def pending(self, direction, peer=None):
         with self.db() as db:
             sql = "SELECT * FROM rpc WHERE direction=? AND state!='done'"
             args = [direction]
+            if direction == 'in':
+                sql += ' AND NOT EXISTS(SELECT 1 FROM delivery_retries r WHERE r.peer=rpc.peer AND r.id=rpc.id AND r.next>?)'
+                args.append(time.time())
             if peer is not None:
                 sql += ' AND peer=?'
                 args.append(peer)
-            return [dict(r) for r in db.execute(sql + ' ORDER BY created', args)]
+            return [dict(r) for r in db.execute(sql + ' ORDER BY created LIMIT 256', args)]
+
+    def prune(self, days=30):
+        """Compact old payloads; permanent small tombstones still refuse ID reuse."""
+        with self.db() as db:
+            rows = db.execute("SELECT rowid,* FROM rpc WHERE state='done' AND updated<? LIMIT 500", (time.time()-max(1,days)*86400,)).fetchall()
+            for row in rows:
+                db.execute('INSERT OR IGNORE INTO tombstones VALUES(?,?,?,?,?,?)', (row['direction'],row['peer'],row['id'],row['hash'],row['result'],row['updated']))
+                db.execute('DELETE FROM rpc WHERE rowid=?',(row['rowid'],))
 
     def route(self, agent, peer, thread):
         with self.db() as db:
@@ -136,6 +168,22 @@ class Journal:
             if len(rows) != 1:
                 raise ValueError('Unknown or ambiguous agent; not queued')
             return dict(rows[0])
+
+def native_turns(client, thread):
+    cursor = None
+    while True:
+        params = {'threadId':thread,'limit':20,'itemsView':'full','sortDirection':'desc'}
+        if cursor:
+            params['cursor'] = cursor
+        page = client.call('thread/turns/list', params)
+        yield from page['data']
+        following = page.get('nextCursor')
+        if not following:
+            return
+        if following == cursor:
+            raise RuntimeError('Native pagination did not advance')
+        cursor = following
+
 
 class Native:
 
@@ -182,16 +230,16 @@ class Native:
                 response = client.call('thread/read', {'threadId': thread, 'includeTurns': False})
             except Exception:
                 response = client.call('thread/resume', {'threadId': thread, 'excludeTurns': True})
-            page = client.call('thread/turns/list', {'threadId': thread, 'limit': 20, 'itemsView': 'full', 'sortDirection': 'desc'})
-            turns = page.get('data', [])
-            for turn in turns:
+            active = None
+            for turn in native_turns(client, thread):
+                if turn.get('status') == 'inProgress':
+                    active = turn
                 if any((item.get('type') == 'userMessage' and item.get('clientId') == request['id'] for item in turn.get('items', []))):
                     return {'state': 'delivered', 'request_id': request['id'], 'thread_id': thread, 'turn_id': turn['id'], 'reconciled': True}
             from csl_bridge_store import frame_message
             text = request.get('text') or request.get('envelope', {}).get('body', '')
             text = frame_message(request['source'], request.get('header_task_id', request['id']), session or request.get('session'), text)
             params = {'threadId': thread, 'clientUserMessageId': request['id'], 'input': [{'type': 'text', 'text': text}]}
-            active = next((turn for turn in turns if turn.get('status') == 'inProgress'), None)
             if active:
                 result = client.call('turn/steer', {**params, 'expectedTurnId': active['id']})
                 turn = result['turnId']
@@ -201,29 +249,50 @@ class Native:
             return {'state': 'delivered', 'request_id': request['id'], 'thread_id': thread, 'turn_id': turn}
 
 class Channel:
-
+    """Reader never performs pipe writes; a bounded writer owns backpressure."""
+    LIVENESS = 20
     def __init__(self, node, peer, reader, writer, close):
-        self.node = node
-        self.peer = peer
-        self.reader = reader
-        self.writer = writer
-        self.close_fn = close
-        self.lock = threading.Lock()
+        self.node, self.peer = node, peer
+        self.reader, self.writer, self.close_fn = reader, writer, close
         self.closed = False
-        self.sent = {}
+        self.sent, self.acked = {}, set()
+        self.state_lock = threading.Lock()
+        self.outgoing = queue.Queue(maxsize=64)
+        self.last_received = time.monotonic()
+        self.revoked = False
+        self.writer_thread = threading.Thread(target=self.write_loop, daemon=True)
+        self.writer_thread.start()
 
     def send(self, value):
         raw = (wire(value) + '\n').encode()
         if len(raw) > MAX:
             raise ValueError('Frame too large')
-        with self.lock:
-            view = memoryview(raw)
-            while view:
-                count = self.writer.write(view)
-                if not count:
-                    raise EOFError('Stream closed')
-                view = view[count:]
-            self.writer.flush()
+        if self.closed:
+            return False
+        try:
+            self.outgoing.put_nowait(raw)
+            return True
+        except queue.Full:
+            # Durable frames replay on the next connection. Never block a reader.
+            self.close()
+            return False
+
+    def write_loop(self):
+        try:
+            while not self.closed and not STOP.is_set():
+                try:
+                    raw = self.outgoing.get(timeout=.2)
+                except queue.Empty:
+                    continue
+                view = memoryview(raw)
+                while view and not self.closed:
+                    count = self.writer.write(view)
+                    if not count:
+                        raise EOFError('Stream closed')
+                    view = view[count:]
+                self.writer.flush()
+        except (OSError, EOFError, ValueError):
+            self.close()
 
     def close(self):
         if not self.closed:
@@ -232,6 +301,23 @@ class Channel:
                 self.close_fn()
             except OSError:
                 pass
+
+    def hello(self, frame):
+        config = self.node.config['links'][self.peer]
+        if frame.get('node') != self.peer:
+            raise ValueError('Wrong environment identity')
+        for agent, thread in frame.get('agents', {}).items():
+            if self.node.is_router:
+                if agent not in config.get('agents', []):
+                    raise ValueError('Unconfigured source agent')
+                pinned = config.get('agent_threads', {}).get(agent)
+                if pinned and pinned != thread:
+                    raise ValueError('Enrolled thread changed')
+            if agent in self.node.agents():
+                if self.node.agents()[agent] != thread:
+                    raise ValueError('Local agent identity collision')
+                continue
+            self.node.journal.route(agent, self.peer, thread)
 
     def run(self):
         with self.node.channel_lock:
@@ -243,24 +329,22 @@ class Channel:
         log('connected', peer=self.peer)
         threading.Thread(target=self.pump, daemon=True).start()
         try:
-            while not STOP.is_set() and (not self.closed):
+            while not STOP.is_set() and not self.closed:
                 frame = read_line(self.reader)
+                self.last_received = time.monotonic()
                 kind = frame.get('type')
                 if kind == 'hello':
-                    expected = self.node.config['links'][self.peer].get('agents', [])
-                    if frame.get('node') != self.peer:
-                        raise ValueError('Wrong environment identity')
-                    for agent, thread in frame.get('agents', {}).items():
-                        if self.node.is_router and agent not in expected:
-                            raise ValueError('Unconfigured source agent')
-                        if agent in self.node.agents():
-                            if self.node.agents()[agent] != thread:
-                                raise ValueError('Local agent identity collision')
-                            continue
-                        self.node.journal.route(agent, self.peer, thread)
+                    self.hello(frame)
                 elif kind in ('request', 'event'):
-                    self.node.authenticate(self.peer, frame)
-                    row = self.node.journal.put('in', self.peer, frame['id'], frame)
+                    try:
+                        self.node.authenticate(self.peer, frame)
+                        row = self.node.journal.put('in', self.peer, frame['id'], frame)
+                    except (ValueError, KeyError, TypeError):
+                        from csl_bridge_store import identifier
+                        identifier(frame.get('id'))
+                        self.send({'type': 'response', 'id': frame['id'], 'result':
+                                   {'ok': False, 'data': {'error': 'Frame refused'}}})
+                        continue
                     self.send({'type': 'ack', 'id': frame['id']})
                     if row['state'] == 'done':
                         self.send({'type': 'response', 'id': frame['id'], 'result': json.loads(row['result'])})
@@ -268,10 +352,17 @@ class Channel:
                         self.node.schedule(self.peer, frame['id'])
                 elif kind == 'response':
                     self.node.journal.finish('out', self.peer, frame['id'], frame['result'])
+                    with self.state_lock:
+                        self.sent.pop(frame['id'], None)
+                        self.acked.discard(frame['id'])
                 elif kind == 'ack':
-                    pass
+                    with self.state_lock:
+                        self.acked.add(frame['id'])
                 elif kind == 'ping':
                     self.send({'type': 'pong'})
+                elif kind == 'revoked':
+                    self.revoked = True
+                    return
                 elif kind != 'pong':
                     raise ValueError('Unknown frame')
         except (OSError, EOFError, ValueError, KeyError, TypeError) as error:
@@ -285,17 +376,31 @@ class Channel:
     def pump(self):
         last_hello = 0
         try:
-            while not self.closed and (not STOP.is_set()):
-                for row in self.node.journal.pending('out', self.peer):
-                    if time.monotonic() - self.sent.get(row['id'], -100) < 5:
-                        continue
-                    self.send(json.loads(row['payload']))
-                    self.sent[row['id']] = time.monotonic()
-                if time.monotonic() - last_hello > 3:
+            while not self.closed and not STOP.is_set():
+                now = time.monotonic()
+                if now - self.last_received > self.LIVENESS:
+                    self.close()
+                    return
+                if now - last_hello > 3:
                     self.send({'type': 'hello', 'node': self.node.config['node'], 'agents': self.node.advertise()})
                     self.send({'type': 'ping'})
-                    last_hello = time.monotonic()
-                time.sleep(0.2)
+                    last_hello = now
+                rows = self.node.journal.pending('out', self.peer)
+                pending = {r['id'] for r in rows}
+                with self.state_lock:
+                    self.sent = {i: t for i, t in self.sent.items() if i in pending}
+                    self.acked.intersection_update(pending)
+                for row in rows:
+                    if self.outgoing.qsize() >= 32:
+                        break
+                    with self.state_lock:
+                        due = now - self.sent.get(row['id'], -100) >= (60 if row['id'] in self.acked else 5)
+                    if not due:
+                        continue
+                    if self.send(json.loads(row['payload'])):
+                        with self.state_lock:
+                            self.sent[row['id']] = now
+                STOP.wait(.1)
         except (OSError, ValueError):
             self.close()
 
@@ -357,14 +462,28 @@ class Node:
         if frame['id'] != request['id']:
             raise ValueError('Request id mismatch')
         source = request.get('source')
-        allowed = self.config['links'][peer].get('agents', [])
-        if source and self.is_router and (source not in allowed):
-            raise ValueError('Wrong authenticated source')
+        link = self.config['links'][peer]
+        if self.is_router:
+            if source and source not in link.get('agents', []):
+                raise ValueError('Wrong authenticated source')
+            thread = link.get('agent_threads', {}).get(source)
+            if source and not thread:
+                with self.journal.db() as db:
+                    row = db.execute('SELECT thread FROM routes WHERE agent=? AND peer=?', (source, peer)).fetchone()
+                thread = row['thread'] if row else None
+            if 'session' in request and request['session'] != thread:
+                raise ValueError('Sender session differs from enrolled thread')
+            frame['origin'] = peer
+            frame['source_session'] = thread
+            if thread and 'session' in request:
+                request['session'] = thread
 
     def schedule(self, peer, identifier):
         key = (peer, identifier)
         with self.exec_lock:
-            if key in self.executing:
+            if key in self.executing or len(self.executing) >= 32 or sum(p == peer for p, _ in self.executing) >= 4:
+                return
+            if not self.journal.retry_due(peer, identifier):
                 return
             self.executing.add(key)
         self.pool.submit(self.deliver, peer, identifier)
@@ -405,7 +524,9 @@ class Node:
             route = self.journal.resolve(target)
             if route['peer'] == peer:
                 raise ValueError('Routing loop')
-            forwarded = self.exchange(route['peer'], request, frame.get('origin', peer), destination=route['peer'], session=frame.get('source_session'))
+            forwarded = self.exchange(route['peer'], request, peer, destination=route['peer'], session=frame.get('source_session'), timeout=0)
+            if forwarded['ok'] and forwarded['data'].get('state') == 'queued':
+                raise RuntimeError('Destination queued; await its native receipt')
             if not forwarded['ok']:
                 raise ValueError(forwarded['data'].get('error', 'Forwarding refused'))
             return forwarded['data']
@@ -502,7 +623,7 @@ class Node:
                     client = self.native.client(home)
                     if client is None:
                         continue
-                    turns = client.call('thread/turns/list',{'threadId':self.agents()[agent],'limit':20,'itemsView':'full','sortDirection':'desc'})['data']
+                    turns = native_turns(client, self.agents()[agent])
                     wanted = {r['turn']for r in pending if r['target']==agent}
                     for turn in turns:
                         if turn['id'] in wanted and turn['status'] in ('completed','failed','interrupted'):
@@ -595,7 +716,7 @@ class Node:
             if self.serving:
                 self.schedule(peer,request['id'])
         end = time.monotonic() + timeout
-        while time.monotonic() < end and (not STOP.is_set()):
+        while not STOP.is_set():
             row = self.journal.get('out', peer, request['id'])
             if row['state'] == 'done':
                 result = json.loads(row['result'])
@@ -603,6 +724,8 @@ class Node:
                     with sql(Path(source_home)/'bridge.sqlite') as db:
                         db.execute('UPDATE operations SET state=?,result=? WHERE id=?', (result['data'].get('state','delivered'), wire(result['data']),request['id']))
                 return result
+            if time.monotonic() >= end:
+                break
             time.sleep(0.05)
         return {'ok': True, 'data': {'state': 'queued', 'request_id': request['id'], 'peer': peer, 'offline': peer not in self.channels}}
 
@@ -610,6 +733,8 @@ class Node:
         delay = 1
         while not STOP.is_set() and self.config['links'].get(peer) == config:
             key = Path(config['key'])
+            if (self.home / ('revoked-' + peer)).exists():
+                return
             if not key.exists():
                 time.sleep(1)
                 continue
@@ -628,6 +753,10 @@ class Node:
                         time.sleep(1)
                 threading.Thread(target=revoke, daemon=True).start()
                 channel.run()
+                if channel.revoked:
+                    atomic_disabled = self.home / ('revoked-' + peer)
+                    atomic_disabled.write_text('Guest key marker revoked; re-enroll to clear.\n')
+                    return
                 try:
                     process.wait(timeout=3)
                 except subprocess.TimeoutExpired:
@@ -670,7 +799,12 @@ class Node:
                 worker.start()
 
     def retry_loop(self):
+        last_prune = 0
         while not STOP.is_set():
+            if time.monotonic() - last_prune > 3600:
+                if self.config.get('retention_days', 0) > 0:
+                    self.journal.prune(self.config['retention_days'])
+                last_prune = time.monotonic()
             try:
                 self.sync_links()
                 self.pump_local()
@@ -703,10 +837,6 @@ class Node:
                 action = request['action']
                 if action == 'exchange':
                     result = self.exchange(request['peer'], request['request'], request['origin'])
-                elif action == 'inbox':
-                    with self.journal.db() as db:
-                        rows = [dict(r) for r in db.execute("SELECT peer,id,payload,state,error,created FROM rpc WHERE direction='in' ORDER BY created DESC LIMIT100".replace('LIMIT100', 'LIMIT 100'))]
-                    result = {'ok': True, 'data': rows}
                 elif action == 'agents':
                     result = {'ok': True, 'data': self.agents()}
                 else:
@@ -757,34 +887,52 @@ class Node:
                 except socket.timeout:
                     pass
 
+def relay_duplex(left_read, left_write, right_read, right_write, alive):
+    """Independent bounded pumps: a blocked stdout cannot stop stdin draining."""
+    stopped = threading.Event()
+    def pump(reader, writer):
+        try:
+            while not stopped.is_set():
+                raw = reader(65536)
+                if not raw:
+                    break
+                view = memoryview(raw)
+                while view:
+                    count = writer(view)
+                    if not count:
+                        raise EOFError()
+                    view = view[count:]
+        except (OSError, EOFError):
+            pass
+        finally:
+            stopped.set()
+    for reader, writer in ((left_read, right_write), (right_read, left_write)):
+        threading.Thread(target=pump, args=(reader, writer), daemon=True).start()
+    while not stopped.wait(.2):
+        if not alive():
+            break
+
+
 def attach(home, peer, key_file):
     if os.environ.get('SSH_ORIGINAL_COMMAND', '') not in ('', 'csl-light-stream'):
         raise ValueError('Only the fixed stream is allowed')
     key = Path(key_file)
-    original = hashlib.sha256(key.read_bytes()).digest()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
         s.connect(str(Path(home) / 'light.sock'))
+        if not key.exists():
+            # Only a trusted local attach process emits this control frame.
+            sys.stdout.buffer.write((wire({'type': 'revoked'}) + '\n').encode())
+            sys.stdout.buffer.flush()
+            return
+        original = hashlib.sha256(key.read_bytes()).digest()
         s.sendall((wire({'action': 'attach', 'peer': peer}) + '\n').encode())
-        selector = selectors.DefaultSelector()
-        selector.register(sys.stdin.buffer, selectors.EVENT_READ, 'in')
-        selector.register(s, selectors.EVENT_READ, 'sock')
-        while True:
+        def alive():
             if not key.exists() or hashlib.sha256(key.read_bytes()).digest() != original:
-                return
-            for selected, _ in selector.select(1):
-                if selected.data == 'in':
-                    raw = os.read(sys.stdin.fileno(), 65536)
-                    destination = s
-                else:
-                    raw = s.recv(65536)
-                    destination = None
-                if not raw:
-                    return
-                if destination:
-                    destination.sendall(raw)
-                else:
-                    sys.stdout.buffer.write(raw)
-                    sys.stdout.buffer.flush()
+                return False
+            return not STOP.is_set()
+        relay_duplex(lambda n: os.read(sys.stdin.fileno(), n),
+                     lambda v: os.write(sys.stdout.fileno(), v), s.recv, s.send, alive)
+        s.shutdown(socket.SHUT_RDWR)
 
 def main(argv=None):
     os.umask(0o077)
@@ -806,7 +954,6 @@ def main(argv=None):
     a = sub.add_parser('attach')
     a.add_argument('--peer', required=True)
     a.add_argument('--key-file', required=True)
-    sub.add_parser('inbox')
     for name in ('send', 'followup'):
         c = sub.add_parser(name)
         c.add_argument('target')
@@ -835,9 +982,6 @@ def main(argv=None):
     if args.command == 'exchange':
         request = read_line(sys.stdin.buffer)
         print(wire(local(args.home, {'action': 'exchange', 'peer': args.peer, 'origin': args.origin, 'request': request})))
-        return
-    if args.command == 'inbox':
-        print(wire(local(args.home, {'action': 'inbox'})))
         return
     config = load(args.home / 'config.json')
     sys.path.append(config.get('csl_source', str(Path(__file__).resolve().parent)))

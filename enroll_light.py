@@ -3,6 +3,7 @@ import argparse
 import base64
 import fcntl
 import json
+import hashlib
 import os
 from pathlib import Path
 import shlex
@@ -121,7 +122,8 @@ try:
   keyline='restrict,command="'+attach.replace('\\','\\\\').replace('"','\\"')+'" '+' '.join(public[:2])+' csl-light-'+p['peer']
   authorized=Path.home()/'.ssh/authorized_keys'
   prior=authorized.read_text()if authorized.exists()else''
-  if keyline not in prior.splitlines():atomic(authorized,(prior.rstrip()+'\n'+keyline+'\n').encode())
+  kept=[line for line in prior.splitlines() if not line.endswith(' csl-light-'+p['peer'])]
+  atomic(authorized,('\n'.join(kept+[keyline])+'\n').encode())
  with store.transaction()as db:
   for origin,actors in p['host_bridges'].items():
    row={'transport':'light','home':str(home),'peer':p['host_node'],'allow_agents':[p['agent']],
@@ -231,7 +233,7 @@ def main(argv=None):
                'host_bridges': {n: b['agents'] for n, b in config['bridges'].items()},
                'authorize_key': not bool(args.connect_command), 'proxy_executable': args.proxy_executable,
                'service': not args.no_services, 'files': {p.name: base64.b64encode(p.read_bytes()).decode() for p in selected}}
-    atomic(audit / 'request.json', encode(payload).encode())
+    atomic(audit / 'request.json', encode({**payload, 'files': {p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in selected}}).encode())
     if args.ssh_alias:
         from csl_bridge_transport import ssh_argv
         install_argv = ssh_argv(args.ssh_alias)[:-1] + ['python3 -I -B -c ' + shlex.quote(REMOTE_INSTALL)]
@@ -267,6 +269,7 @@ def main(argv=None):
         except BaseException:
             restore_peers(fresh, args.peer, rows)
             raise
+    (home / ('revoked-' + args.peer)).unlink(missing_ok=True)
     print(encode({'configured': args.peer, 'agent': args.agent, 'thread': installed['thread'],
                   'audit': str(audit), 'existing_streams': 'unchanged'}))
 

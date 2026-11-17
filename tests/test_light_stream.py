@@ -10,6 +10,7 @@ import threading
 import time
 import unittest
 import uuid
+from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import csl_light as light
 from csl_bridge_store import Store, encode
@@ -111,6 +112,138 @@ class StreamTests(unittest.TestCase):
         self.guest.queue_events()
         eid = event_id(identifier + '/' + self.turn + '/final')
         self.assertIsNotNone(self.guest.journal.get('out', 'hub', eid))
+
+    def mail(self, source, target):
+        return {'version':1,'op':'mail','message_version':1,'action':'send',
+                'id':str(uuid.uuid4()),'source':source,'target':target,
+                'envelope':{'kind':'message','body':'😀'*12000,'in_reply_to':None,
+                            'grant_ref':None,'created_at':'2026-11-17T00:00:00Z','expires_at':None}}
+
+    def test_twenty_large_frames_each_way_drain_without_deadlock(self):
+        for node, peer, source, target in ((self.host,'env-a','coordinator','worker'),
+                                            (self.guest,'hub','worker','coordinator')):
+            node.dispatch = lambda *args: {'state':'delivered'}
+            for _ in range(20):
+                request = self.mail(source,target)
+                node.journal.put('out',peer,request['id'],{'type':'request','id':request['id'],
+                    'request':request,'origin':'ignored','destination':peer})
+        self.connect()
+        until = time.monotonic()+10
+        while time.monotonic()<until and (self.host.journal.pending('out') or self.guest.journal.pending('out')):
+            # Same bounded dispatcher used by a running broker's retry loop.
+            for node in (self.host,self.guest):
+                for row in node.journal.pending('in'):
+                    node.schedule(row['peer'],row['id'])
+            time.sleep(.02)
+        self.assertEqual(len(self.host.journal.pending('out')),0)
+        self.assertEqual(len(self.guest.journal.pending('out')),0)
+        self.assertFalse(any(c.closed for c,*_ in self.connections))
+
+    def test_bad_source_and_id_collision_nack_only_poison_message(self):
+        self.connect()
+        poison = self.mail('intruder','coordinator')
+        self.guest.journal.put('out','hub',poison['id'],{'type':'request','id':poison['id'],
+            'request':poison,'origin':'hub'})
+        valid = self.mail('worker','coordinator')
+        self.host.dispatch = lambda *args: {'state':'delivered'}
+        self.guest.journal.put('out','hub',valid['id'],{'type':'request','id':valid['id'],
+            'request':valid,'origin':'hub'})
+        until=time.monotonic()+3
+        while time.monotonic()<until and self.guest.journal.pending('out'):
+            time.sleep(.02)
+        self.assertFalse(json.loads(self.guest.journal.get('out','hub',poison['id'])['result'])['ok'])
+        self.assertTrue(json.loads(self.guest.journal.get('out','hub',valid['id'])['result'])['ok'])
+        # Same ID with a different payload gets a NACK; the next request still flows.
+        collision = dict(valid,id=str(uuid.uuid4()))
+        canonical = {'type':'request','id':collision['id'],'request':collision,'origin':'env-a',
+                     'source_session':self.guest.agents()['worker']}
+        self.host.journal.put('in','env-a',collision['id'],canonical)
+        changed = {**canonical,'request':{**collision,'envelope':{**collision['envelope'],'body':'changed'}}}
+        self.guest.journal.put('out','hub',collision['id'],changed)
+        until=time.monotonic()+3
+        while time.monotonic()<until and self.guest.journal.pending('out'):
+            time.sleep(.02)
+        self.assertFalse(json.loads(self.guest.journal.get('out','hub',collision['id'])['result'])['ok'])
+        self.assertFalse(any(c.closed for c,*_ in self.connections))
+
+    def test_router_rewrites_spoofed_session_and_origin_and_rejects_request_session(self):
+        thread=self.guest.agents()['worker']
+        self.host.config['links']['env-a']['agent_threads']={'worker':thread}
+        request={'version':1,'op':'followup','id':str(uuid.uuid4()),'source':'worker','target':'remote','text':'synthetic'}
+        frame={'type':'request','id':request['id'],'request':request,'origin':'hub',
+               'source_session':self.host.agents()['coordinator']}
+        self.host.authenticate('env-a',frame)
+        self.assertEqual(frame['origin'],'env-a');self.assertEqual(frame['source_session'],thread)
+        self.host.journal.route('remote','env-b',str(uuid.uuid4()))
+        with patch.object(self.host,'exchange',return_value={'ok':True,'data':{'state':'delivered'}})as exchange:
+            self.host.dispatch('env-a',frame)
+            self.assertEqual(exchange.call_args.args[2],'env-a')
+            self.assertEqual(exchange.call_args.kwargs['session'],thread)
+            self.assertEqual(exchange.call_args.kwargs['timeout'],0)
+        request['session']=self.host.agents()['coordinator']
+        with self.assertRaisesRegex(ValueError,'enrolled thread'):
+            self.host.authenticate('env-a',frame)
+
+    def test_queued_forward_returns_native_receipt_on_next_nonblocking_attempt(self):
+        self.connect()
+        request={'version':1,'op':'followup','id':str(uuid.uuid4()),
+                 'source':'other-worker','target':'worker','text':'synthetic relay'}
+        frame={'type':'request','id':request['id'],'request':request,'origin':'env-b',
+               'source_session':str(uuid.uuid4())}
+        with self.assertRaisesRegex(RuntimeError,'Destination queued'):
+            self.host.dispatch('env-b',frame)
+        until=time.monotonic()+3
+        while time.monotonic()<until:
+            row=self.host.journal.get('out','env-a',request['id'])
+            if row['state']=='done':break
+            time.sleep(.02)
+        result=self.host.dispatch('env-b',frame)
+        self.assertEqual(result['turn_id'],self.turn)
+        self.assertEqual(self.native_calls,[request['id']])
+
+    def test_event_spoof_is_rewritten_and_hello_cannot_rebind_thread(self):
+        thread=self.guest.agents()['worker']
+        self.host.config['links']['env-a']['agent_threads']={'worker':thread}
+        event={'id':str(uuid.uuid4()),'task_id':str(uuid.uuid4()),'source':'worker','target':'remote',
+               'kind':'final','text':'synthetic','turn_id':self.turn,'status':'completed','session':thread}
+        frame={'type':'event','id':event['id'],'event':event,'origin':'hub','source_session':str(uuid.uuid4())}
+        self.host.authenticate('env-a',frame)
+        self.assertEqual(frame['origin'],'env-a');self.assertEqual(frame['source_session'],thread)
+        channel=light.Channel(self.host,'env-a',None,None,lambda:None)
+        try:
+            with self.assertRaisesRegex(ValueError,'Enrolled thread'):
+                channel.hello({'node':'env-a','agents':{'worker':str(uuid.uuid4())}})
+        finally:channel.close()
+        self.assertEqual(self.host.journal.resolve('worker')['thread'],thread)
+
+    def test_silent_link_times_out_instead_of_remaining_connected(self):
+        a,b=socket.socketpair();r=a.makefile('rb');w=a.makefile('wb',buffering=0)
+        channel=light.Channel(self.host,'env-a',r,w,lambda:a.shutdown(socket.SHUT_RDWR))
+        channel.LIVENESS=.2
+        t=threading.Thread(target=channel.run,daemon=True);t.start();t.join(2)
+        self.assertFalse(t.is_alive());self.assertTrue(channel.closed)
+        r.close();w.close();a.close();b.close()
+
+    def test_relay_drains_both_directions_with_small_socket_buffers(self):
+        left,relay_left=socket.socketpair();relay_right,right=socket.socketpair()
+        sockets=(left,relay_left,relay_right,right)
+        for sock in sockets:sock.setsockopt(socket.SOL_SOCKET,socket.SO_SNDBUF,4096);sock.settimeout(5)
+        alive=threading.Event();alive.set()
+        relay=threading.Thread(target=light.relay_duplex,args=(relay_left.recv,relay_left.send,
+            relay_right.recv,relay_right.send,alive.is_set),daemon=True);relay.start()
+        body=b'x'*(20*48000);received=[b'',b'']
+        def read(sock,index):
+            while len(received[index])<len(body):received[index]+=sock.recv(65536)
+        workers=[threading.Thread(target=left.sendall,args=(body,)),threading.Thread(target=right.sendall,args=(body,)),
+                 threading.Thread(target=read,args=(left,0)),threading.Thread(target=read,args=(right,1))]
+        try:
+            for t in workers:t.start()
+            for t in workers:t.join(6)
+            self.assertEqual(received,[body,body]);self.assertFalse(any(t.is_alive()for t in workers))
+        finally:
+            alive.clear()
+            for sock in sockets:sock.close()
+            relay.join(1)
 
     def test_second_broker_cannot_remove_live_first_broker_socket(self):
         config=self.host.config;config['links']={};atomic(self.host.home/'config.json',encode(config).encode());argv=[sys.executable,'-I','-B',str(ROOT/'csl_light.py'),'--home',str(self.host.home),'run']

@@ -32,7 +32,7 @@ csl light enroll sandbox8 --agent worker --ssh-alias owner-sandbox8 \
 One command verifies the registered first-brief thread, creates a per-env key,
 installs the guest broker/client and restricted public key, and adds one `links`
 entry to `~/.local/share/csl-light/config.json`. Existing streams stay open;
-brokers and connectors reload light entries. `--thread UUID` can additionally
+brokers and connectors reload light additions, removals and exact rollbacks. `--thread UUID` can additionally
 assert the expected thread. Enrollment audits and exact prior config/peer rows
 are kept under the light home. Guest source contains code only, never auth files.
 
@@ -54,16 +54,38 @@ csl light inbox --after 0
 ```
 
 Use `--from coordinator` when a home has several agents. Preserve the returned
-ID and identical content with `--id UUID` on retries. Both endpoints commit before
+ID and identical content with `--id UUID` on retries. Stream IDs are unique per
+(direction, peer); native operation/mailbox checks also prevent cross-peer reuse
+in a bridge home. Native acceptance recovery paginates the existing thread history
+by client message ID, including beyond the latest 20 turns. Both endpoints commit before
 ACK; duplicates reuse the stored result. Progress/final CSL events are pushed over
 the same stream and appear in the inbox and existing bridge `wait` interface.
+Enrollment opts into registered sender session headers for light.
 Mail wakes an explicitly enrolled native recipient; existing bridge mailbox
 transport alone does not grant that behavior. Task text is not authority.
 
-Delete `~/.local/share/csl-light/keys/sandbox8` to revoke that link, or delete the
-guest `keys/workstation.pub` marker. The active stream closes and reconnect stops.
+Delete `~/.local/share/csl-light/keys/sandbox8` to stop the workstation link.
+That does not revoke a copied private key: delete the guest `keys/workstation.pub`
+marker or remove its managed `csl-light-sandbox8` authorized-key line too. Marker
+deletion closes the stream; a reconnect receives revocation and parks locally until
+explicit re-enrollment. Re-enrollment replaces the managed key line and clears that
+park marker. Owner-hook identity revocation remains with that hook's owner.
+
 Use `systemctl --user status csl-light` and `journalctl --user -u csl-light` for
-health. Offline messages remain in `light.sqlite`, including when the local
-broker is temporarily down. Repair connectivity/authentication and retry the same
-ID; no messaging cohort, publisher receipt or hold extension is a recovery step.
-Environment lifecycle, holds and keep-alive publisher remain separate.
+health. `loginctl show-user "$USER" -p Linger` must report `yes` for user services
+to start before login after reboot. If it does not, the owner must enable linger
+(`loginctl enable-linger`) or expect recovery after login; enrollment does not
+change this machine policy.
+
+Offline messages remain in `light.sqlite`, including when the local broker is
+temporarily down. Repair connectivity/authentication and retry the same ID; no
+messaging cohort, publisher receipt or hold extension is a recovery step. Payload
+retention is opt-in: set `retention_days` (for example 30) in config to compact
+completed stream payloads. Pending messages are never pruned; small permanent hash
+and receipt tombstones still refuse ID reuse and replay the cached result. Payload
+text is no longer available through the light inbox after compaction. CLI retries
+that need the original payload also stop at that retention boundary; an archived
+ID cannot create another native delivery. Existing
+bridge operation/mail records and enrollment rollback snapshots remain intact;
+enrollment audits store source hashes instead of full source copies. Environment
+lifecycle, holds and keep-alive publisher remain separate.
