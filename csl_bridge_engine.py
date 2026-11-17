@@ -20,6 +20,34 @@ def event_id(value):
 EVENT_FIELDS = {'id', 'task_id', 'source', 'target', 'kind', 'text', 'turn_id', 'status'}
 
 
+def validate_event(event):
+    if not isinstance(event, dict) or set(event) - {'session'} != EVENT_FIELDS:
+        raise BridgeError('Invalid event fields')
+    for key in ('id', 'task_id', 'turn_id') + (('session',) if 'session' in event else ()):
+        identifier(event[key])
+    name(event['source']); name(event['target'])
+    if event['kind'] not in ('progress', 'final') or event['status'] not in ('progress', 'completed', 'interrupted', 'failed'):
+        raise BridgeError('Invalid event state')
+    if (event['kind'] == 'progress') != (event['status'] == 'progress'):
+        raise BridgeError('Invalid event kind/status correlation')
+    if not isinstance(event['text'], str) or len(event['text']) > 12000:
+        raise BridgeError('Invalid event text')
+
+
+def publish_task_completion(store, agent, thread, turn_id, status, answer):
+    """Shared native completion publisher for connectors and light receivers."""
+    tasks = store.rows("SELECT * FROM tasks WHERE target=? AND turn=? AND status IN ('running','pending')", (agent, turn_id))
+    if contains_findings(answer):
+        answer = 'Result text withheld by partial secret detection. Review selected evidence locally; completion alone is not validation.'
+    for task in tasks:
+        event = {'task_id': task['id'], 'source': agent, 'target': task['source'],
+                 'kind': 'final', 'text': answer, 'turn_id': turn_id, 'status': status}
+        event['session'] = thread  # stripped at serve time unless the peer opted in
+        store.publish(task['peer'], event, event_id(task['id'] + '/' + turn_id + '/final'))
+        with store.transaction() as db:
+            db.execute('UPDATE tasks SET status=? WHERE id=?', (status, task['id']))
+
+
 class Connector:
     def __init__(self, home, runtime_factory=Runtime):
         self.store = Store(home)
@@ -37,6 +65,8 @@ class Connector:
         self.turns, self.answers = {}, {}
         self.threads = []
         self.server = None
+        self.light_lock = threading.Lock()
+        self.watched_peers = set()
         import os
         descriptor = os.open(self.store.home / 'connector.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         self.owner_lock = os.fdopen(descriptor, 'a')
@@ -66,13 +96,13 @@ class Connector:
     def start(self):
         if not self.client_only:
             self.spawn(self.runtime_loop)
-        if any('mail' in config.get('allow_ops', []) for config in self.peers.values()):
-            self.spawn(self.mail_loop)
-        for peer in self.peers:
+        for peer in list(self.peers):
             ops = self.peers[peer].get('allow_ops', [])
             mail_only = 'mail' in ops and 'watch' not in ops
-            if self.peers[peer]['transport'] != 'receive-only' and not mail_only:
+            if self.peers[peer]['transport'] not in ('receive-only', 'light') and not mail_only:
+                self.watched_peers.add(peer)
                 self.spawn(self.peer_loop, peer)
+        self.spawn(self.mail_loop)
         connector = self
         class Handler(socketserver.StreamRequestHandler):
             def handle(self):
@@ -378,15 +408,7 @@ class Connector:
                 if turn['id'] == tid:
                     answer = '\n'.join(item.get('text', '') for item in turn.get('items', [])
                                        if item.get('type') == 'agentMessage')[-12000:]
-        if contains_findings(answer):
-            answer = 'Result text withheld by partial secret detection. Review selected evidence locally; completion alone is not validation.'
-        for task in tasks:
-            event = {'task_id': task['id'], 'source': agent, 'target': task['source'],
-                     'kind': 'final', 'text': answer, 'turn_id': tid, 'status': status,
-                     'session': self.agents[agent]}  # stripped at serve time unless the peer opted in
-            self.store.publish(task['peer'], event, event_id(task['id'] + '/' + tid + '/final'))
-            with self.store.transaction() as db:
-                db.execute('UPDATE tasks SET status=? WHERE id=?', (status, task['id']))
+        publish_task_completion(self.store, agent, self.agents[agent], tid, status, answer)
         with self.changed:
             self.changed.notify_all()
 
@@ -445,9 +467,23 @@ class Connector:
                 with self.locks[agent]:
                     self.flush(agent)
 
+    def reload_light_peers(self):
+        """Owner-enrolled light rows are live data; legacy transports stay offline-only."""
+        with self.light_lock:
+            for row in self.store.rows('SELECT name,config FROM peers'):
+                try:
+                    peer, config = row['name'], decode(row['config'])
+                except (BridgeError, ValueError):
+                    continue
+                if not isinstance(config, dict) or config.get('transport') != 'light':
+                    continue
+                self.peers[peer] = config
+
+
     def mail_loop(self):
         while not self.stop.is_set():
-            for peer, config in self.peers.items():
+            self.reload_light_peers()
+            for peer, config in list(self.peers.items()):
                 if config['transport'] != 'receive-only' and 'mail' in config.get('allow_ops', []):
                     try:
                         self.mailbox.flush(peer)
@@ -459,6 +495,8 @@ class Connector:
         retry = 1
         while not self.stop.is_set():
             try:
+                if self.peers[peer]['transport'] == 'light':
+                    return
                 cursor = self.store.rows('SELECT value FROM cursors WHERE peer=?', (peer,))
                 after = cursor[0]['value'] if cursor else 0
                 result = exchange(self.peers[peer], self.identity,
@@ -474,17 +512,7 @@ class Connector:
         if not isinstance(row, dict) or set(row) != {'seq', 'event'} or type(row['seq']) is not int or not 0 < row['seq'] <= 2**63 - 1:
             raise BridgeError('Invalid event cursor')
         event = row['event']
-        if not isinstance(event, dict) or set(event) - {'session'} != EVENT_FIELDS:
-            raise BridgeError('Invalid event fields')
-        for key in ('id', 'task_id', 'turn_id') + (('session',) if 'session' in event else ()):
-            identifier(event[key])
-        name(event['source']); name(event['target'])
-        if event['kind'] not in ('progress', 'final') or event['status'] not in ('progress', 'completed', 'interrupted', 'failed'):
-            raise BridgeError('Invalid event state')
-        if (event['kind'] == 'progress') != (event['status'] == 'progress'):
-            raise BridgeError('Invalid event kind/status correlation')
-        if not isinstance(event['text'], str) or len(event['text']) > 12000:
-            raise BridgeError('Invalid event text')
+        validate_event(event)
         receipt = self.event_task(peer, event)
         if receipt.get('turn_id') and receipt['turn_id'] != event['turn_id']:
             raise BridgeError('Event turn does not match delegated task')
@@ -547,9 +575,14 @@ class Connector:
             pass
 
     def local(self, request):
+        self.reload_light_peers()
         if not isinstance(request, dict) or not isinstance(request.get('local_op'), str):
             raise BridgeError('Invalid local operation')
         op = request['local_op']
+        if op == '_light_events_changed' and set(request) == {'local_op'}:
+            with self.changed:
+                self.changed.notify_all()
+            return {'state': 'notified'}
         if op.startswith('mail_'):
             return self.mailbox.local(request)
         if op == '_incoming' and set(request) == {'local_op', 'trusted_peer', 'request'}:
@@ -571,7 +604,7 @@ class Connector:
                     body['session'] = registered
             if body['op'] in ('followup', 'send_message', 'interrupt'):
                 previous = self.store.reserve('outbound:' + peer, body)
-                if previous:
+                if previous and self.peers[peer]['transport'] != 'light':
                     return previous['result'] or {'state': previous['state'], 'request_id': body['id']}
             try:
                 result = exchange(self.peers[peer], self.identity, body)

@@ -19,6 +19,7 @@ def coverage():
     commands["verify-live"] = {"codex": "experimental", "claude": "experimental"}
     commands["migrate"] = {"codex": "experimental", "claude": "not-integrated"}
     commands["backup"] = {"codex": "experimental", "claude": "not-integrated"}
+    commands["light"] = {"codex": "experimental", "claude": "experimental"}
     commands["bridge"] = {"codex": "experimental", "claude": "experimental"}
     commands["sync"] = {"codex": "experimental", "claude": "experimental"}
     for name in ("native-cut", "native-clone", "native-sanitize"):
@@ -79,6 +80,13 @@ def coverage():
                 "identity": "operator registration and authenticated peer binding, not process attestation",
                 "validation": "real reciprocal Codex/Claude CLI mailbox exchange and scoped agent actions; synthetic fault injection around real connectors; hook harness evidence tracked separately in docs/AGENT_COMMUNICATION.md",
                 "legacy_coordination": "Codex only; unchanged"},
+            "light_transport": {"status": "experimental", "default_for_pool_peers": True,
+                "delivery": "durable both ends; at-least-once, message-ID replay",
+                "connection": "one persistent reconnecting SSH stream per environment",
+                "activation": "explicit light setup enables native Codex turn/start or turn/steer",
+                "authentication": "per-env SSH key or owner connect hook; no controller call per message",
+                "legacy_fallback": "deprecated opt-in ssh/operator transports",
+                "lifecycle": "holds, publisher and environment lifecycle are separate"},
             "continuation": "Native file transfer is not a guarantee of model availability, context fit, or universal CLI-version compatibility."}
 
 

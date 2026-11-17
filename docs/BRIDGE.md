@@ -1,5 +1,11 @@
 # Experimental Agent Coordination
 
+**Pool default (development):** use [light transport](LIGHT_RUNBOOK.md) for a
+persistent connection and pushed replies. The per-request SSH setup below is the
+explicit deprecated fallback; existing configurations are not silently migrated.
+Lifecycle holds and keep-alive publishers stay separate.
+
+
 The optional `csl bridge` commands coordinate
 existing Codex agents. A followup starts an idle agent in its own conversation;
 a message enters active work at a runtime boundary. Progress and completed turns
