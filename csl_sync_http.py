@@ -35,6 +35,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class HTTP:
+    error_codes = ERROR_CODES
+
     def __init__(self, *, timeout=15, attempts=3, sleep=time.sleep):
         self.timeout, self.attempts, self.sleep = timeout, attempts, sleep
         self.opener = urllib.request.build_opener(NoRedirect())
@@ -66,7 +68,7 @@ class HTTP:
                     code, delay = None, None
                 finally:
                     error.close()
-                if code not in ERROR_CODES:
+                if not isinstance(code, str) or code not in self.error_codes:
                     code = 'http_' + str(error.code)
                 transient = error.code in (408, 429, 500, 502, 503, 504)
                 delay = min(max(float(delay), 0), 30) if type(delay) in (float, int) else None
