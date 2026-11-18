@@ -4,6 +4,10 @@ Module: `csl_sync_providers.py`. Standard library only. No network, login, model
 calls or transcript logging. This interface is provider-local and independent of
 Vitral. Providers are `codex`, `claude` and `antigravity`.
 
+The separate internal [workload projection](WORKLOAD_PROVIDERS.md) implements this
+collector seam over sanitized Gemini text, not raw native files. It is not enabled
+by the CLI and does not alter this desktop raw-provider contract.
+
 ```python
 list_sessions(provider, *, home=None, active_seconds=300) -> list[dict]
 raw_files(provider, native_id, *, home=None) -> list[dict]

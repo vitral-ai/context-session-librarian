@@ -110,7 +110,10 @@ class Collector:
 
     def run(self, *, days=30, providers=PROVIDERS):
         providers = tuple(providers)
-        if any(provider not in PROVIDERS for provider in providers):
+        supported = getattr(self.providers, 'supported_providers', PROVIDERS)
+        if type(supported) is not tuple or any(not isinstance(name, str) for name in supported):
+            supported = PROVIDERS
+        if any(provider not in supported for provider in providers):
             raise SyncError('unsupported_provider')
         # Called under the collector lock; only our private orphaned snapshots are removed.
         for path in self.spool.iterdir():
@@ -285,6 +288,10 @@ class Collector:
 
     def sync_session(self, provider, native_id, metadata):
         local = self.state.session(provider, native_id)
+        paired_revisions = None
+        if getattr(self.providers, 'pair_view_revisions', False) is True:
+            paired_revisions = local.get('view', {}).get('source_revisions',
+                {key: value['revision'] for key, value in local.get('files', {}).items()})
         local.update(status='syncing', last_error=None)
         files, pages = [], []
         try:
@@ -323,6 +330,21 @@ class Collector:
                 planned.append({'file_key': key, 'role': item['role'], 'mode': 'replace' if item['mode'] == 'rewrite' else 'append',
                                 'revision': previous['revision'], 'length': item['complete_length'], 'sha256': item['sha256']})
             local['files'] = {key: value for key, value in local['files'].items() if key in seen}
+            if paired_revisions is not None:
+                revisions = {item['file_key']: item['revision'] for item in planned}
+                if paired_revisions != revisions:
+                    # Replacement bytes invalidate even an unchanged or empty view.
+                    # Bind the generation to the durable pre-write delivery plan,
+                    # not a provider-local capture checkpoint or a successful ACK.
+                    for page in pages: Path(page).unlink(missing_ok=True)
+                    pages = []
+                    local['view'].update(generation=str(uuid.uuid4()), position=None, last_seq=0)
+                    pages, last_seq = self.build_view(provider, native_id, local, files)
+                    self.check_sources(files)
+                    refreshed = self.providers.raw_files(provider, native_id)
+                    if len(refreshed) != len(files) or signature(refreshed) != signature(files):
+                        raise SyncError('source_changed')
+                local['view']['source_revisions'] = revisions
             package = self.providers.package_descriptor(provider, native_id)
             if isinstance(package, dict) and package.get('available') and {m['file_key'] for m in package.get('members', [])} != seen:
                 raise SyncError('source_changed')
