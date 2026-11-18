@@ -39,6 +39,11 @@ lesser of original remaining BOOTTIME and 50 ms. That polling quantum grants no
 extension. Queued bytes outside an expected response, including partial denial,
 duplicate frames, unsolicited OK, malformed JSON, EOF and changed bounds fence
 the next effect. A partial expected frame can wait only until the original end.
+The final nonblocking liveness read follows the clock sample, including when
+that sample expires or fails: loss queued during a blocking boot-ID read cannot
+survive into the next write or successful guard return. Known denial keeps its
+exact reason ahead of clock diagnostics. Framing/selector completion and capture
+callbacks use the same ordering.
 An in-flight syscall may already commit; this is a pre-dispatch guard, not an
 atomic transaction with the identity authority. Retain uncertainty and intents.
 
@@ -81,5 +86,11 @@ Run `python3 -B -m unittest -v tests.test_execution_transport` with Go on PATH.
 Without Go/Linux the language-pair tests report SKIP; set
 `CSL_REQUIRE_EXECUTION_PROCESS_TESTS=1` to require them. The transfer CI job pins
 Go 1.27.4 and sets that requirement. Core runtime remains standard-library-only.
+Shared exact canonical request preimages cover HTML characters, Unicode line
+separators, non-ASCII and ordinary escapes (including literal backslash-u text).
+The Go fixture emits the existing CSL canonical bytes rather than default Go
+JSON escaping; incidental wire whitespace still does not change semantic identity.
+Separate real-fork/pipe regressions queue deny, partial control or EOF during the
+last clock call and require zero result/control bytes and zero capture creation.
 Production cancellation, parent-death setup and endpoint closure must still be
 qualified with the real native launcher before any positive caller is wired.

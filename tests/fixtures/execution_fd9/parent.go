@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -36,6 +37,66 @@ func bootNow() int64 {
 	return ts.Sec*1e9 + ts.Nsec
 }
 func encoded(v any) []byte { b, e := json.Marshal(v); must(e); return b }
+
+// Exact existing CSL canonical request bytes: sorted object keys, UTF-8,
+// ensure_ascii=false and compact separators. encoding/json alone differs on
+// HTML and U+2028/U+2029. Decode ONLY actual separator escapes, never an escaped
+// literal backslash-u sequence. This fixture accepts no new request field/type.
+func canonicalRequest(v map[string]any) []byte {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	must(encoder.Encode(v))
+	raw := bytes.TrimSuffix(buf.Bytes(), []byte{'\n'})
+	out := make([]byte, 0, len(raw))
+	for i := 0; i < len(raw); {
+		if raw[i] == '\\' && i+1 < len(raw) {
+			if bytes.HasPrefix(raw[i:], []byte(`\u2028`)) {
+				out = append(out, []byte("\u2028")...)
+				i += 6
+				continue
+			}
+			if bytes.HasPrefix(raw[i:], []byte(`\u2029`)) {
+				out = append(out, []byte("\u2029")...)
+				i += 6
+				continue
+			}
+			out = append(out, raw[i:i+2]...)
+			i += 2
+			continue
+		}
+		out = append(out, raw[i])
+		i++
+	}
+	return out
+}
+
+func canonicalFixtures(path string) {
+	type fixture struct {
+		Request      json.RawMessage `json:"request"`
+		CanonicalHex string          `json:"canonical_hex"`
+		SHA          string          `json:"sha256"`
+	}
+	raw, e := os.ReadFile(path)
+	must(e)
+	var rows []fixture
+	must(json.Unmarshal(raw, &rows))
+	hashes := []string{}
+	for _, row := range rows {
+		decoder := json.NewDecoder(bytes.NewReader(row.Request))
+		decoder.UseNumber()
+		var value map[string]any
+		must(decoder.Decode(&value))
+		got := canonicalRequest(value)
+		hash := sha256.Sum256(got)
+		sha := hex.EncodeToString(hash[:])
+		if hex.EncodeToString(got) != row.CanonicalHex || sha != row.SHA {
+			panic("canonical request bytes differ")
+		}
+		hashes = append(hashes, sha)
+	}
+	fmt.Println(string(encoded(hashes)))
+}
 func writeFrame(w io.Writer, b []byte) {
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(b)))
@@ -107,6 +168,10 @@ func deathSupervisor(args []string) {
 }
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "canonical-fixtures" {
+		canonicalFixtures(os.Args[2])
+		return
+	}
 	if len(os.Args) < 6 {
 		panic("python child repo root scenario required")
 	}
@@ -131,7 +196,7 @@ func main() {
 	st := info.Sys().(*syscall.Stat_t)
 	digest := sha256.Sum256([]byte("package"))
 	req := map[string]any{"schema_version": 1, "operation": "import", "execution_id": "re_" + strings.Repeat("1", 64), "import_key": "ri_" + strings.Repeat("2", 64), "provider": "codex", "source_id": "synthetic", "package_size": 7, "package_sha256": hex.EncodeToString(digest[:]), "owner": strings.Repeat("1", 24), "host_id": "ses_fixture", "assignment_id": "33333333-3333-4333-8333-333333333333", "generation": "1", "boot_id": authority["boot_id"], "cwd": root, "cwd_device": strconv.FormatUint(uint64(st.Dev), 10), "cwd_inode": strconv.FormatUint(st.Ino, 10), "authority": authority}
-	raw := encoded(req)
+	raw := canonicalRequest(req)
 	commitment := sha256.Sum256(raw)
 	rr, rw, e := os.Pipe()
 	must(e)
@@ -214,7 +279,7 @@ func main() {
 	} else {
 		if scenario == "request-mismatch" {
 			req["source_id"] = "other"
-			raw = encoded(req)
+			raw = canonicalRequest(req)
 		}
 		writeFrame(rw, raw)
 		if scenario == "request-trailing" {

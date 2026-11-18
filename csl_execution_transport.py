@@ -119,31 +119,51 @@ class Channel:
                 self._denial(self._decode(raw[4:]))
         raise TransportError('execution_control_unsolicited_or_partial')
 
-    def _wait(self, fd, event, *, control=False):
-        if not control:
+    def _fence(self):
+        """Finish blocking clock qualification BEFORE the final liveness read.
+
+        linux_clock reads a regular file and can block. Loss queued during that
+        read fences dispatch, even if the clock also expires or fails. A known
+        parent denial keeps its reason; no new deadline is derived here.
+        """
+        self._idle()
+        try:
+            return self._local()
+        finally:
             self._idle()
-        self._local()
+
+    def _wait(self, fd, event, *, control=False):
+        sample = self._local if control else self._fence
+        sample()
         with selectors.DefaultSelector() as selector:
             selector.register(fd, event | selectors.EVENT_READ if fd == self.sock.fileno() else event)
             if fd != self.sock.fileno():
                 selector.register(self.sock, selectors.EVENT_READ)
-            ready = selector.select(min(self._local(), QUANTUM))
-        # Pending authoritative denial is diagnosed before clock expiry.
-        if not control:
-            self._idle()
+            ready = selector.select(min(sample(), QUANTUM))
         available = any(key.fd == fd and mask & event for key, mask in ready)
         if not control or not available:
-            self._local()
+            sample()
         return available
 
     def _receive(self):
         raw = bytearray()
         need = 4
+        clock_error = None
         while len(raw) < need:
+            if clock_error is None:
+                try:
+                    self._local()
+                except BaseException as exc:
+                    clock_error = exc
             try:
                 part = self.sock.recv(need - len(raw))
             except BlockingIOError:
-                self._wait(self.sock.fileno(), selectors.EVENT_READ, control=True)
+                if clock_error is not None:
+                    raise clock_error
+                try:
+                    self._wait(self.sock.fileno(), selectors.EVENT_READ, control=True)
+                except BaseException as exc:
+                    clock_error = exc
                 continue
             if not part:
                 raise TransportError('execution_parent_eof')
@@ -153,12 +173,15 @@ class Channel:
                 if not 0 < n <= CONTROL_LIMIT:
                     raise TransportError('execution_control_limit')
                 need += n
-            if len(raw) < need:
-                self._local()
         value = self._decode(bytes(raw[4:]))
         self._denial(value)
-        self._idle()
-        self._local()
+        # A final clock read can race with the remaining denial bytes. Drain
+        # only already-readable capped control; NEVER wait after clock loss or
+        # admit a positive reply under it. Preserve the exact observed denial.
+        if clock_error is not None:
+            self._idle()
+            raise clock_error
+        self._fence()
         return value
 
     def _send(self, value):
@@ -168,8 +191,7 @@ class Channel:
         frame = struct.pack('!I', len(raw)) + raw
         offset = 0
         while offset < len(frame):
-            self._idle()
-            self._local()
+            self._fence()
             try:
                 n = self.sock.send(frame[offset:])
             except BlockingIOError:
@@ -201,14 +223,14 @@ class Channel:
             value = self._receive()
             if value != {'type': 'hello', 'request_sha256': self.req.commitment, 'authority': self.bound}:
                 raise TransportError('execution_hello_mismatch')
+            self._fence()
             self.admitted = True
         return self._run(action)
 
     def _check(self, phase):
         if not self.admitted or not isinstance(phase, str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,63}', phase):
             raise TransportError('execution_check_invalid')
-        self._idle()
-        self._local()
+        self._fence()
         self.seq += 1
         if self.seq > (1 << 64) - 1:
             raise TransportError('execution_sequence_exhausted')
@@ -216,8 +238,7 @@ class Channel:
         value = self._receive()
         if value != {'type': 'ok', 'seq': str(self.seq), 'authority': self.bound}:
             raise TransportError('execution_check_mismatch')
-        self._idle()
-        self._local()
+        self._fence()
 
     def check(self, phase='capture'):
         return self._run(lambda: self._check(phase))
@@ -258,6 +279,7 @@ class Channel:
             parsed = request(bytes(raw[4:]))
             if parsed.commitment != self.req.commitment:
                 raise TransportError('execution_request_mismatch')
+            self._check('request')
             return parsed
         return self._run(action)
 

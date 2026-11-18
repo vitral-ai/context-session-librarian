@@ -280,8 +280,12 @@ class GoPythonTransportTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def run_pair(self, scenario):
+    def run_pair(self, scenario, cwd_suffix=None):
         with tempfile.TemporaryDirectory(dir=self.root,prefix='case-') as root:
+            if cwd_suffix is not None:
+                path=Path(root)/cwd_suffix
+                path.mkdir(mode=0o700)
+                root=str(path)
             result = subprocess.run([str(self.binary),sys.executable,str(self.fixture/'child.py'),
                 str(Path(__file__).resolve().parents[1]),root,scenario],
                 capture_output=True,text=True,timeout=12,
@@ -325,3 +329,59 @@ class GoPythonTransportTests(unittest.TestCase):
     def test_parent_original_bound_supervises_stalled_child_bootstrap(self):
         result=self.run_pair('setup-stall')
         self.assertEqual(result,dict(status='refused',error='parent_original_bound_lost',parent_killed=True))
+
+    def test_shared_exact_canonical_request_preimages(self):
+        path=self.fixture/'request-canonical-v1.json'
+        rows=json.loads(path.read_text())
+        for row in rows:
+            with self.subTest(case=row['name']):
+                req=execution.request(canonical(row['request']))
+                self.assertEqual(req.encoded.hex(),row['canonical_hex'])
+                self.assertEqual(req.commitment,row['sha256'])
+                pretty=json.dumps(row['request'],ensure_ascii=True,indent=2).encode()
+                self.assertNotEqual(pretty,req.encoded)
+                self.assertEqual(execution.request(pretty),req)
+        result=subprocess.run([str(self.binary),'canonical-fixtures',str(path)],capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(json.loads(result.stdout),[row['sha256'] for row in rows])
+
+    def test_real_go_python_all_accepted_cwd_characters(self):
+        rows=json.loads((self.fixture/'request-canonical-v1.json').read_text())
+        for row in rows:
+            with self.subTest(case=row['name']):
+                self.assertEqual(self.run_pair('success',row['cwd_suffix'])['status'],'captured')
+
+
+@unittest.skipUnless(sys.platform=='linux','private transport is Linux-only')
+class LateGuardTests(unittest.TestCase):
+    def probe(self,operation,loss,clock='valid'):
+        repo=Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=Path.home(),prefix='.late-') as name:
+            result=subprocess.run([sys.executable,'-I','-B',str(repo/'tests/fixtures/execution_fd9/late_guard.py'),str(repo),name,operation,loss,clock],capture_output=True,text=True,timeout=8)
+            self.assertEqual(result.returncode,0,result.stdout+'\n'+result.stderr)
+            row=json.loads(result.stdout)
+            self.assertEqual(row['emitted_hex'],'',row)
+            self.assertEqual(row['control_hex'],'',row)
+            self.assertFalse(row['control_reset'],row)
+            self.assertEqual(row['child']['memfd_creates'],0,row)
+            expected={'deny':'execution_parent_denied:assignment_revoked','partial':'execution_control_unsolicited_or_partial','eof':'execution_parent_eof'}
+            self.assertEqual(row['child']['error'],expected[loss],row)
+            self.assertTrue(row['reaped'])
+
+    def test_loss_during_last_clock_fences_real_result_and_guard_effects(self):
+        for operation in ('result','guard','capture'):
+            for loss in ('deny','partial','eof'):
+                with self.subTest(operation=operation,loss=loss):self.probe(operation,loss)
+
+    def test_queued_known_denial_beats_late_clock_expiry_or_failure(self):
+        for clock in ('expired','failed'):
+            with self.subTest(clock=clock):self.probe('result','deny',clock)
+
+    def test_framing_and_selector_returns_repeat_final_control_fence(self):
+        for operation in ('send','receive','wait'):
+            for loss in ('deny','partial','eof'):
+                with self.subTest(operation=operation,loss=loss):self.probe(operation,loss)
+
+    def test_expected_denial_completed_during_clock_loss_keeps_its_reason(self):
+        for clock in ('expired','failed'):
+            with self.subTest(clock=clock):self.probe('receive-partial','deny',clock)
