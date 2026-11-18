@@ -284,6 +284,158 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(sum(m == 'turn/steer' for m, _ in self.runtime.calls), 1)
         self.assertEqual(self.connector.store.rows('SELECT delivery FROM inbound')[0]['delivery'], 'delivered')
 
+    def test_event_waits_for_native_turn_even_with_pending_or_uncertain_receipt(self):
+        self.connector.incoming('alice', self.request())
+        for state in ('pending', 'uncertain', 'delivered'):
+            with self.subTest(state=state):
+                item = self.outgoing_event()
+                task = item['event']['task_id']
+                self.connector.store.operation(task, state, {'state': state, 'request_id': task})
+                calls = len(self.runtime.calls)
+                with self.assertRaisesRegex(BridgeError, 'native acceptance receipt'):
+                    self.connector.accept_event('alice', item)
+                self.assertEqual(len(self.runtime.calls), calls)
+                self.assertEqual(self.connector.store.rows('SELECT * FROM inbound'), [])
+                self.assertEqual(self.connector.store.rows('SELECT * FROM cursors'), [])
+
+    def test_waiting_event_retries_same_id_after_native_receipt_arrives(self):
+        self.connector.incoming('alice', self.request())
+        item = self.outgoing_event()
+        event = item['event']
+        self.connector.store.operation(event['task_id'], 'uncertain', {'state': 'uncertain'})
+        with self.assertRaisesRegex(BridgeError, 'native acceptance receipt'):
+            self.connector.accept_event('alice', item)
+        self.connector.store.operation(event['task_id'], 'delivered', {'turn_id': event['turn_id']})
+        self.connector.accept_event('alice', item)
+        self.connector.accept_event('alice', item)
+        self.assertEqual(len(self.connector.store.rows('SELECT * FROM inbound')), 1)
+        self.assertEqual(self.connector.store.rows('SELECT delivery FROM inbound')[0]['delivery'], 'delivered')
+        self.assertEqual(sum(method == 'turn/steer' for method, _ in self.runtime.calls), 1)
+        self.assertEqual(self.connector.store.rows('SELECT value FROM cursors')[0]['value'], item['seq'])
+
+    def test_existing_pending_event_rechecks_missing_then_confirmed_receipt(self):
+        self.connector.incoming('alice', self.request())
+        event = self.outgoing_event()['event']
+        self.connector.store.operation(event['task_id'], 'pending', {'state': 'pending'})
+        with self.connector.store.transaction() as db:
+            db.execute('INSERT INTO inbound(id,peer,body) VALUES(?,?,?)',
+                       (event['id'], 'alice', encode(event)))
+        row = self.connector.store.rows('SELECT * FROM inbound')[0]
+        calls = len(self.runtime.calls)
+        self.connector.deliver_event(row)
+        self.assertEqual(len(self.runtime.calls), calls)
+        self.assertEqual(self.connector.store.rows('SELECT delivery FROM inbound')[0]['delivery'], 'pending')
+        self.connector.store.operation(event['task_id'], 'delivered', {'turn_id': event['turn_id']})
+        self.connector.deliver_event(self.connector.store.rows('SELECT * FROM inbound')[0])
+        self.assertEqual(self.connector.store.rows('SELECT delivery FROM inbound')[0]['delivery'], 'delivered')
+        self.assertEqual(sum(method == 'turn/steer' for method, _ in self.runtime.calls), 1)
+
+    def test_existing_pending_event_with_wrong_confirmed_turn_is_rejected(self):
+        self.connector.incoming('alice', self.request())
+        event = self.outgoing_event()['event']
+        with self.connector.store.transaction() as db:
+            db.execute('INSERT INTO inbound(id,peer,body) VALUES(?,?,?)',
+                       (event['id'], 'alice', encode(event)))
+        self.connector.store.operation(event['task_id'], 'delivered', {'turn_id': uid()})
+        calls = len(self.runtime.calls)
+        self.connector.deliver_event(self.connector.store.rows('SELECT * FROM inbound')[0])
+        self.assertEqual(len(self.runtime.calls), calls)
+        self.assertEqual(self.connector.store.rows('SELECT delivery FROM inbound')[0]['delivery'], 'rejected')
+
+    def test_wait_tool_does_not_expose_legacy_event_before_receipt(self):
+        event = self.outgoing_event()['event']
+        self.connector.store.operation(event['task_id'], 'uncertain', {'state': 'uncertain'})
+        with self.connector.store.transaction() as db:
+            db.execute('INSERT INTO inbound(id,peer,body) VALUES(?,?,?)',
+                       (event['id'], 'alice', encode(event)))
+        query = {'local_op': 'wait', 'agent': 'worker', 'after': 0, 'timeout': 0}
+        self.assertEqual(self.connector.local(query)['events'], [])
+        self.assertEqual(self.connector.store.rows('SELECT delivery FROM inbound')[0]['delivery'], 'pending')
+        self.connector.store.operation(event['task_id'], 'delivered', {'turn_id': event['turn_id']})
+        self.assertEqual(self.connector.local(query)['events'][0]['event']['id'], event['id'])
+        self.assertFalse(self.runtime.calls)
+
+    def test_wait_tool_keeps_cursor_before_unconfirmed_legacy_event(self):
+        early = self.outgoing_event()['event']
+        later = self.outgoing_event()['event']
+        self.connector.store.operation(early['task_id'], 'pending', {'state': 'pending'})
+        with self.connector.store.transaction() as db:
+            for event in (early, later):
+                db.execute('INSERT INTO inbound(id,peer,body) VALUES(?,?,?)',
+                           (event['id'], 'alice', encode(event)))
+        query = {'local_op': 'wait', 'agent': 'worker', 'after': 0, 'timeout': 0}
+        self.assertEqual(self.connector.local(query)['events'], [])
+        self.assertEqual([row['delivery'] for row in self.connector.store.rows('SELECT delivery FROM inbound')],
+                         ['pending', 'pending'])
+        self.connector.store.operation(early['task_id'], 'delivered', {'turn_id': early['turn_id']})
+        first = self.connector.local(query)['events'][0]
+        self.assertEqual(first['event']['id'], early['id'])
+        query['after'] = first['cursor']
+        self.assertEqual(self.connector.local(query)['events'][0]['event']['id'], later['id'])
+
+    def test_wait_tool_rejects_wrong_turn_without_exposing_it(self):
+        event = self.outgoing_event()['event']
+        self.connector.store.operation(event['task_id'], 'delivered', {'turn_id': uid()})
+        with self.connector.store.transaction() as db:
+            db.execute('INSERT INTO inbound(id,peer,body) VALUES(?,?,?)',
+                       (event['id'], 'alice', encode(event)))
+        result = self.connector.local({'local_op': 'wait', 'agent': 'worker', 'after': 0, 'timeout': 0})
+        self.assertEqual(result['events'], [])
+        self.assertEqual(self.connector.store.rows('SELECT delivery FROM inbound')[0]['delivery'], 'rejected')
+        self.assertFalse(self.runtime.calls)
+
+    def test_blocked_wait_wakes_when_original_receipt_is_recorded(self):
+        event = self.outgoing_event()['event']
+        self.connector.store.operation(event['task_id'], 'uncertain', {'state': 'uncertain'})
+        with self.connector.store.transaction() as db:
+            db.execute('INSERT INTO inbound(id,peer,body)VALUES(?,?,?)', (event['id'], 'alice', encode(event)))
+        result = []
+        waiter = threading.Thread(target=lambda: result.append(self.connector.local({
+            'local_op': 'wait', 'agent': 'worker', 'after': 0, 'timeout': 3})))
+        waiter.start()
+        deadline = time.monotonic() + 1
+        while not self.connector.waiters['worker'] and time.monotonic() < deadline:
+            time.sleep(.005)
+        self.assertTrue(self.connector.waiters['worker'])
+        receipt = {'state': 'delivered', 'result': {'state': 'delivered',
+                   'request_id': event['task_id'], 'turn_id': event['turn_id']}}
+        with patch('csl_bridge_engine.exchange', return_value=receipt):
+            self.connector.local({'local_op': 'call', 'peer': 'alice', 'request': self.request(
+                'receipt', request_id=event['task_id'])})
+        waiter.join(1)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(result[0]['events'][0]['event']['id'], event['id'])
+
+    def test_recovery_requires_original_receipt_before_promoting_uncertain_event(self):
+        for outcome in ('missing', 'wrong', 'confirmed'):
+            with self.subTest(outcome=outcome):
+                event = self.outgoing_event()['event']
+                self.connector.store.operation(event['task_id'], 'delivered' if outcome != 'missing' else 'uncertain',
+                    {'turn_id': uid() if outcome == 'wrong' else event['turn_id']} if outcome != 'missing' else {})
+                with self.connector.store.transaction() as db:
+                    db.execute("INSERT INTO inbound(id,peer,body,delivery)VALUES(?,?,?,'uncertain')",
+                               (event['id'], 'alice', encode(event)))
+                self.runtime.history = [{'id': uid(), 'status': 'completed', 'items': [
+                    {'type': 'userMessage', 'clientId': event['id']}]}]
+                self.connector.reconcile(flush_pending=False)
+                expected = {'missing': 'uncertain', 'wrong': 'rejected', 'confirmed': 'delivered'}[outcome]
+                self.assertEqual(self.connector.store.rows('SELECT delivery FROM inbound WHERE id=?',
+                                 (event['id'],))[0]['delivery'], expected)
+
+    def test_deferred_watch_peer_does_not_hold_another_peer(self):
+        deferred = self.outgoing_event()
+        self.connector.store.operation(deferred['event']['task_id'], 'uncertain', {})
+        with self.assertRaisesRegex(BridgeError, 'native acceptance'):
+            self.connector.accept_event('alice', deferred)
+        self.assertEqual(self.connector.store.rows('SELECT * FROM cursors'), [])
+        confirmed = self.outgoing_event()
+        self.connector.peers['second'] = self.connector.peers['alice']
+        with self.connector.store.transaction() as db:
+            db.execute("UPDATE operations SET peer='outbound:second' WHERE id=?",
+                       (confirmed['event']['task_id'],))
+        self.connector.accept_event('second', confirmed)
+        self.assertEqual(self.connector.store.rows('SELECT peer FROM cursors'), [{'peer': 'second'}])
+
     def test_event_correlation_collision_and_wrong_peer_have_no_partial_effect(self):
         original = self.outgoing_event()
         for peer, event in [('mallory', original),
