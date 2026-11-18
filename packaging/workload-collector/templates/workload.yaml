@@ -1,0 +1,86 @@
+{{- if not (kindIs "bool" .Values.enabled) }}
+{{- fail "enabled must be a boolean" }}
+{{- end }}
+{{- if not (kindIs "bool" .Values.daemonSet.narrowSameOwnerExport) }}
+{{- fail "daemonSet.narrowSameOwnerExport must be a boolean" }}
+{{- end }}
+{{- if .Values.enabled }}
+{{- include "workload.validate" . }}
+{{- if and (eq .Values.mode "daemonSet") (not (and .Values.daemonSet.narrowSameOwnerExport .Values.daemonSet.existingClaim)) }}
+{{- fail "DaemonSet requires an explicitly qualified same-owner transcript-only claim" }}
+{{- end }}
+apiVersion: apps/v1
+kind: {{ ternary "Deployment" "DaemonSet" (eq .Values.mode "sidecar") }}
+metadata:
+  name: {{ include "workload.name" . }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "workload.name" . }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "workload.name" . }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: {{ int .Values.collector.uid }}
+        runAsGroup: {{ int .Values.collector.uid }}
+        fsGroup: {{ int .Values.collector.uid }}
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: {{ int .Values.terminationGracePeriodSeconds }}
+{{- if eq .Values.mode "sidecar" }}
+      initContainers:
+        - {{ include "workload.collector" . | nindent 10 | trim }}
+      containers:
+        - name: writer
+          image: {{ include "workload.image" .Values.writer.image }}
+          command: ["python3", "/vitral-writer/supervisor.py"]
+          {{- $writer := required "an explicit writer command is required" .Values.writer.command }}
+          args: {{ concat (list (.Values.writer.shutdownSeconds | toString) "--") $writer .Values.writer.args | toJson }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: transcript
+              mountPath: /transcripts
+            - name: writer-supervisor
+              mountPath: /vitral-writer
+              readOnly: true
+{{- else }}
+      containers:
+        - {{ include "workload.collector" . | nindent 10 | trim }}
+{{- end }}
+      volumes:
+{{- if eq .Values.mode "sidecar" }}
+        - name: writer-supervisor
+          configMap:
+            name: {{ include "workload.supervisorName" . }}
+            items:
+              - key: supervisor.py
+                path: supervisor.py
+{{- end }}
+        - name: collector-state
+          emptyDir:
+            sizeLimit: {{ .Values.collector.stateLimit | quote }}
+        - name: transcript
+{{- if eq .Values.mode "sidecar" }}
+          emptyDir:
+            sizeLimit: {{ .Values.transcripts.sizeLimit | quote }}
+{{- else }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.daemonSet.existingClaim | quote }}
+            readOnly: true
+{{- end }}
+{{- if .Values.identity.caConfigMap }}
+        - name: collector-trust
+          configMap:
+            name: {{ .Values.identity.caConfigMap | quote }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+{{- end }}
+{{- end }}

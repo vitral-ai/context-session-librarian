@@ -13,6 +13,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - name: Install pinned Helm for packaging tests
+        run: |
+          mkdir -p "$RUNNER_TEMP/csl-helm"
+          cd "$RUNNER_TEMP/csl-helm"
+          curl --fail --silent --show-error --max-time 60 \
+            -o helm.tar.gz https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
+          printf '%s  helm.tar.gz\n' a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496 | sha256sum --check
+          tar -xzf helm.tar.gz linux-amd64/helm
+          "$PWD/linux-amd64/helm" version --short
+          openssl version
+          printf 'VITRAL_FIXTURE_HELM=%s/linux-amd64/helm\n' "$PWD" >> "$GITHUB_ENV"
       - run: python -m unittest discover -s tests -v
   media:
     runs-on: ubuntu-latest
