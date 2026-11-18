@@ -289,3 +289,15 @@ class EventStateTests(unittest.TestCase):
             self.events.barrier(db, 1, 'affected', None, '{bad', 'unknown earlier effect')
             db.execute('UPDATE event_effects SET seed_complete=0 WHERE key=?', (incomplete,))
         self.assertEqual([row['key'] for row in self.events.recovery_batch('synthetic')], [other])
+
+    def test_recovery_limit_bounds_candidates_before_barrier_filter(self):
+        blocked = [self.seeded(peer='barred') for _ in range(32)]
+        eligible = self.seeded(peer='eligible')
+        for key in blocked + [eligible]:
+            self.events.claim_native(key, 0)
+        with self.store.transaction() as db:
+            self.events.barrier(db, 1, 'barred', 'unknown', '{bad', 'unresolved scope')
+        self.assertEqual(self.events.recovery_batch('synthetic'), [])
+        cursor = self.store.rows('SELECT after_seq FROM event_recovery_scans')[0]['after_seq']
+        self.assertEqual(cursor, self.row(blocked[-1])['seq'])
+        self.assertEqual([row['key'] for row in self.events.recovery_batch('synthetic')], [eligible])

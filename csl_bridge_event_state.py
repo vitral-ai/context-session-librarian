@@ -54,6 +54,7 @@ class EventState:
                 '''CREATE TABLE IF NOT EXISTS event_history_barriers(
                     seq INTEGER PRIMARY KEY,peer TEXT,wire_id TEXT,body_hash TEXT NOT NULL,
                     reason TEXT NOT NULL)''',
+                'CREATE INDEX IF NOT EXISTS event_barrier_scope ON event_history_barriers(peer)',
                 '''CREATE TABLE IF NOT EXISTS event_recovery_scans(
                     consumer TEXT PRIMARY KEY,after_seq INTEGER NOT NULL,horizon INTEGER NOT NULL)''',
             ):
@@ -212,12 +213,26 @@ class EventState:
             maximum = db.execute('SELECT coalesce(max(seq),0) FROM event_effects').fetchone()[0]
             scan = db.execute('SELECT * FROM event_recovery_scans WHERE consumer=?', (consumer,)).fetchone()
             after, horizon = (scan['after_seq'], scan['horizon']) if scan else (0, maximum)
-            rows = db.execute("SELECT e.* FROM event_effects e JOIN event_attempts a ON a.key=e.key AND a.number=e.attempt WHERE e.seq>? AND e.seq<=? AND e.state='uncertain' AND e.seed_complete=1 AND a.mode='native' AND a.state='uncertain' AND NOT EXISTS(SELECT 1 FROM event_history_barriers b WHERE b.peer IS NULL OR b.peer=e.peer) ORDER BY e.seq LIMIT ?",
+            # Bound candidates BEFORE eligibility filters. Otherwise many barred
+            # rows could turn LIMIT 32 into an unbounded scan for 32 matches.
+            rows = db.execute("SELECT * FROM event_effects WHERE seq>? AND seq<=? AND state='uncertain' ORDER BY seq LIMIT ?",
                               (after, horizon, limit)).fetchall()
+            selected = []
+            for row in rows:
+                if not row['seed_complete']:
+                    continue
+                attempt = db.execute('SELECT mode,state FROM event_attempts WHERE key=? AND number=?',
+                                     (row['key'], row['attempt'])).fetchone()
+                if not attempt or (attempt['mode'], attempt['state']) != ('native', 'uncertain'):
+                    continue
+                if db.execute('SELECT 1 FROM event_history_barriers WHERE peer IS NULL OR peer=? LIMIT 1',
+                              (row['peer'],)).fetchone():
+                    continue
+                selected.append(dict(row))
             if len(rows) < limit:
                 after, horizon = 0, maximum
             else:
                 after = rows[-1]['seq']
             db.execute('INSERT INTO event_recovery_scans VALUES(?,?,?) ON CONFLICT(consumer) DO UPDATE SET after_seq=excluded.after_seq,horizon=excluded.horizon',
                        (consumer, after, horizon))
-            return [dict(row) for row in rows]
+            return selected
