@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import stat
@@ -23,6 +24,13 @@ def encoded(value):
                       allow_nan=False, separators=(',', ':')).encode('utf-8')
 
 
+def checked_text(value):
+    try:
+        value.encode('utf-8')
+    except UnicodeError:
+        raise SyncError('workload_record_refused') from None
+
+
 @dataclass(frozen=True)
 class Bounds:
     source_bytes: int = 16 * 1024 * 1024
@@ -37,6 +45,31 @@ class Bounds:
     def __post_init__(self):
         if any(type(value) is not int or value < 1 for value in vars(self).values()):
             raise SyncError('workload_invalid_bounds')
+
+
+class StructureBudget:
+    """Validate every descendant before selection or credential replacement."""
+    def __init__(self, bounds):
+        self.bounds, self.remaining = bounds, bounds.values
+
+    def check(self, item, depth=0):
+        self.remaining -= 1
+        if self.remaining < 0 or depth > self.bounds.depth:
+            raise SyncError('workload_structure_limit')
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if not isinstance(key, str):
+                    raise SyncError('workload_record_refused')
+                checked_text(key)
+                self.check(child, depth+1)
+        elif isinstance(item, list):
+            for child in item: self.check(child, depth+1)
+        elif isinstance(item, str):
+            checked_text(item)
+        elif isinstance(item, float) and not math.isfinite(item):
+            raise SyncError('workload_record_refused')
+        elif item is not None and type(item) not in (bool, int, float):
+            raise SyncError('workload_record_refused')
 
 
 def opened_source(root, relative):
@@ -71,6 +104,8 @@ def opened_source(root, relative):
 
 def read_complete(root, relative, bounds):
     records, digest, length, lines = [], hashlib.sha256(), 0, 0
+    budget = StructureBudget(bounds)
+    budget.check(records)
     try:
         with opened_source(root, relative) as source:
             initial = os.fstat(source.fileno())
@@ -95,6 +130,7 @@ def read_complete(root, relative, bounds):
                     value = strict_json(line)
                     if not isinstance(value, dict):
                         raise SyncError('workload_record_refused')
+                    budget.check(value, depth=1)
                     records.append(value)
             # A fixed complete prefix may grow, but may not be rewritten while read.
             source.seek(0)
@@ -158,6 +194,7 @@ class Redactor:
         return value
 
     def clean(self, value):
+        StructureBudget(self.bounds).check(value)
         remaining = [self.bounds.values]
         def visit(item, key=None, depth=0):
             remaining[0] -= 1
@@ -171,6 +208,7 @@ class Redactor:
                     raise SyncError('workload_opaque_or_key_refused')
                 result = {}
                 for name, child in item.items():
+                    if isinstance(name, str): checked_text(name)
                     if (not isinstance(name, str) or self.text(name) != name or name in OPAQUE):
                         raise SyncError('workload_opaque_or_key_refused')
                     result[name] = visit(child, name, depth+1)
@@ -178,10 +216,13 @@ class Redactor:
             if isinstance(item, list):
                 return [visit(child, key, depth+1) for child in item]
             if isinstance(item, str):
+                checked_text(item)
                 cleaned = self.text(item)
                 if key in IDENTITIES and cleaned != item:
                     raise SyncError('workload_identity_refused')
                 return cleaned
+            if isinstance(item, float) and not math.isfinite(item):
+                raise SyncError('workload_record_refused')
             if item is None or type(item) in (bool, int, float):
                 return item
             raise SyncError('workload_record_refused')

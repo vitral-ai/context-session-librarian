@@ -26,8 +26,9 @@ for Codex, Claude Code and Antigravity CLI to a registry you configure.
 Raw sync uploads transcripts including any secrets they contain. See [sync](SYNC.md)
 and [Antigravity scope and limitations](ANTIGRAVITY.md).
 An internal [sanitized workload provider foundation](WORKLOAD_PROVIDERS.md)
-adds a pinned Gemini text projection for integration tests only. It activates no
-public command and does not change the desktop matrix below.
+adds pinned Gemini and separate [Codex/Claude text profiles](WORKLOAD_TEXT_PROFILES.md)
+for integration tests only. It activates no public command and does not change
+the desktop matrix below.
 Codex 0.169.0 external `history_base` chains are included in raw v3 snapshots and
 single-session `export --raw`. Portable/batch export of referenced histories
 rejects rather than omitting ancestors. Native `thread/read` requires rebuilt
