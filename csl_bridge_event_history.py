@@ -7,7 +7,7 @@ must never share a home during eventual activation.
 import hashlib
 
 from csl_bridge_engine import confirm_event_turn, event_id, validate_event
-from csl_bridge_event_state import EventConflict, EventDeferred, EventState, digest
+from csl_bridge_event_state import EventConflict, EventDeferred, EventState, SETTLED, digest
 from csl_bridge_store import BridgeError, decode, encode, identifier, name
 
 
@@ -31,6 +31,14 @@ class EventHistory:
                     legacy INTEGER NOT NULL,conflict TEXT)''',
                 'CREATE INDEX IF NOT EXISTS event_catalog_key ON event_catalog(key,seq)',
                 'CREATE UNIQUE INDEX IF NOT EXISTS event_catalog_wire ON event_catalog(wire_id)',
+                '''CREATE TABLE IF NOT EXISTS event_final_gaps(
+                    key TEXT NOT NULL,target TEXT NOT NULL,seq INTEGER NOT NULL,
+                    PRIMARY KEY(key,target))''',
+                'CREATE INDEX IF NOT EXISTS event_final_gap_wait ON event_final_gaps(target,seq)',
+                '''CREATE TABLE IF NOT EXISTS event_original_bindings(
+                    key TEXT PRIMARY KEY,signature TEXT NOT NULL)''',
+                '''CREATE TABLE IF NOT EXISTS event_accepted_originals(
+                    key TEXT PRIMARY KEY,proof TEXT NOT NULL)''',
                 '''CREATE TABLE IF NOT EXISTS event_catalog_meta(
                     id INTEGER PRIMARY KEY CHECK(id=1),watermark INTEGER,version INTEGER NOT NULL)''',
                 'INSERT OR IGNORE INTO event_catalog_meta VALUES(1,NULL,1)',
@@ -43,6 +51,7 @@ class EventHistory:
                     seq INTEGER PRIMARY KEY,key TEXT NOT NULL,wire_id TEXT NOT NULL,
                     raw_hash TEXT NOT NULL,thread TEXT)''',
                 'CREATE INDEX IF NOT EXISTS event_legacy_key ON event_legacy_attempts(key,seq)',
+                'CREATE INDEX IF NOT EXISTS event_legacy_thread ON event_legacy_attempts(key,thread)',
                 '''CREATE TABLE IF NOT EXISTS event_publications(
                     seq INTEGER PRIMARY KEY,wire_id TEXT NOT NULL,kind TEXT NOT NULL,
                     key TEXT,target TEXT NOT NULL)''',
@@ -124,6 +133,22 @@ class EventHistory:
         if conflict:
             self.note(db, row, conflict)
         if key:
+            event = decode(row['body'])
+            db.execute('INSERT INTO event_final_gaps VALUES(?,?,?) ON CONFLICT(key,target)DO UPDATE SET seq=min(seq,excluded.seq)',
+                       (key, event['target'], row['seq']))
+            proof = self.proof(db, peer, event)
+            if proof['binding'] is not None:
+                db.execute('INSERT OR IGNORE INTO event_original_bindings VALUES(?,?)',
+                           (key, digest(proof['binding'])))
+                known = db.execute('SELECT signature FROM event_original_bindings WHERE key=?', (key,)).fetchone()
+                if known[0] != digest(proof['binding']):
+                    db.execute('UPDATE event_catalog SET conflict=? WHERE seq=?', ('Known original authority changed during catalog', row['seq']))
+                    self.note(db, row, 'Known original authority changed during catalog')
+            # Capture historical uncertainty NOW, before a later restored original
+            # could lend an unknown old attempt a newly discovered thread.
+            if legacy and row['delivery'] == 'uncertain':
+                db.execute('INSERT OR IGNORE INTO event_legacy_attempts VALUES(?,?,?,?,?)',
+                           (row['seq'], key, row['id'], fingerprint, proof['thread']))
             effect = db.execute('SELECT state,seed_complete FROM event_effects WHERE key=?', (key,)).fetchone()
             if effect and effect['seed_complete']:
                 db.execute('UPDATE event_seed_state SET resume_state=? WHERE key=?', (effect['state'], key))
@@ -155,23 +180,25 @@ class EventHistory:
         if not original:
             other = db.execute('SELECT 1 FROM operations WHERE id=?', (event['task_id'],)).fetchone()
             return {'state': 'conflict' if other else 'deferred', 'binding': None, 'thread': None, 'sender': None}
+        binding, thread = None, None
         try:
             request = decode(original['request'])
             if raw_hash(original['request']) != original['hash']:
                 raise BridgeError('Original request fingerprint differs')
-            receipt = decode(original['result']) if original['result'] else {}
-            confirmed = confirm_event_turn(request, original['state'], receipt, event)
+            binding = digest([peer, original['hash'], original['request']])
             thread = request.get('session')
             if thread:
                 identifier(thread)
+            receipt = decode(original['result']) if original['result'] else {}
+            confirmed = confirm_event_turn(request, original['state'], receipt, event)
             sender = receipt.get('thread_id') if confirmed else None
             if sender:
                 identifier(sender)
             return {'state': 'confirmed' if confirmed else 'deferred',
-                    'binding': digest([peer, original['hash'], original['request']]),
+                    'binding': binding,
                     'thread': thread, 'sender': sender}
         except (BridgeError, TypeError, AttributeError):
-            return {'state': 'conflict', 'binding': None, 'thread': None, 'sender': None}
+            return {'state': 'conflict', 'binding': binding, 'thread': thread, 'sender': None}
 
     @staticmethod
     def projection(peer, event, proof):
@@ -199,14 +226,31 @@ class EventHistory:
                 return {'processed': 0, 'complete': False, 'state': 'conflict'}
             event = decode(first['body'])
             proof = self.proof(db, first['peer'], event)
-            signature = digest(proof['binding'])
+            signature = digest(proof['binding']) if proof['binding'] is not None else None
             state = db.execute('SELECT * FROM event_seed_state WHERE key=?', (key,)).fetchone()
             effect = db.execute('SELECT * FROM event_effects WHERE key=?', (key,)).fetchone()
-            if state and state['sealed']:
-                if state['signature'] != signature:
-                    self.note(db, {'seq': first['seq'], 'id': first['wire_id'], 'body': first['body']}, 'Sealed original authority changed: ' + signature)
+            known = db.execute('SELECT signature FROM event_original_bindings WHERE key=?', (key,)).fetchone()
+            # Unknown is NULL, never digest(None). Once known, authority cannot be
+            # replaced, including before first seed and across partial batches.
+            expected = state['signature'] if state and state['signature'] not in (None, digest(None)) else (known[0] if known else None)
+            if effect and effect['state'] == 'conflict':
+                return {'processed': 0, 'complete': True, 'state': 'conflict'}
+            if proof['state'] == 'conflict' or expected is not None and signature is not None and expected != signature:
+                self.note(db, {'seq': first['seq'], 'id': first['wire_id'], 'body': first['body']}, 'Known original authority changed: ' + str(signature))
+                if effect and effect['state'] in SETTLED:
+                    return {'processed': 0, 'complete': True, 'state': effect['state']}
+                if effect:
                     db.execute("UPDATE event_effects SET state='conflict',revision=revision+1 WHERE key=?", (key,))
-                    return {'processed': 0, 'complete': True, 'state': 'conflict'}
+                    db.execute('UPDATE event_seed_state SET conflict=1 WHERE key=?', (key,))
+                else:
+                    db.execute("INSERT INTO event_effects(key,peer,task,projection,representative,agent,state,seed_complete)VALUES(?,?,?,?,?,?,'conflict',1)",
+                               (key, first['peer'], first['task'], '', first['seq'], event['target']))
+                return {'processed': 0, 'complete': True, 'state': 'conflict'}
+            if signature is not None:
+                db.execute('INSERT OR IGNORE INTO event_original_bindings VALUES(?,?)', (key, signature))
+            if proof['state'] == 'confirmed':
+                db.execute('INSERT OR IGNORE INTO event_accepted_originals VALUES(?,?)', (key, encode(proof)))
+            if state and state['sealed'] and expected == signature:
                 if effect['seed_complete']:
                     if effect['state'] == 'deferred' and proof['state'] == 'confirmed' and not (state['uncertain'] or state['delivered']):
                         try:
@@ -219,10 +263,13 @@ class EventHistory:
                         db.execute('UPDATE event_effects SET state=?,revision=revision+1 WHERE key=?', (updated, key))
                         return {'processed': 0, 'complete': True, 'state': updated}
                     return {'processed': 0, 'complete': True, 'state': effect['state']}
-            if state is None or state['signature'] != signature:
+            if state and expected is not None and signature is None:
+                # Temporary absence is not a replacement identity or a reset.
+                return {'processed': 0, 'complete': bool(effect['seed_complete']), 'state': 'deferred'}
+            if state is None or state['signature'] in (None, digest(None)) and signature is not None:
                 registered = db.execute('SELECT thread FROM agents WHERE name=?', (event['target'],)).fetchone()
                 thread = proof['thread'] or (registered[0] if registered else None)
-                db.execute('INSERT INTO event_seed_state(key,signature,thread_snapshot,sender)VALUES(?,?,?,?) ON CONFLICT(key)DO UPDATE SET cursor=NULL,signature=excluded.signature,projection=NULL,delivered=0,uncertain=0,conflict=0,representative=NULL,sender=excluded.sender',
+                db.execute('INSERT INTO event_seed_state(key,signature,thread_snapshot,sender)VALUES(?,?,?,?) ON CONFLICT(key)DO UPDATE SET cursor=NULL,signature=excluded.signature,projection=NULL,representative=NULL,sender=excluded.sender,thread_snapshot=CASE WHEN delivered=0 AND uncertain=0 THEN excluded.thread_snapshot ELSE thread_snapshot END,sealed=0,resume_state=NULL',
                            (key, signature, thread, proof['sender']))
                 db.execute("INSERT INTO event_effects(key,peer,task,projection,representative,agent,thread)VALUES(?,?,?,?,?,?,?) ON CONFLICT(key)DO UPDATE SET state='seeding',seed_complete=0,revision=revision+1",
                            (key, first['peer'], first['task'], '', first['seq'], event['target'], thread))
@@ -293,7 +340,14 @@ class EventHistory:
             outcome = ('conflict' if conflict else 'legacy_suppressed' if delivered else
                        'uncertain' if uncertain else 'deferred' if proof['state'] != 'confirmed' else
                        'receipt_available' if not event['text'] else 'pending')
-            thread = proof['thread'] if uncertain or delivered else state['thread_snapshot']
+            thread = state['thread_snapshot']
+            if uncertain or delivered:
+                thread = proof['thread']
+                if uncertain:
+                    old = db.execute('SELECT thread FROM event_legacy_attempts WHERE key=? ORDER BY thread LIMIT 1', (key,)).fetchone()
+                    thread = old[0] if old else None
+                    if thread and db.execute('SELECT 1 FROM event_legacy_attempts WHERE key=? AND thread>? LIMIT 1', (key, thread)).fetchone():
+                        thread = None
             db.execute('UPDATE event_effects SET projection=?,representative=?,state=?,seed_complete=1,thread=?,revision=revision+1,outcome=? WHERE key=?',
                        (projection or '', representative, outcome, thread,
                         encode({'legacy_delivered_unproven': bool(delivered), 'legacy_uncertain': bool(uncertain)}), key))
@@ -308,8 +362,20 @@ class EventHistory:
         if not row or raw_hash(row['body']) != row['raw_hash']:
             raise EventConflict('Canonical representative raw identity changed')
         event = decode(row['body'])
-        proof = self.proof(db, row['peer'], event)
         seeded = db.execute('SELECT * FROM event_seed_state WHERE key=?', (effect['key'],)).fetchone()
+        if effect['state'] in SETTLED:
+            saved = db.execute('SELECT proof FROM event_accepted_originals WHERE key=?', (effect['key'],)).fetchone()
+            if saved:
+                proof = decode(saved[0])
+                if (not seeded or seeded['signature'] != digest(proof['binding']) or row['conflict'] or
+                        row['wire_id'] != event['id'] or row['key'] != effect['key'] or
+                        self.projection(row['peer'], event, {**proof, 'sender': seeded['sender']}) != effect['projection'] or
+                        event['target'] != effect['agent']):
+                    raise EventConflict('Retained settled identity changed')
+                return event, proof
+        proof = self.proof(db, row['peer'], event)
+        if proof['state'] != 'conflict' and proof['binding'] is None:
+            raise EventDeferred('Original binding is unresolved')
         if proof['state'] == 'conflict' or not seeded or seeded['signature'] != digest(proof['binding']):
             raise EventConflict('Canonical original identity changed')
         if proof['state'] != 'confirmed':
@@ -379,13 +445,17 @@ class EventHistory:
         body = encode(event)
         with self.store.transaction() as db:
             was_complete = self.complete(db)
-            proof = self.proof(db, peer, event)
             def refused(reason):
                 db.execute('INSERT OR IGNORE INTO event_admission_conflicts VALUES(?,?,?,?,?)',
                            (peer, event['task_id'], event['id'], raw_hash(body), reason))
                 if cursor is not None:
                     db.execute('INSERT INTO cursors VALUES(?,?) ON CONFLICT(peer)DO UPDATE SET value=max(value,excluded.value)', (peer, cursor))
                 return {'state': 'rejected', 'event_id': event['id'], 'reason': reason}
+            terminal = db.execute('SELECT * FROM event_admission_conflicts WHERE peer=? AND wire_id=? ORDER BY rowid LIMIT 1', (peer, event['id'])).fetchone()
+            if terminal:
+                reason = terminal['reason'] if (terminal['raw_hash'], terminal['task']) == (raw_hash(body), event['task_id']) else 'Terminal wire refusal: changed proposal collision'
+                return refused(reason)
+            proof = self.proof(db, peer, event)
             if proof['state'] == 'conflict':
                 return refused('Contradictory original identity')
             if proof['state'] != 'confirmed':
@@ -414,6 +484,9 @@ class EventHistory:
                            (peer, event['task_id'], signature, encoded_route, original['result']))
             if event['kind'] == 'final':
                 key = canonical_key(peer, event['task_id'])
+                known = db.execute('SELECT signature FROM event_original_bindings WHERE key=?', (key,)).fetchone()
+                if known and known[0] != digest(proof['binding']):
+                    return refused('Known original authority changed')
                 seeded = db.execute('SELECT * FROM event_seed_state WHERE key=? AND sealed=1', (key,)).fetchone()
                 if seeded:
                     candidate = self.projection(peer, event, {**proof, 'sender': seeded['sender']})
@@ -436,6 +509,9 @@ class EventHistory:
             if not self.complete(db):
                 raise EventDeferred('History catalog has an unresolved tail')
             row = db.execute('SELECT p.*,i.body FROM event_publications p JOIN inbound i USING(seq) WHERE p.target=? AND p.seq>? ORDER BY p.seq LIMIT 1', (agent, after)).fetchone()
+            gap = db.execute('SELECT * FROM event_final_gaps WHERE target=? AND seq>? ORDER BY seq LIMIT 1', (agent, after)).fetchone()
+            if gap and (row is None or gap['seq'] < row['seq']):
+                raise EventDeferred('Earlier canonical final holds the wait cursor')
             if row is None:
                 return None
             if db.execute('SELECT 1 FROM event_history_barriers WHERE seq<=? LIMIT 1', (row['seq'],)).fetchone():
@@ -444,17 +520,11 @@ class EventHistory:
             if raw_hash(row['body']) != entry['raw_hash']:
                 raise EventConflict('Publication body changed')
             event = decode(row['body'])
-            proof = self.proof(db, entry['peer'], event)
-            if proof['state'] == 'conflict' or entry['conflict']:
-                raise EventConflict('Publication has contradictory original proof')
-            if proof['state'] != 'confirmed':
-                raise EventDeferred('Original Native acceptance is unresolved')
-            self.projection(entry['peer'], event, proof)
             result = dict(row)
+            effect = None
+            seeded = None
             if row['kind'] == 'final':
-                seeded = db.execute('SELECT signature FROM event_seed_state WHERE key=?', (row['key'],)).fetchone()
-                if not seeded or seeded['signature'] != digest(proof['binding']):
-                    raise EventConflict('Publication original authority changed')
+                seeded = db.execute('SELECT * FROM event_seed_state WHERE key=?', (row['key'],)).fetchone()
                 effect = db.execute('SELECT * FROM event_effects WHERE key=?', (row['key'],)).fetchone()
                 if not effect or not effect['seed_complete']:
                     raise EventDeferred('Canonical final seed is incomplete')
@@ -462,6 +532,17 @@ class EventHistory:
                 if effect['state'] == 'uncertain':
                     raise EventDeferred('Uncertain final attempt holds this cursor')
                 result['revision'] = effect['revision']
+                if effect['state'] in SETTLED:
+                    self.guard(db, effect)
+                    return result
+            proof = self.proof(db, entry['peer'], event)
+            if proof['state'] == 'conflict' or entry['conflict']:
+                raise EventConflict('Publication has contradictory original proof')
+            if proof['state'] != 'confirmed':
+                raise EventDeferred('Original Native acceptance is unresolved')
+            self.projection(entry['peer'], event, proof)
+            if effect and (not seeded or seeded['signature'] != digest(proof['binding'])):
+                raise EventConflict('Publication original authority changed')
             return result
 
     def publish_final(self, task_id, thread, status, text):

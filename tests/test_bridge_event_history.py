@@ -78,6 +78,182 @@ class EventHistoryTests(unittest.TestCase):
     def effect(self, key):
         return self.store.rows('SELECT * FROM event_effects WHERE key=?', (key,))[0]
 
+    def test_unseeded_final_holds_later_progress_across_reopen(self):
+        _, _, event = self.task()
+        _, seq = self.alias(event)
+        self.alias(dict(event, kind='progress', status='progress'))
+        self.catalog()
+        for _ in range(2):
+            self._history = EventHistory(self.store)
+            with self.assertRaises(EventDeferred):
+                self.history.next_publication('coordinator', 0)
+        self.seed(event)
+        self.assertEqual(self.history.next_publication('coordinator', 0)['seq'], seq)
+
+    def test_partial_final_holds_later_seeded_task_and_duplicate_aliases(self):
+        _, _, first = self.task()
+        for _ in range(65):
+            self.alias(first)
+        _, _, later = self.task(); self.alias(later)
+        self.catalog(); key = canonical_key('remote', first['task_id'])
+        self.assertFalse(self.history.seed_step(key)['complete'])
+        self.seed(later)
+        self._history = EventHistory(self.store)
+        with self.assertRaises(EventDeferred):
+            self.history.next_publication('coordinator', 0)
+        self.assertEqual(self.history.seed_step(key)['processed'], 1)
+        publication = self.history.next_publication('coordinator', 0)
+        self.assertEqual(publication['seq'], 1)
+        self.history.effects.observe_wait(key, publication['revision'], guard=self.history.guard)
+        # Aliases are not extra publications after the representative is consumed.
+        self.assertEqual(self.history.next_publication('coordinator', 1)['seq'], 66)
+
+    def test_known_authority_never_changes_before_or_during_seed(self):
+        for partial, field in itertools.product((False, True), ('text', 'session', 'hash')):
+            with self.subTest(partial=partial, field=field):
+                request, _, event = self.task(known_thread=True)
+                for _ in range(65 if partial else 1):
+                    self.alias(event)
+                self.catalog(); key = canonical_key('remote', event['task_id'])
+                if partial:
+                    self.history.seed_step(key)
+                before = self.store.rows('SELECT * FROM event_seed_state WHERE key=?', (key,))
+                changed = dict(request, **({field: 'Other body' if field == 'text' else uid()} if field != 'hash' else {}))
+                body = encode(changed)
+                with self.store.transaction() as db:
+                    db.execute('UPDATE operations SET request=?,hash=? WHERE id=?',
+                               (body, raw_hash(body) if field != 'hash' else '0' * 64, request['id']))
+                self._history = EventHistory(self.store)
+                result = self.history.seed_step(key)
+                self.assertEqual(result['state'], 'conflict')
+                if before:
+                    after = self.store.rows('SELECT * FROM event_seed_state WHERE key=?', (key,))[0]
+                    for name in ('signature', 'cursor', 'projection', 'thread_snapshot'):
+                        self.assertEqual(after[name], before[0][name])
+                with self.assertRaises((EventConflict, EventDeferred)):
+                    self.history.effects.claim_native(key, self.effect(key)['revision'], guard=self.history.guard)
+                # A later repair cannot silently erase the known contradiction.
+                with self.store.transaction() as db:
+                    db.execute('UPDATE operations SET request=?,hash=? WHERE id=?',
+                               (encode(request), raw_hash(encode(request)), request['id']))
+                self.assertEqual(self.history.seed_step(key)['state'], 'conflict')
+
+    def test_catalog_remembers_observed_known_mutation_after_original_repair(self):
+        request, _, event = self.task(known_thread=True)
+        self.alias(event); self.catalog()
+        changed = dict(request, text='Different stored original')
+        with self.store.transaction() as db:
+            db.execute('UPDATE operations SET request=?,hash=? WHERE id=?',
+                       (encode(changed), raw_hash(encode(changed)), request['id']))
+        self.alias(event); self.catalog()
+        with self.store.transaction() as db:
+            db.execute('UPDATE operations SET request=?,hash=? WHERE id=?',
+                       (encode(request), raw_hash(encode(request)), request['id']))
+        _, result = self.seed(event)
+        self.assertEqual(result['state'], 'conflict')
+        self.assertTrue(self.store.rows('SELECT * FROM event_history_conflicts'))
+
+    def test_absent_original_resolves_without_upgrading_legacy_uncertainty(self):
+        for delivery, partial in itertools.product(('pending', 'uncertain', 'delivered'), (False, True)):
+            with self.subTest(delivery=delivery, partial=partial):
+                request, receipt, event = self.task(known_thread=True)
+                with self.store.transaction() as db:
+                    db.execute('DELETE FROM operations WHERE id=?', (request['id'],))
+                for _ in range(65 if partial else 1):
+                    self.alias(event, delivery=delivery)
+                self.catalog(); key = canonical_key('remote', event['task_id'])
+                first = self.history.seed_step(key)
+                if not partial:
+                    self.assertEqual(first['state'], {'pending': 'deferred', 'uncertain': 'uncertain', 'delivered': 'legacy_suppressed'}[delivery])
+                self.assertIsNone(self.store.rows('SELECT signature FROM event_seed_state WHERE key=?', (key,))[0]['signature'])
+                attempts = self.store.rows('SELECT * FROM event_legacy_attempts WHERE key=?', (key,))
+                self.store.reserve('outbound:remote', request)
+                self.store.operation(request['id'], 'delivered', receipt)
+                # Also cover a new cataloged alias acquiring the first known binding.
+                self.alias(event); self.catalog()
+                self._history = EventHistory(self.store)
+                _, result = self.seed(event)
+                self.assertEqual(result['state'], {'pending': 'pending', 'uncertain': 'uncertain', 'delivered': 'legacy_suppressed'}[delivery])
+                self.assertEqual(self.store.rows('SELECT * FROM event_legacy_attempts WHERE key=?', (key,)), attempts)
+                if delivery == 'uncertain':
+                    self.assertIsNone(self.effect(key)['thread'])
+                    self.assertTrue(all(row['thread'] is None for row in attempts))
+                elif delivery == 'pending':
+                    claim = self.history.effects.claim_native(key, self.effect(key)['revision'], guard=self.history.guard)
+                    self.assertEqual(claim['thread'], self.local_thread)
+                else:
+                    self.assertIsNone(self.history.effects.claim_native(key, self.effect(key)['revision'], guard=self.history.guard))
+
+    def test_settled_reads_use_retained_proof_without_original_lookup(self):
+        from unittest.mock import patch
+        for mode in ('wait', 'native', 'legacy'):
+            with self.subTest(mode=mode):
+                request, _, event = self.task(known_thread=True)
+                self.alias(event, delivery='delivered' if mode == 'legacy' else 'pending')
+                key, _ = self.seed(event)
+                if mode == 'wait':
+                    self.history.effects.observe_wait(key, self.effect(key)['revision'], guard=self.history.guard)
+                elif mode == 'native':
+                    claim = self.history.effects.claim_native(key, self.effect(key)['revision'], guard=self.history.guard)
+                    self.history.effects.finish_native(claim, {'state': 'delivered', 'request_id': claim['client_id'],
+                        'thread_id': claim['thread'], 'turn_id': uid()}, guard=self.history.guard)
+                before = dict(self.effect(key))
+                attempts = self.store.rows('SELECT * FROM event_attempts WHERE key=?', (key,))
+                with self.store.transaction() as db:
+                    db.execute('DELETE FROM operations WHERE id=?', (request['id'],))
+                self._history = EventHistory(self.store)
+                with patch.object(self.history, 'proof', side_effect=AssertionError('Settled history must not re-prove originals')):
+                    self.assertEqual(self.history.next_publication('coordinator', before['representative'] - 1)['key'], key)
+                    self.assertTrue(self.history.effects.observe_wait(key, before['revision'], guard=self.history.guard)['history_read'])
+                    self.assertIsNone(self.history.effects.claim_native(key, before['revision'], guard=self.history.guard))
+                self.assertEqual(dict(self.effect(key)), before)
+                self.assertEqual(self.store.rows('SELECT * FROM event_attempts WHERE key=?', (key,)), attempts)
+                with self.store.transaction() as db:
+                    db.execute('UPDATE inbound SET body=? WHERE seq=?', (encode(dict(event, text='changed raw')), before['representative']))
+                with self.assertRaises(EventConflict):
+                    self.history.next_publication('coordinator', before['representative'] - 1)
+
+    def test_settled_outcome_survives_contradictory_new_proposal(self):
+        _, _, event = self.task(); self.alias(event)
+        key, _ = self.seed(event)
+        self.history.effects.observe_wait(key, self.effect(key)['revision'], guard=self.history.guard)
+        before = dict(self.effect(key))
+        self.assertEqual(self.history.admit('remote', dict(event, id=uid(), text='Contradictory final'))['state'], 'rejected')
+        self.assertEqual(dict(self.effect(key)), before)
+        self.assertEqual(self.history.next_publication('coordinator', 0)['key'], key)
+
+    def test_terminal_refusal_replays_and_never_accepts_changed_wire(self):
+        for change in ('turn', 'body', 'task'):
+            with self.subTest(change=change):
+                _, _, good = self.task()
+                bad = dict(good, turn_id=uid())
+                first = self.history.admit('remote', bad, cursor=10)
+                self.assertEqual(first['state'], 'rejected')
+                self.assertEqual(self.history.admit('remote', bad, cursor=11), first)
+                corrected = dict(good)
+                if change == 'body':
+                    corrected['text'] = 'Changed valid narrative'
+                if change == 'task':
+                    _, _, another = self.task(); corrected = dict(another, id=good['id'])
+                self._history = EventHistory(self.store)
+                self.assertEqual(self.history.admit('remote', corrected, cursor=12)['state'], 'rejected')
+                self.assertEqual(self.store.rows('SELECT * FROM inbound WHERE id=?', (good['id'],)), [])
+                self.assertEqual(self.store.rows('SELECT value FROM cursors WHERE peer=?', ('remote',))[0]['value'], 12)
+                conflicts = self.store.rows('SELECT * FROM event_admission_conflicts WHERE wire_id=?', (good['id'],))
+                self.assertEqual(len(conflicts), 2)
+                self.assertNotEqual(conflicts[0]['raw_hash'], conflicts[1]['raw_hash'])
+
+    def test_terminal_refusal_and_cursor_roll_back_together(self):
+        _, _, event = self.task()
+        with self.store.transaction() as db:
+            db.execute("CREATE TRIGGER reject_cursor BEFORE INSERT ON cursors BEGIN SELECT RAISE(ABORT,'synthetic cursor failure'); END")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.history.admit('remote', dict(event, turn_id=uid()), cursor=3)
+        self.assertEqual(self.store.rows('SELECT * FROM event_admission_conflicts'), [])
+        with self.store.transaction() as db:
+            db.execute('DROP TRIGGER reject_cursor')
+        self.assertEqual(self.history.admit('remote', event, cursor=3)['state'], 'persisted')
+
     def test_initialization_opens_existing_home_without_rewriting_originals(self):
         _, _, event = self.task(); self.alias(event)
         before = self.store.rows('SELECT * FROM inbound')
@@ -341,6 +517,7 @@ class EventHistoryTests(unittest.TestCase):
         self.catalog(); key = canonical_key('remote', event['task_id'])
         self.history.seed_step(key)
         cursor = self.store.rows('SELECT cursor FROM event_seed_state')[0]['cursor']
+        attempts = self.store.rows('SELECT * FROM event_legacy_attempts')
         with self.store.transaction() as db:
             db.execute("CREATE TRIGGER fail_seed BEFORE UPDATE ON event_effects BEGIN SELECT RAISE(ABORT,'synthetic seed failure'); END")
         with self.assertRaises(sqlite3.IntegrityError):
@@ -348,7 +525,7 @@ class EventHistoryTests(unittest.TestCase):
         self.assertEqual(self.store.rows('SELECT cursor FROM event_seed_state')[0]['cursor'], cursor)
         self.assertFalse(self.effect(key)['seed_complete'])
         self.assertEqual(self.store.rows('SELECT * FROM event_publications'), [])
-        self.assertEqual(self.store.rows('SELECT * FROM event_legacy_attempts'), [])
+        self.assertEqual(self.store.rows('SELECT * FROM event_legacy_attempts'), attempts)
         with self.store.transaction() as db:
             db.execute('DROP TRIGGER fail_seed')
         self.assertEqual(self.history.seed_step(key)['state'], 'uncertain')
