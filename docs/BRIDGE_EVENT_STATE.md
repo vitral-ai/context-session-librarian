@@ -1,10 +1,11 @@
-# Event effect store primitives (inactive)
+# Shared event effect transactions (development)
 
-`csl_bridge_event_state.py` is a first, inert contribution to the event-identity
-fix. No production consumer imports it. It creates its additive tables only when
-explicitly constructed with an existing `Store`; opening a normal bridge home
-does not activate it. There is no CLI, transport change or runtime guarantee in
-this contribution.
+`csl_bridge_event_state.py` provides the per-home identity and effect transactions
+used by the development consumer integration. `Store` initializes its additive
+ID namespace on existing and new homes; `EventDelivery` establishes original
+correlation and historical classification before claims. The source adapters are
+tested with synthetic endpoints. No private/native deployment or compatibility
+claim for an untested provider follows from that integration.
 
 The primitives provide conditional Native claims, an atomic wait claim and
 observation, exact-home Native ID-purpose reservations, durable historical
@@ -38,19 +39,15 @@ Malformed history barriers commit with their eventual catalog watermark. A known
 peer scope blocks that peer; an unknown scope blocks the home. Original raw-body
 fingerprints remain intact. There is no body-derived narrowing or deletion API.
 
-The separate consumer integration must still implement and qualify:
+The shared consumer integration and its bounds are documented in
+[canonical event history](BRIDGE_EVENT_HISTORY.md). Native and wait share one
+claim; progress retains separate per-wire identity. Recovery revalidates actual
+recorded attempts and uses typed user-message evidence. The ordinary request
+recovery behavior remains separate and retains its existing limits.
 
-- Exact canonical admission and immutable alias fingerprints across both
-  transports; complete bounded 128-row catalog / 64-alias seed and old-state merge.
-- A single original-sequence final publication representative, distinct progress
-  entries and deferred-gap wait behavior, with atomic task-finalize/publication.
-- All ordinary Native-entry purpose checks in the same reservation transaction,
-  shared final claims, actual Native result handling and evidence-only recovery
-  in the attempted thread, retaining the 20/200-turn history ceilings.
-- Receipt/publication/recovery correlation, promotion revalidation, and the full
-  concurrency, crash, retention, tombstone, malformed-history, busy/disk-full and
-  old-home regression matrix. No old and new effect consumers may share a home
-  during eventual activation.
+A future deployment must coordinate every writer on a home. Old binaries cannot
+honor this namespace: never run old per-wire and new canonical effect consumers
+simultaneously against the same bridge.sqlite. A source PR is not that deployment.
 
 Identity, suppression and attempt evidence are append-only; this module adds no
 TTL, quota, pruning, lifecycle owner, controller access or scheduler. Source

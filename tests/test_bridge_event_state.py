@@ -45,10 +45,10 @@ class EventStateTests(unittest.TestCase):
         return {'state': 'delivered', 'request_id': claim['client_id'],
                 'thread_id': claim['thread'], 'turn_id': uid()}
 
-    def test_initialization_is_additive_idempotent_and_not_automatic(self):
+    def test_initialization_is_additive_and_idempotent_on_existing_home(self):
         other = Path(self.temp.name) / 'old-home'
         with closing(Store(other, create=True)) as store:
-            self.assertEqual(store.rows("SELECT name FROM sqlite_master WHERE name='event_effects'"), [])
+            self.assertEqual(store.rows("SELECT name FROM sqlite_master WHERE name='event_effects'"), [{'name': 'event_effects'}])
         with closing(Store(other)) as store:
             EventState(store); EventState(store)
             self.assertEqual(len(store.rows("SELECT name FROM sqlite_master WHERE name='event_effects'")), 1)

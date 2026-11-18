@@ -1,8 +1,10 @@
-# Bounded event history helpers (inactive)
+# Canonical event history and consumers
 
-This contribution builds on the event-state primitives. It remains unused by
-production consumers: no Native, transport or CLI path imports this module.
-It does not complete the event-delivery runtime fix or authorize private adoption.
+The history substrate supplies canonical final identity to the shared
+`EventDelivery` backend. Fallback ingress, light event dispatch, Native recovery
+and local wait use that backend. This source integration does not authorize a
+private deployment. Cutover must stop old per-wire writers for each home before
+opening it with the canonical consumer; mixed old/new writers are unsupported.
 
 The helper classifies existing inbound rows in 128-row transactions and commits
 its watermark with catalog fingerprints and any malformed-history barrier. A
@@ -79,15 +81,59 @@ one transaction. A later callback/recovery narrative conflict is inspectable and
 cannot replace the first publication. A completed turn is not evidence that the
 narrative's technical action succeeded.
 
+A task-specific publication contradiction parks that task, with one durable
+first/last fingerprint record, while independently valid sibling tasks and homes
+continue. Missing original proof retains one bounded, secret-screened completion
+proposal. Existing maintenance loops retry up to 32 such proposals on a rotating
+fixed horizon, using only bridge metadata and fresh original/turn/thread checks;
+this neither reads Native history nor sends user input. Permanent refusals do not
+re-enter Native recovery. Schema/home gates remain home scoped, and a storage
+failure is not converted into acceptance or a task-specific skip.
+
 The shared state primitives now accept the exact Store connection's already-open
-transaction plus a pure database correlation guard. This lets the next consumer
-contribution couple claims and reservations without nested transactions or holding
+transaction plus a pure database correlation guard. Consumers couple claims and reservations without nested transactions or holding
 SQLite across Native I/O. The guard and claim are tested together under failures.
 
-Still required before runtime activation: every ordinary/direct-light/mail Native
-ID-purpose hook, bounded retry/recovery driving, separate new-effect versus
-evidence-only Native adapters, and actual fallback/light/wait consumer integration.
-Those paths must preserve the 32 total/4 per-peer workers, existing backoff, 64-frame
-queues and 20/200-turn Native history ceilings. This helper performs no Native read
-or effect. Source tests use private real SQLite and synthetic records, including
-concurrency, interrupted batches, disk-full and write failures.
+Consumers reserve every ordinary, direct-light, mail and event Native client ID
+inside the recipient home's bridge transaction. A fresh final claim reserves a
+separate random Native client ID, marks uncertainty and records the actual attempt
+before releasing SQLite for the user-input call. An uncertain retry performs only
+an evidence lookup on the recorded thread/client ID; a missing or aged history
+match never permits reinjection. Only exact, unique typed user-message matches
+can settle an attempt. Matching legacy aliases are rechecked after history I/O.
+
+Wait observation and Native delivery compete for the same canonical claim. An
+explicit old cursor returns retained settled history without another effect.
+Client-only recipients and fallback recipients outside their existing activation
+policy remain persisted, and an empty narrative is
+receipt metadata rather than a Native acceptance. Progress remains a separate
+per-wire purpose and cannot borrow an ordinary operation's Native client ID.
+
+Local classification uses the 128-row catalog, 64-alias seed and rotating 32-job
+windows. A client-only wait continues known local batches at a paced 10 ms
+interval within its original deadline, reserving a seed slot for its recipient's
+earliest gap. Unknown originals, home barriers and uncertain acceptance still
+hold the cursor and wait for external evidence; they do not trigger busy polling.
+Light recovery shares the existing 32 total/4 per-peer worker pool and
+monotonic retry backoff; transport frame queues and 20/200-turn history ceilings
+are unchanged. Native calls never hold a bridge transaction or another home's
+lock. Tests use private SQLite and synthetic Native endpoints, not live agents.
+
+The existing peer-scoped `receipt` operation reads the current canonical outcome
+without driving Native recovery. Its `result.delivery` distinguishes pending,
+uncertain, wait delivery, actual Native delivery and legacy suppression;
+`result.native_accepted` is true only for actual typed Native acceptance. A
+`native_receipt` records the local attempted client ID/thread/accepted turn, not
+the delegated task's remote accepted turn. An RPC persistence ACK is not that
+receipt. Existing peer receipt ACLs still apply, including routed logical aliases.
+
+Progress retains independent original proof and historical thread snapshots too.
+An unknown old attempted thread is never filled from a later registration or a
+restored original. Light recovery only schedules peers owned by configured light
+links; legacy-only work retains the connector's existing activation rules.
+
+Qualification uses private real SQLite and fake app-server endpoints: actual
+fallback/light/wait adapters, same/new wire aliases, aged 20/200-turn histories,
+missing proof, typed/ambiguous acceptance, source/route/ID-purpose conflicts,
+client-only/empty results, concurrent claims, post-input write failure and four
+subprocess exit boundaries. No real model/runtime/provider deployment is tested.

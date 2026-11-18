@@ -188,6 +188,7 @@ class MaintenanceOrder(unittest.TestCase):
         node.schedule = lambda *args: calls.append(('schedule', args))
         node.finish_pending = finish_pending
         node.queue_events = lambda: calls.append(('queue_events',))
+        node.maintain_events = lambda: calls.append(('maintain_events',))
         node.agents = lambda: calls.append(('agents',)) or {'worker': 'thread'}
         stopped = threading.Event()
         def wait(seconds):
@@ -199,9 +200,9 @@ class MaintenanceOrder(unittest.TestCase):
             node.retry_loop()
         self.assertEqual([item[0] for item in calls], [
             'prune', 'sync_links', 'pending', 'schedule', 'finish_pending',
-            'queue_events', 'agents', 'route', 'wait',
+            'queue_events', 'maintain_events', 'agents', 'route', 'wait',
             'sync_links', 'pump_local', 'pending', 'schedule', 'finish_pending',
-            'queue_events', 'agents', 'route', 'wait'])
+            'queue_events', 'maintain_events', 'agents', 'route', 'wait'])
         self.assertEqual([item for item in calls if item[0] == 'prune'], [('prune', 1)])
         self.assertEqual([item for item in calls if item[0] == 'wait'], [('wait', 1), ('wait', 1)])
         self.assertEqual([call.args[0] for call in log.call_args_list], [
