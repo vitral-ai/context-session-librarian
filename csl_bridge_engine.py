@@ -53,13 +53,54 @@ def confirm_event_turn(request, state, receipt, event):
     return True
 
 
+def completion_proposal(thread, turn_id, status, answer):
+    from csl_bridge_event_history import publication_text
+    try:
+        identifier(thread); identifier(turn_id)
+        if status not in ('completed', 'failed', 'interrupted') or not isinstance(answer, str) or len(answer) > 12000:
+            return None
+        return {'thread': thread, 'turn': turn_id, 'status': status, 'text': publication_text(answer)}
+    except BridgeError:
+        return None
+
+
+def publish_proposal(history, task_id, proposal):
+    from csl_bridge_event_history import PublicationConflict, PublicationDeferred
+    if proposal is None:
+        history.hold_publication(task_id, 'conflict', 'Malformed Native completion proposal')
+        return
+    try:
+        result = history.publish_final(task_id, proposal['thread'], proposal['status'], proposal['text'], expected_turn=proposal['turn'])
+        if result['state'] == 'conflict':
+            history.hold_publication(task_id, 'conflict', 'Final narrative/status changed')
+    except PublicationConflict as error:
+        history.hold_publication(task_id, 'conflict', str(error))
+    except PublicationDeferred as error:
+        history.hold_publication(task_id, 'deferred', str(error), proposal)
+
+
 def publish_task_completion(store, agent, thread, turn_id, status, answer):
-    """Shared native completion publisher for connectors and light receivers."""
+    """One task's refusal never becomes another task's publication decision."""
+    from csl_bridge_event_history import EventHistory
+    history = EventHistory(store)  # Home/schema failures remain home scoped.
+    identifier(turn_id)  # A missing turn must not broaden the task selector.
+    proposal = completion_proposal(thread, turn_id, status, answer)
+    for task in history.publication_tasks(agent, turn_id):
+        publish_proposal(history, task['id'], proposal)
+
+
+def retry_publications(store):
+    """Paced by existing loops; at most 32 cached proposals, no Native reads."""
     from csl_bridge_event_history import EventHistory
     history = EventHistory(store)
-    tasks = store.rows("SELECT id FROM tasks WHERE target=? AND turn=? AND status IN ('running','pending')", (agent, turn_id))
-    for task in tasks:
-        history.publish_final(task['id'], thread, status, answer)
+    for row in history.publication_retries():
+        try:
+            value = decode(row['proposal'])
+            proposal = (completion_proposal(value['thread'], value['turn'], value['status'], value['text'])
+                        if isinstance(value, dict) and set(value) == {'thread', 'turn', 'status', 'text'} else None)
+        except (BridgeError, TypeError, KeyError):
+            proposal = None
+        publish_proposal(history, row['task'], proposal)
 
 
 class Connector:
@@ -186,6 +227,7 @@ class Connector:
                 'last_task': last[0] if last else None}
 
     def runtime_loop(self):
+        from csl_bridge_event_state import EventConflict
         while not self.stop.is_set():
             runtime = None
             try:
@@ -210,6 +252,7 @@ class Connector:
                         msg = runtime.events.get(timeout=.5)
                     except queue.Empty:
                         self.maintain_events()
+                        retry_publications(self.store)
                         continue
                     method, params = msg.get('method'), msg.get('params', {})
                     if 'id' in msg:
@@ -231,7 +274,7 @@ class Connector:
                             if self.turns.get(thread) == tid:
                                 self.turns.pop(thread, None)
                             self.completed(agent, tid, params['turn']['status'])
-            except (BridgeError, RuntimeUnavailable, RuntimeRejected, OSError, KeyError, sqlite3.Error):
+            except (BridgeError, EventConflict, RuntimeUnavailable, RuntimeRejected, OSError, KeyError, sqlite3.Error):
                 pass
             finally:
                 if self.runtime is runtime:
@@ -421,7 +464,8 @@ class Connector:
                 self.deliver_event(row)
 
     def completed(self, agent, tid, status):
-        tasks = self.store.rows("SELECT * FROM tasks WHERE target=? AND turn=? AND status IN ('running','pending')", (agent, tid))
+        identifier(tid)
+        tasks = self.events.history.publication_tasks(agent, tid)
         if not tasks:
             self.answers.pop((self.agents[agent], tid), None)
             return
@@ -439,10 +483,11 @@ class Connector:
 
     def reconcile(self, flush_pending=True):
         self.maintain_events()
+        retry_publications(self.store)
         # Join first, then recover effects using native client message IDs. Missing
         # evidence remains uncertain; never auto-repeat an invocation.
         for agent, thread in self.agents.items():
-            uncertain_ops = [row for row in self.store.rows("SELECT id,peer,request FROM operations WHERE state='uncertain'")
+            uncertain_ops = [row for row in self.store.rows("SELECT id,peer,request FROM operations WHERE state='uncertain' AND NOT EXISTS(SELECT 1 FROM event_publication_holds h WHERE h.task=operations.id AND h.state='conflict')")
                              if not row['peer'].startswith('outbound:') and decode(row['request']).get('op') != 'mail'
                              and decode(row['request']).get('target') == agent]
             # Repair only local crash windows with an already-confirmed native turn.
@@ -452,7 +497,7 @@ class Connector:
                 if result.get('turn_id') and result.get('thread_id') == thread:
                     with self.store.transaction() as db:
                         db.execute("UPDATE tasks SET turn=?,status='running' WHERE id=?", (result['turn_id'], task['id']))
-            unfinished_tasks = self.store.rows("SELECT turn FROM tasks WHERE target=? AND status IN ('running','pending') AND turn IS NOT NULL", (agent,))
+            unfinished_tasks = [task for task in self.events.history.publication_tasks(agent, include_cached=False) if task['turn'] is not None]
             if not (uncertain_ops or unfinished_tasks):
                 if flush_pending:
                     with self.locks[agent]:
@@ -477,7 +522,7 @@ class Connector:
                 self.store.operation(row['id'], 'delivered', result)
                 with self.store.transaction() as db:
                     db.execute("UPDATE tasks SET turn=?,status='running' WHERE id=?", (tid, row['id']))
-            recover_turns = {row['turn'] for row in self.store.rows("SELECT turn FROM tasks WHERE target=? AND status IN ('running','pending')", (agent,))}
+            recover_turns = {row['turn'] for row in self.events.history.publication_tasks(agent, include_cached=False)}
             for turn in turns:
                 if turn['id'] in recover_turns and turn['status'] in ('completed', 'interrupted', 'failed'):
                     self.answers[(thread, turn['id'])] = '\n'.join(i.get('text', '') for i in turn.get('items', [])
@@ -750,13 +795,18 @@ class Connector:
                 try:
                     while True:
                         from csl_bridge_event_state import EventDeferred
+                        from csl_bridge_event_delivery import EventLocalWork
+                        local_pending = False
                         try:
                             result = self.events.observe(agent, request['after'])
+                        except EventLocalWork:
+                            result, local_pending = None, True
                         except EventDeferred:
                             result = None
                         if result or self.stop.is_set() or time.monotonic() >= deadline:
                             return {'notice': NOTICE, 'events': [result] if result else []}
-                        self.changed.wait(max(.01, deadline - time.monotonic()))
+                        remaining = max(0, deadline - time.monotonic())
+                        self.changed.wait(min(.01, remaining) if local_pending else remaining)
                 finally:
                     self.waiters[agent] -= 1
         raise BridgeError('Unknown local operation')

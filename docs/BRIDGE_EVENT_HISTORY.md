@@ -81,6 +81,15 @@ one transaction. A later callback/recovery narrative conflict is inspectable and
 cannot replace the first publication. A completed turn is not evidence that the
 narrative's technical action succeeded.
 
+A task-specific publication contradiction parks that task, with one durable
+first/last fingerprint record, while independently valid sibling tasks and homes
+continue. Missing original proof retains one bounded, secret-screened completion
+proposal. Existing maintenance loops retry up to 32 such proposals on a rotating
+fixed horizon, using only bridge metadata and fresh original/turn/thread checks;
+this neither reads Native history nor sends user input. Permanent refusals do not
+re-enter Native recovery. Schema/home gates remain home scoped, and a storage
+failure is not converted into acceptance or a task-specific skip.
+
 The shared state primitives now accept the exact Store connection's already-open
 transaction plus a pure database correlation guard. Consumers couple claims and reservations without nested transactions or holding
 SQLite across Native I/O. The guard and claim are tested together under failures.
@@ -101,7 +110,11 @@ receipt metadata rather than a Native acceptance. Progress remains a separate
 per-wire purpose and cannot borrow an ordinary operation's Native client ID.
 
 Local classification uses the 128-row catalog, 64-alias seed and rotating 32-job
-windows. Light recovery shares the existing 32 total/4 per-peer worker pool and
+windows. A client-only wait continues known local batches at a paced 10 ms
+interval within its original deadline, reserving a seed slot for its recipient's
+earliest gap. Unknown originals, home barriers and uncertain acceptance still
+hold the cursor and wait for external evidence; they do not trigger busy polling.
+Light recovery shares the existing 32 total/4 per-peer worker pool and
 monotonic retry backoff; transport frame queues and 20/200-turn history ceilings
 are unchanged. Native calls never hold a bridge transaction or another home's
 lock. Tests use private SQLite and synthetic Native endpoints, not live agents.

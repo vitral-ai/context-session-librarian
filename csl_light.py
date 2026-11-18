@@ -871,24 +871,33 @@ class Node:
     def finish_pending(self):
         """Recover native completions even without a separately running connector."""
         from csl_bridge_store import Store
-        from csl_bridge_engine import publish_task_completion
+        from csl_bridge_engine import publish_task_completion, retry_publications
+        from csl_bridge_event_history import EventHistory
+        from csl_bridge_event_state import EventConflict, EventDeferred
+        from csl_bridge_rpc import RuntimeRejected, RuntimeUnavailable
         for bridge in self.config['bridges'].values():
             home = bridge['home']
-            store = Store(home)
+            store = None
             try:
-                pending = store.rows("SELECT target,turn FROM tasks WHERE status IN ('running','pending') AND turn IS NOT NULL")
-                for agent in {row['target'] for row in pending} & set(bridge['agents']):
+                store = Store(home)
+                retry_publications(store)
+                pending = [task for task in EventHistory(store).publication_tasks(include_cached=False) if task['turn'] is not None]
+                agents = {name: thread for name, thread in store.agents().items() if name in bridge['agents']}
+                for agent in {row['target'] for row in pending} & set(agents):
                     client = self.native.client(home)
                     if client is None:
                         continue
-                    turns = client.call('thread/turns/list',{'threadId':self.agents()[agent],'limit':20,'itemsView':'full','sortDirection':'desc'})['data']
+                    turns = client.call('thread/turns/list',{'threadId':agents[agent],'limit':20,'itemsView':'full','sortDirection':'desc'})['data']
                     wanted = {r['turn']for r in pending if r['target']==agent}
                     for turn in turns:
                         if turn['id'] in wanted and turn['status'] in ('completed','failed','interrupted'):
                             answer = '\n'.join(item.get('text','')for item in turn.get('items',[])if item.get('type')=='agentMessage')[-12000:]
-                            publish_task_completion(store,agent,self.agents()[agent],turn['id'],turn['status'],answer)
+                            publish_task_completion(store,agent,agents[agent],turn['id'],turn['status'],answer)
+            except (EventConflict, EventDeferred, ValueError, RuntimeRejected, RuntimeUnavailable, OSError, sqlite3.Error) as error:
+                log('publication_home_deferred', error=type(error).__name__)
             finally:
-                store.close()
+                if store is not None:
+                    store.close()
 
     def queue_events(self):
         """Push existing CSL progress/final envelopes through the durable stream."""

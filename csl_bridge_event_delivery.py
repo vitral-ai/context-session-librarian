@@ -5,6 +5,10 @@ from csl_bridge_store import decode, encode, identifier, name
 from csl_bridge_rpc import RuntimeRejected, RuntimeUnavailable
 
 
+class EventLocalWork(EventDeferred):
+    """Another paced local batch can progress without external evidence."""
+
+
 class EventDelivery:
     def __init__(self, store):
         self.store = store
@@ -362,16 +366,33 @@ class EventDelivery:
             db.execute('UPDATE event_delivery_jobs SET dirty=0 WHERE key=?', ('progress:' + wire_id,))
 
     def observe(self, agent, after):
-        jobs = self.housekeeping()
-        if self.history.complete(self.store.db):
-            for job in jobs:
-                if job['kind'] == 'final':
-                    self.history.seed_step(job['key'])
+        # Reserve one of the 32 seed slots for this recipient's earliest gap;
+        # other dirty jobs retain their rotating scan rather than being skipped.
+        jobs = self.housekeeping(limit=31)
+        with self.store.transaction() as db:
+            if not self.history.complete(db):
+                raise EventLocalWork('Bounded local catalog work remains')
+            watermark = db.execute('SELECT watermark FROM event_delivery_meta WHERE id=1').fetchone()[0]
+            tail = db.execute('SELECT max(seq) FROM event_catalog').fetchone()[0]
+            local_pending = watermark != tail
+            gap = db.execute("SELECT g.key,e.seed_complete,e.state FROM event_final_gaps g LEFT JOIN event_effects e ON e.key=g.key WHERE g.target=? AND g.seq>? AND NOT EXISTS(SELECT 1 FROM event_publications p WHERE p.key=g.key AND p.kind='final' AND p.visible=0) ORDER BY g.seq LIMIT 1", (agent, after)).fetchone()
+            needed = gap and (gap['seed_complete'] != 1 or gap['state'] == 'deferred')
+            if needed and not any(job['key'] == gap['key'] for job in jobs):
+                jobs.append({'kind': 'final', 'key': gap['key']})
+        for job in jobs:
+            if job['kind'] == 'final':
+                seeded = self.history.seed_step(job['key'])
+                local_pending |= not seeded['complete'] and seeded['processed'] > 0
         row = None
+        hidden = 0
         for _ in range(32):
             try:
                 row = self.history.next_publication(agent, after, progress_guard=self.progress_guard)
                 break
+            except EventDeferred:
+                if local_pending or hidden:
+                    raise EventLocalWork('Bounded local seed or job work remains') from None
+                raise
             except EventConflict as error:
                 if not hasattr(error, 'event_seq'):
                     raise
@@ -380,7 +401,10 @@ class EventDelivery:
                     # invisible representative as well as the raw refusal.
                     db.execute('INSERT INTO event_publications(seq,wire_id,kind,key,target,visible) SELECT c.seq,c.wire_id,c.kind,c.key,?,0 FROM event_catalog c WHERE c.seq=? ON CONFLICT(seq)DO UPDATE SET visible=0', (agent, error.event_seq))
                     db.execute("UPDATE inbound SET delivery='rejected' WHERE seq=?", (error.event_seq,))
+                hidden += 1
         if row is None:
+            if local_pending or hidden == 32:
+                raise EventLocalWork('Bounded local publication work remains')
             return None
         if row['kind'] == 'progress':
             with self.store.transaction() as db:

@@ -41,6 +41,20 @@ def canonical_key(peer, task):
     return digest([peer, task, 'final'])
 
 
+class PublicationConflict(EventConflict):
+    """A known task-specific final publication refusal."""
+
+
+class PublicationDeferred(EventDeferred):
+    """A task-specific final lacks independent publication evidence."""
+
+
+def publication_text(text):
+    from csl_bridge_store import contains_findings
+    return ('Result text withheld by partial secret detection. Review selected evidence locally; completion alone is not validation.'
+            if contains_findings(text) else text)
+
+
 class EventHistory:
     def __init__(self, store):
         self.store = store
@@ -93,6 +107,14 @@ class EventHistory:
                     peer TEXT NOT NULL,wire_id TEXT NOT NULL,task TEXT NOT NULL,
                     raw_hash TEXT NOT NULL,state TEXT NOT NULL,seq INTEGER,reason TEXT,
                     PRIMARY KEY(peer,wire_id))''',
+                '''CREATE TABLE IF NOT EXISTS event_publication_holds(
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,task TEXT UNIQUE NOT NULL,state TEXT NOT NULL,
+                    first_reason TEXT NOT NULL,first_evidence TEXT NOT NULL,
+                    reason TEXT NOT NULL,evidence TEXT NOT NULL,proposal TEXT)''',
+                'CREATE INDEX IF NOT EXISTS event_publication_retry ON event_publication_holds(state,seq)',
+                '''CREATE TABLE IF NOT EXISTS event_publication_scan(
+                    id INTEGER PRIMARY KEY CHECK(id=1),after_seq INTEGER NOT NULL,horizon INTEGER NOT NULL)''',
+                'INSERT OR IGNORE INTO event_publication_scan VALUES(1,0,0)',
                 '''CREATE TABLE IF NOT EXISTS event_final_conflicts(
                     task TEXT NOT NULL,wire_id TEXT NOT NULL,raw_hash TEXT NOT NULL,
                     reason TEXT NOT NULL,PRIMARY KEY(task,wire_id,raw_hash,reason))''',
@@ -661,37 +683,93 @@ class EventHistory:
             raise
 
 
-    def publish_final(self, task_id, thread, status, text):
-        """Freeze first exact final and finalize task in one bridge transaction."""
-        from csl_bridge_store import contains_findings
-        if contains_findings(text):
-            text = 'Result text withheld by partial secret detection. Review selected evidence locally; completion alone is not validation.'
+    def publication_tasks(self, agent=None, turn=None, *, include_cached=True):
+        query = "SELECT tasks.* FROM tasks WHERE status IN ('running','pending') AND NOT EXISTS(SELECT 1 FROM event_publication_holds h WHERE h.task=tasks.id AND (h.state='conflict'" + (" OR (h.state='deferred' AND h.proposal IS NOT NULL)" if not include_cached else '') + '))'
+        args = []
+        for column, value in (('target', agent), ('turn', turn)):
+            if value is not None:
+                query += ' AND ' + column + '=?'; args.append(value)
+        return self.store.rows(query, tuple(args))
+
+    def hold_publication(self, task_id, state, reason, proposal=None):
+        """At most first/last scoped evidence and one bounded safe proposal per task."""
+        if state not in ('conflict', 'deferred'):
+            raise ValueError('Invalid publication hold')
+        reason = reason[:256]
+        with self.store.transaction() as db:
+            self.complete(db)  # A home/schema gate is never converted to a task hold.
+            old = db.execute('SELECT * FROM event_publication_holds WHERE task=?', (task_id,)).fetchone()
+            if old and (old['state'] != 'deferred' or state == 'deferred' and (old['proposal'] is not None or proposal is None)):
+                return
+            task = db.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
+            original = db.execute('SELECT * FROM operations WHERE id=?', (task_id,)).fetchone()
+            evidence = digest([[sqlite_fingerprint(row[key]) for key in row.keys()] if row else None for row in (task, original)])
+            encoded = encode(proposal) if proposal is not None else None
+            db.execute('INSERT INTO event_publication_holds(task,state,first_reason,first_evidence,reason,evidence,proposal)VALUES(?,?,?,?,?,?,?) ON CONFLICT(task)DO UPDATE SET state=excluded.state,reason=excluded.reason,evidence=excluded.evidence,proposal=coalesce(event_publication_holds.proposal,excluded.proposal)',
+                       (task_id, state, reason, evidence, reason, evidence, encoded))
+
+    def publication_retries(self, limit=32):
+        if type(limit) is not int or not 1 <= limit <= 32:
+            raise ValueError('Publication retry batch must contain 1..32 tasks')
         with self.store.transaction() as db:
             self.complete(db)
+            after, horizon = db.execute('SELECT after_seq,horizon FROM event_publication_scan WHERE id=1').fetchone()
+            maximum = db.execute('SELECT coalesce(max(seq),0) FROM event_publication_holds').fetchone()[0]
+            horizon = horizon or maximum
+            rows = db.execute("SELECT * FROM event_publication_holds WHERE state='deferred' AND proposal IS NOT NULL AND seq>? AND seq<=? ORDER BY seq LIMIT ?", (after, horizon, limit)).fetchall()
+            if len(rows) < limit:
+                after, horizon = 0, maximum
+            else:
+                after = rows[-1]['seq']
+            db.execute('UPDATE event_publication_scan SET after_seq=?,horizon=? WHERE id=1', (after, horizon))
+            return [dict(row) for row in rows]
+
+    def publish_final(self, task_id, thread, status, text, *, expected_turn=None):
+        """Freeze first exact final and finalize task in one bridge transaction."""
+        text = publication_text(text)
+        with self.store.transaction() as db:
+            self.complete(db)
+            if db.execute("SELECT 1 FROM event_publication_holds WHERE task=? AND state='conflict'", (task_id,)).fetchone():
+                raise PublicationConflict('Previous task publication refusal')
             task = db.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
             if not task or not task['turn']:
-                raise EventDeferred('No independently accepted task turn')
+                raise PublicationDeferred('No independently accepted task turn')
+            if expected_turn is not None and task['turn'] != expected_turn:
+                raise PublicationConflict('Completion turn changed before publication')
+            try:
+                identifier(task_id); identifier(task['turn'])
+            except BridgeError as error:
+                raise PublicationConflict('Malformed task publication identity') from error
             wire_id = event_id(task_id + '/' + task['turn'] + '/final')
             event = {'id': wire_id, 'task_id': task_id, 'source': task['target'], 'target': task['source'],
                      'kind': 'final', 'text': text, 'turn_id': task['turn'], 'status': status, 'session': thread}
-            validate_event(event)
+            try:
+                validate_event(event)
+            except BridgeError as error:
+                raise PublicationConflict(str(error)) from error
             original = db.execute('SELECT * FROM operations WHERE id=? AND peer=?', (task_id, task['peer'])).fetchone()
             if not original:
-                raise EventDeferred('Original task receipt is missing')
+                raise PublicationDeferred('Original task receipt is missing')
             if not original_text_cells(original):
-                raise EventConflict('Original task SQLite storage class differs')
-            request = decode(original['request']); receipt = decode(original['result']) if original['result'] else {}
+                raise PublicationConflict('Original task SQLite storage class differs')
+            try:
+                request = decode(original['request']); validate(request)
+                receipt = decode(original['result']) if original['result'] else {}
+                if not isinstance(receipt, dict):
+                    raise BridgeError('Invalid original publication receipt')
+            except (BridgeError, TypeError, AttributeError) as error:
+                raise PublicationConflict('Malformed original publication proof') from error
             if raw_hash(original['request']) != original['hash']:
-                raise EventConflict('Original task fingerprint differs')
+                raise PublicationConflict('Original task fingerprint differs')
             try:
                 confirmed = confirm_event_turn(request, original['state'], receipt, event)
             except BridgeError as error:
-                raise EventConflict(str(error)) from error
+                raise PublicationConflict(str(error)) from error
             if not confirmed:
-                raise EventDeferred('Original task Native receipt is unconfirmed')
+                raise PublicationDeferred('Original task Native receipt is unconfirmed')
             registered = db.execute('SELECT thread FROM agents WHERE name=?', (task['target'],)).fetchone()
             if not registered or registered[0] != thread or receipt.get('thread_id', thread) != thread:
-                raise EventConflict('Native completion thread binding differs')
+                raise PublicationConflict('Native completion thread binding differs')
             body = encode(event)
             old = db.execute('SELECT peer,body FROM outbound WHERE id=?', (wire_id,)).fetchone()
             if old and (old['peer'], old['body']) != (task['peer'], body):
@@ -699,7 +777,8 @@ class EventHistory:
                            (task_id, wire_id, raw_hash(body), 'Final narrative/status changed'))
                 return {'state': 'conflict', 'event_id': wire_id}
             if not old and task['status'] not in ('running', 'pending'):
-                raise EventDeferred('Terminal legacy task has no durable final publication')
+                raise PublicationDeferred('Terminal legacy task has no durable final publication')
             db.execute('INSERT OR IGNORE INTO outbound(id,peer,body)VALUES(?,?,?)', (wire_id, task['peer'], body))
             db.execute('UPDATE tasks SET status=? WHERE id=?', (status, task_id))
+            db.execute("UPDATE event_publication_holds SET state='published' WHERE task=? AND state='deferred'", (task_id,))
             return {'state': 'published', 'event_id': wire_id}
