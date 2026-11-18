@@ -13,6 +13,10 @@ class DurableError(ValueError):
     pass
 
 
+class MissingMetadata(FileNotFoundError):
+    """Only a proven absence at initial open, never an observed record loss."""
+
+
 def directory(fd):
     """Check the actual held directory AND every non-writable ancestor."""
     info = os.fstat(fd)
@@ -51,12 +55,19 @@ def regular(fd):
 def locked(fd, check):
     directory(fd)
     check()
-    lock = os.open('operation.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=fd)
+    lock = os.open('operation.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, 0o600, dir_fd=fd)
     try:
         regular(lock)
         check()
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         directory(fd)
+        held = regular(lock)
+        try:
+            named = os.stat('operation.lock', dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            raise DurableError('execution_lock_uncertain') from None
+        if (named.st_dev, named.st_ino) != (held.st_dev, held.st_ino):
+            raise DurableError('execution_lock_replaced')
         check()
         yield
     finally:
@@ -66,7 +77,10 @@ def locked(fd, check):
 def read(fd, name, limit):
     _name(name)
     directory(fd)
-    src = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+    try:
+        src = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=fd)
+    except FileNotFoundError:
+        raise MissingMetadata('execution_metadata_missing') from None
     try:
         before = regular(src)
         if before.st_size > limit:
@@ -74,7 +88,10 @@ def read(fd, name, limit):
         with os.fdopen(os.dup(src), 'rb') as stream:
             raw = stream.read(limit + 1)
         after = regular(src)
-        named = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        try:
+            named = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            raise DurableError('execution_metadata_uncertain') from None
         if (named.st_dev, named.st_ino) != (after.st_dev, after.st_ino):
             raise DurableError('execution_metadata_replaced')
         if len(raw) > limit or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):

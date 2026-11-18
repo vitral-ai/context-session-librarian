@@ -27,7 +27,9 @@ SHRINK/SEAL seals, then hands only that stable object to ZIP validation. A
 same-inode same-size rewrite to another valid archive refuses. Later mutation
 of the original does not change the capture; writes to the capture get EPERM.
 The memfd is volatile, has nlink0, is closed by its owner, and proves no durable
-staging or cold-publication outcome. No network or fallback pathname is read.
+staging or cold-publication outcome. No network or fallback pathname is read. The original checker repeats after
+sealing and final qualification before the owned capture is exposed; every failed
+completion closes its raw or wrapped memfd.
 
 `plan` runs the existing bundle validators against that sealed FD and requires
 one raw Codex or Claude source. For referenced Codex histories it reuses the
@@ -48,7 +50,11 @@ backup APIs are unchanged. No foreign directory is repaired or adopted.
 separately checked current metadata-read bound. It returns only a validated
 `reserved` row, no imported result. Unknown fsync acknowledgement retains its
 exact final reference rather than rolling it back or manufacturing a new child.
-Missing or replaced/linked/insecure records refuse. There is no TTL or actor.
+Only a dedicated missing-at-initial-open result can admit first creation.
+Disappearance after observing a row remains uncertain and cannot allocate another
+map. All metadata opens are nonblocking before regular-file/mode/owner/link
+qualification; a FIFO cannot hold a lookup hostage. Replaced/linked/insecure
+records refuse. There is no TTL or actor.
 
 Still required: reviewed identity-owned target proof and person authority;
 actual Go/Python FD launch/lifetime/EOF/revocation/backpressure qualification;

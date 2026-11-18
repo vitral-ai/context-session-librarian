@@ -20,7 +20,7 @@ MAX_FILE=2*1024**3
 MAX_TOTAL=4*1024**3
 
 
-def validate(archive):
+def validate(archive, *, check=None):
     infos=archive.infolist();names=[i.filename for i in infos]
     if len(infos)>10000 or len(names)!=len(set(names)) or 'manifest.json' not in names:
         raise ValueError('invalid_native_file_members')
@@ -84,15 +84,27 @@ def validate(archive):
             csl_codex_history.validate_graph(entry)
     if set(names)!=expected or total>MAX_TOTAL:
         raise ValueError('unexpected_or_oversized_native_package')
-    # Inspection validates every checksum, not only names or a sender manifest.
-    for entry in sessions:
-        for item in entry['files']:
-            digest=hashlib.sha256()
-            with archive.open(item['file']) as stream:
-                for chunk in iter(lambda:stream.read(1024*1024),b''):digest.update(chunk)
-            if digest.hexdigest()!=item['sha256']:
-                raise ValueError('native_checksum_mismatch')
+    # One checksum reader for ordinary v3 and guarded private legacy/v3 plans.
+    verify_members(archive, (item for entry in sessions for item in entry['files']), check=check)
     return manifest
+
+
+def verify_members(archive, items, *, check=None):
+    for item in items:
+        if check:check()
+        digest=hashlib.sha256();size=0
+        with archive.open(item['file']) as stream:
+            while True:
+                if check:check()
+                chunk=stream.read(1024*1024)
+                if check:check()
+                if not chunk:break
+                size+=len(chunk)
+                if size>item['bytes']:raise ValueError('native_checksum_mismatch')
+                digest.update(chunk)
+        if size!=item['bytes'] or digest.hexdigest()!=item['sha256']:
+            raise ValueError('native_checksum_mismatch')
+        if check:check()
 
 
 def export_native(provider,native_id,destination,*,home=None,allow_secrets=False):

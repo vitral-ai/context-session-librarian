@@ -126,6 +126,7 @@ def capture(fd, req, check, max_bytes):
         raise ExecutionError('execution_package_fd_invalid')
     check()
     out = os.memfd_create('csl-execution-capture', os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    stream = None
     try:
         os.fchmod(out, 0o600)
         digest, offset = hashlib.sha256(), 0
@@ -152,11 +153,17 @@ def capture(fd, req, check, max_bytes):
             raise ExecutionError('execution_package_changed')
         check()
         fcntl.fcntl(out, fcntl.F_ADD_SEALS, fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
-        result = Capture(os.fdopen(out, 'rb'), digest.hexdigest(), offset)
+        check()
+        stream = os.fdopen(out, 'rb')
         out = -1
+        result = Capture(stream, digest.hexdigest(), offset)
         result.rewind()
+        check()
+        stream = None  # Ownership transfers only after ALL final qualifications.
         return result
     finally:
+        if stream is not None:
+            stream.close()
         if out >= 0:
             os.close(out)
 
@@ -168,7 +175,7 @@ def plan(captured, req, check, staging_fd):
     if captured.sha != req.value['package_sha256'] or captured.size != req.value['package_size']:
         raise ExecutionError('execution_capture_conflict')
     with zipfile.ZipFile(captured.rewind()) as archive:
-        manifest = inspect_bundle(archive)
+        manifest = inspect_bundle(archive, check=check)
         check()
         sessions = manifest['sessions']
         v = req.value
@@ -177,6 +184,8 @@ def plan(captured, req, check, staging_fd):
         entry = sessions[0]
         graph = entry.get('codex_history')
         if graph:
+            if any(node['file_name'].endswith('.zst') for node in graph['nodes']):
+                raise ExecutionError('execution_compressed_graph_unsupported')
             import csl_codex_history as history
             check()
             with tempfile.TemporaryDirectory(prefix='.graph-', dir=f'/proc/self/fd/{staging_fd}') as scratch:
@@ -223,8 +232,17 @@ def _intent_key(req):
 
 
 def lookup(fd, req, check):
+    return _lookup(fd, req, check)
+
+
+def _lookup(fd, req, check, *, initial_absence=False):
     check()
-    raw = durable.read(fd, req.value['import_key'] + '.json', MAX_MESSAGE)
+    try:
+        raw = durable.read(fd, req.value['import_key'] + '.json', MAX_MESSAGE)
+    except durable.MissingMetadata:
+        if initial_absence:
+            return None
+        raise
     row = strict_json(raw)
     if not isinstance(row, dict) or set(row) != {'v', 'revision', 'intent', 'plan', 'state'} or type(row['v']) is not int or row['v'] != 1 or type(row['revision']) is not int or row['revision'] != 1 or not isinstance(row['intent'], dict) or {k:v for k,v in row['intent'].items() if k != 'authority'} != {k:v for k,v in _intent_key(req).items() if k != 'authority'} or row['state'] != 'reserved':
         raise ExecutionError('execution_journal_conflict')
@@ -240,10 +258,9 @@ def reserve(fd, req, prepared, check):
         raise ExecutionError('execution_plan_conflict')
     prepared = _plan(strict_json(canonical(prepared)), req)
     with durable.locked(fd, check):
-        try:
-            prior = lookup(fd, req, check)
-        except FileNotFoundError:
-            prior = None
+        # Only the raw reader's initial-open result can authorize first use;
+        # an authority checker raising a similar error is never absence.
+        prior = _lookup(fd, req, check, initial_absence=True)
         if prior is not None:
             if prior['intent'] != _intent_key(req):
                 raise ExecutionError('execution_original_bound_changed')
