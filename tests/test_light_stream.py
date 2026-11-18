@@ -257,6 +257,26 @@ class StreamTests(unittest.TestCase):
             for sock in sockets:sock.close()
             relay.join(1)
 
+    def test_three_hundred_unresolved_frames_do_not_hide_new_message(self):
+        self.host.schedule=lambda *args:None  # Persist+ACK, destination remains offline.
+        for _ in range(300):
+            request={'version':1,'op':'followup','id':str(uuid.uuid4()),
+                     'source':'worker','target':'offline','text':'queued forward'}
+            self.guest.journal.put('out','hub',request['id'],{'type':'request',
+                'id':request['id'],'request':request,'origin':'env-a'})
+        newest={'version':1,'op':'followup','id':str(uuid.uuid4()),
+                'source':'worker','target':'coordinator','text':'new online recipient'}
+        self.guest.journal.put('out','hub',newest['id'],{'type':'request',
+            'id':newest['id'],'request':newest,'origin':'env-a'})
+        self.connect()
+        until=time.monotonic()+8
+        while time.monotonic()<until and self.host.journal.get('in','env-a',newest['id'])is None:
+            time.sleep(.02)
+        self.assertIsNotNone(self.host.journal.get('in','env-a',newest['id']))
+        with self.host.journal.db()as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM rpc WHERE direction='in'").fetchone()[0],301)
+        self.assertFalse(any(c.closed for c,*_ in self.connections))
+
     def test_second_broker_cannot_remove_live_first_broker_socket(self):
         config=self.host.config;config['links']={};atomic(self.host.home/'config.json',encode(config).encode());argv=[sys.executable,'-I','-B',str(ROOT/'csl_light.py'),'--home',str(self.host.home),'run']
         first=subprocess.Popen(argv,stdout=subprocess.PIPE,stderr=subprocess.PIPE)

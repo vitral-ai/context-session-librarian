@@ -77,6 +77,7 @@ class Journal:
         with self.db() as db:
             db.executescript('CREATE TABLE IF NOT EXISTS rpc(direction TEXT,peer TEXT,id TEXT,payload TEXT,hash TEXT,state TEXT,result TEXT,error TEXT,created REAL,updated REAL,PRIMARY KEY(direction,peer,id));CREATE TABLE IF NOT EXISTS routes(agent TEXT PRIMARY KEY,peer TEXT,thread TEXT);')
             db.execute('CREATE TABLE IF NOT EXISTS delivery_retries(peer TEXT,id TEXT,attempts INTEGER,next REAL,PRIMARY KEY(peer,id))')
+            db.execute('CREATE TABLE IF NOT EXISTS send_deadlines(peer TEXT,id TEXT,next_at REAL,PRIMARY KEY(peer,id))')
             db.execute('CREATE TABLE IF NOT EXISTS tombstones(direction TEXT,peer TEXT,id TEXT,hash TEXT,result TEXT,updated REAL,PRIMARY KEY(direction,peer,id))')
         self.path.chmod(0o600)
 
@@ -121,6 +122,8 @@ class Journal:
             db.execute("UPDATE rpc SET state='done',result=?,error=NULL,updated=? WHERE direction=? AND peer=? AND id=?", (wire(result), time.time(), direction, peer, identifier))
             if direction == 'in':
                 db.execute('DELETE FROM delivery_retries WHERE peer=? AND id=?',(peer,identifier))
+            else:
+                db.execute('DELETE FROM send_deadlines WHERE peer=? AND id=?',(peer,identifier))
 
     def retry_due(self, peer, identifier):
         with self.db() as db:
@@ -146,6 +149,40 @@ class Journal:
                 sql += ' AND peer=?'
                 args.append(peer)
             return [dict(r) for r in db.execute(sql + ' ORDER BY created LIMIT 256', args)]
+
+    def ready_out(self, peer):
+        """Apply retry eligibility before the bounded payload window."""
+        with self.db() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT rpc.* FROM rpc LEFT JOIN send_deadlines d ON "
+                "d.peer=rpc.peer AND d.id=rpc.id WHERE direction='out' AND "
+                "rpc.peer=? AND state!='done' AND (d.next_at IS NULL OR d.next_at<=?) "
+                "ORDER BY created LIMIT 256",(peer,time.monotonic()))]
+
+    def sent_out(self, peer, row):
+        # An ACK or completion can arrive before this write. Keep its newer state.
+        with self.db() as db:
+            changed = db.execute("UPDATE rpc SET state='sent',updated=? WHERE direction='out' "
+                       "AND peer=? AND id=? AND state=? AND updated=?",
+                       (time.time(),peer,row['id'],row['state'],row['updated'])).rowcount
+            if changed:
+                db.execute('INSERT INTO send_deadlines VALUES(?,?,?) ON CONFLICT(peer,id) '
+                           'DO UPDATE SET next_at=excluded.next_at',(peer,row['id'],time.monotonic()+5))
+
+    def ack_out(self, peer, identifier):
+        with self.db() as db:
+            changed = db.execute("UPDATE rpc SET state='acked',updated=? WHERE direction='out' "
+                       "AND peer=? AND id=? AND state!='done'",(time.time(),peer,identifier)).rowcount
+            if changed:
+                db.execute('INSERT INTO send_deadlines VALUES(?,?,?) ON CONFLICT(peer,id) '
+                           'DO UPDATE SET next_at=excluded.next_at',(peer,identifier,time.monotonic()+60))
+
+    def reconnect_out(self, peer):
+        # Monotonic deadlines belong to this connection and never survive a reconnect.
+        with self.db() as db:
+            db.execute("UPDATE rpc SET state='queued',updated=? WHERE direction='out' "
+                       "AND peer=? AND state!='done'",(time.time(),peer))
+            db.execute('DELETE FROM send_deadlines WHERE peer=?',(peer,))
 
     def prune(self, days=30):
         """Compact old payloads; permanent small tombstones still refuse ID reuse."""
@@ -240,8 +277,6 @@ class Channel:
         self.node, self.peer = node, peer
         self.reader, self.writer, self.close_fn = reader, writer, close
         self.closed = False
-        self.sent, self.acked = {}, set()
-        self.state_lock = threading.Lock()
         self.outgoing = queue.Queue(maxsize=64)
         self.last_received = time.monotonic()
         self.first_frame_deadline = None
@@ -311,6 +346,7 @@ class Channel:
             if previous:
                 previous.close()
             self.node.channels[self.peer] = self
+            self.node.journal.reconnect_out(self.peer)
         self.send({'type': 'hello', 'node': self.node.config['node'], 'agents': self.node.advertise()})
         log('connected', peer=self.peer)
         threading.Thread(target=self.pump, daemon=True).start()
@@ -339,12 +375,9 @@ class Channel:
                         self.node.schedule(self.peer, frame['id'])
                 elif kind == 'response':
                     self.node.journal.finish('out', self.peer, frame['id'], frame['result'])
-                    with self.state_lock:
-                        self.sent.pop(frame['id'], None)
-                        self.acked.discard(frame['id'])
                 elif kind == 'ack':
-                    with self.state_lock:
-                        self.acked.add(frame['id'])
+                    if self.node.channels.get(self.peer) is self:
+                        self.node.journal.ack_out(self.peer,frame['id'])
                 elif kind == 'ping':
                     self.send({'type': 'pong'})
                 elif kind == 'revoked':
@@ -372,21 +405,11 @@ class Channel:
                     self.send({'type': 'hello', 'node': self.node.config['node'], 'agents': self.node.advertise()})
                     self.send({'type': 'ping'})
                     last_hello = now
-                rows = self.node.journal.pending('out', self.peer)
-                pending = {r['id'] for r in rows}
-                with self.state_lock:
-                    self.sent = {i: t for i, t in self.sent.items() if i in pending}
-                    self.acked.intersection_update(pending)
-                for row in rows:
+                for row in self.node.journal.ready_out(self.peer):
                     if self.outgoing.qsize() >= 32:
                         break
-                    with self.state_lock:
-                        due = now - self.sent.get(row['id'], -100) >= (60 if row['id'] in self.acked else 5)
-                    if not due:
-                        continue
                     if self.send(json.loads(row['payload'])):
-                        with self.state_lock:
-                            self.sent[row['id']] = now
+                        self.node.journal.sent_out(self.peer,row)
                 STOP.wait(.1)
         except (OSError, ValueError):
             self.close()
@@ -775,7 +798,7 @@ class Node:
                 channel = self.channels.get(peer)
                 if channel:
                     channel.close()
-            if not current:
+            if not current or (self.home / ('revoked-' + peer)).exists():
                 continue
             for agent in current.get('agents', []):
                 thread = current.get('agent_threads', {}).get(agent)

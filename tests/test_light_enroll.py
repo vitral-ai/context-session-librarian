@@ -254,6 +254,61 @@ class EnrollmentTests(unittest.TestCase):
         messages=inbox(self.home)['messages'];self.assertEqual(len(messages),3)
         self.assertTrue(all(len(m['body'])==12000 for m in messages))
 
+    def test_outbound_retry_window_excludes_acked_rows_and_reconnect_replays(self):
+        journal=light.Journal(self.home/'light.sqlite')
+        first,second=str(uuid.uuid4()),str(uuid.uuid4())
+        stale=journal.put('out','env-a',first,{'synthetic':1})
+        journal.sent_out('env-a',stale);self.assertEqual(journal.ready_out('env-a'),[])
+        journal.ack_out('env-a',first)
+        journal.sent_out('env-a',stale)  # ACK won the race with producer bookkeeping.
+        self.assertEqual(journal.get('out','env-a',first)['state'],'acked')
+        journal.put('out','env-a',second,{'synthetic':2})
+        self.assertEqual([r['id']for r in journal.ready_out('env-a')],[second])
+        journal.reconnect_out('env-a')
+        self.assertEqual({r['id']for r in journal.ready_out('env-a')},{first,second})
+        journal.finish('out','env-a',first,{'ok':True});journal.ack_out('env-a',first)
+        self.assertEqual(journal.get('out','env-a',first)['state'],'done')
+        journal.ack_out('env-a',second)
+        self.assertNotIn(second,[r['id']for r in journal.ready_out('env-a')])
+        with patch('csl_light.time.monotonic',return_value=time.monotonic()+61), \
+             patch('csl_light.time.time',return_value=time.time()-86400):
+            self.assertIn(second,[r['id']for r in journal.ready_out('env-a')])
+
+    def test_parked_peer_spawns_no_threads_until_marker_removed(self):
+        node=light.Node(self.config);self.addCleanup(node.pool.shutdown,False)
+        cfg=json.loads(json.dumps(self.config));cfg['links']['env-a']={'endpoint':'owner-env-a','agents':['worker'],'key':str(self.key)}
+        enroll.atomic(self.home/'config.json',encode(cfg).encode())
+        marker=self.home/'revoked-env-a';marker.write_text('parked')
+        with patch('csl_light.threading.Thread')as thread:
+            for _ in range(10):node.sync_links()
+            thread.assert_not_called()
+            marker.unlink();node.sync_links();thread.assert_called_once()
+            thread.return_value.start.assert_called_once()
+
+    def test_malformed_peer_rows_are_logged_once_and_valid_rows_keep_reloading(self):
+        connector=Connector(self.host)
+        try:
+            enroll.adopt_peers(self.config,'env-a','worker')
+            store=Store(self.host)
+            try:
+                with store.transaction()as db:
+                    db.execute('INSERT INTO peers VALUES(?,?)',('bad-json','{'))
+                    db.execute('INSERT INTO peers VALUES(?,?)',('bad-shape','[]'))
+                    db.execute('INSERT INTO peers VALUES(?,?)',('bad-fields',encode({'transport':'light','home':1,'peer':'bad','allow_ops':None})))
+            finally:store.close()
+            with self.assertLogs('csl_bridge_engine',level='WARNING')as logs:
+                connector.reload_light_peers();connector.reload_light_peers()
+            self.assertEqual(len(logs.output),3)
+            self.assertEqual(connector.peers['env-a']['transport'],'light')
+            self.assertNotIn('bad-json',connector.peers)
+            self.assertNotIn('bad-shape',connector.peers)
+            self.assertNotIn('bad-fields',connector.peers)
+        finally:connector.close()
+        with self.assertLogs('csl_bridge_engine',level='WARNING'):
+            restarted=Connector(self.host)
+        try:self.assertIn('env-a',restarted.peers)
+        finally:restarted.close()
+
     def test_stop_terminates_a_stubborn_owned_process_group(self):
         child = subprocess.Popen([sys.executable, '-c',
             'import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);print("ready",flush=True);time.sleep(30)'],

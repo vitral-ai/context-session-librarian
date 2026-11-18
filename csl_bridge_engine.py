@@ -1,5 +1,6 @@
 """Session-scoped coordination around existing Codex threads; no session cloning."""
 import fcntl
+import logging
 import queue
 import socketserver
 import sqlite3
@@ -55,7 +56,8 @@ class Connector:
         self.identity = self.store.setting('identity')
         self.runtime_path = self.store.setting('runtime_socket')
         self.client_only = self.runtime_path is None
-        self.agents, self.peers = self.store.agents(), self.store.peers()
+        self.malformed_peers = set()
+        self.agents, self.peers = self.store.agents(), self.configured_peers()
         self.factory = runtime_factory
         self.runtime = None
         self.stop = threading.Event()
@@ -468,10 +470,33 @@ class Connector:
                 with self.locks[agent]:
                     self.flush(agent)
 
+    def configured_peers(self):
+        fresh, malformed = {}, set()
+        for row in self.store.rows('SELECT name,config FROM peers'):
+            try:
+                config = decode(row['config'])
+                if not isinstance(config,dict) or not isinstance(config.get('transport'),str):
+                    raise ValueError('Invalid peer configuration')
+                endpoints = {'light':('home','peer'),'ssh':('alias',),'operator':('helper',),
+                             'lab':('home',),'receive-only':()}
+                transport = config['transport']
+                if transport not in endpoints or any(not isinstance(config.get(k),str) for k in endpoints[transport]):
+                    raise ValueError('Invalid peer transport')
+                for field in ('allow_ops','allow_agents','allow_sources'):
+                    if field in config and not isinstance(config[field],list):
+                        raise ValueError('Invalid peer permissions')
+                fresh[row['name']] = config
+            except (ValueError,TypeError):
+                malformed.add(row['name'])
+                if row['name'] not in self.malformed_peers:
+                    logging.getLogger(__name__).warning('Skipping malformed bridge peer configuration')
+        self.malformed_peers = malformed
+        return fresh
+
     def reload_light_peers(self):
         """Adopt enrollment and exact rollback/removal without restarting a connector."""
         with self.light_lock:
-            fresh = self.store.peers()
+            fresh = self.configured_peers()
             current = {p for p, c in fresh.items() if c.get('transport') == 'light'}
             for peer in self.light_peers | current:
                 if peer in fresh:
