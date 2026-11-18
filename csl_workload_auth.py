@@ -195,7 +195,7 @@ class WorkloadTokens:
             started, boot = self._now(), self.boot()
             deadline = started+timeout
             self._check(deadline)
-            self.origin.discovery(self.http.request(self.origin.issuer+'/.well-known/openid-configuration'))
+            self.origin.discovery(self.http.request(self.origin.issuer+'/.well-known/oauth-authorization-server'))
             _, thumb = self._public()
             value = {'version': 1, 'binding': self.binding, 'thumbprint': b64(thumb),
                      'phase': 'authorization_inflight', 'boot': boot, 'deadline': deadline}

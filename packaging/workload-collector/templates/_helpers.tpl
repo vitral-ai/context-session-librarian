@@ -88,9 +88,9 @@ env:
   - name: VITRAL_COLLECTOR_REDACTION
     value: "required"
   - name: VITRAL_COLLECTOR_FLUSH_SECONDS
-    value: {{ .Values.collector.flushSeconds | quote }}
+    value: {{ .Values.collector.flushSeconds | int64 | toString | quote }}
   - name: VITRAL_COLLECTOR_SPOOL_LIMIT_BYTES
-    value: {{ .Values.collector.spoolLimitBytes | quote }}
+    value: {{ .Values.collector.spoolLimitBytes | int64 | toString | quote }}
   - name: VITRAL_LOCATION_LABEL
     value: {{ .Values.location.label | quote }}
   - name: VITRAL_LOCATION_PROVIDER
