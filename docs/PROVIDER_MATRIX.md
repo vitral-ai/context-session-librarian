@@ -53,6 +53,7 @@ registry. Update implementation, tests and this document in the same change.
 | `import` | supported | supported | experimental |
 | `inbox` | supported | supported | not-integrated |
 | `index` | supported | not-integrated | not-integrated |
+| `light` | experimental | experimental | not-integrated |
 | `migrate` | experimental | not-integrated | not-integrated |
 | `native-clone` | experimental | not-integrated | not-integrated |
 | `native-cut` | experimental | not-integrated | not-integrated |
@@ -301,3 +302,12 @@ inspect/import it; published v0.3.0 cannot. Claude raw export includes its sibli
 session directory when present. Native loader acceptance is not established
 merely by file installation. No network,
 credentials, model calls, or Vitral dependency exist in the provider layer.
+
+## Persistent pool messaging (development)
+
+`csl light` is the default transport for newly configured pool bridge peers.
+It persists messages on both endpoints, reconnects one SSH stream per environment,
+and explicitly enables native Codex activation for enrolled recipients. Client-only
+homes receive mail/results. Legacy SSH/operator transports remain deprecated
+opt-in fallbacks. See [light runbook](LIGHT_RUNBOOK.md). This does not change
+legacy mailbox-only activation/grant semantics or environment lifecycle.

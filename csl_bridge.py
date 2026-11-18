@@ -101,6 +101,9 @@ def configure(args):
                     config = {'transport': 'operator', 'helper': str(helper)}
                 elif args.lab_home:
                     config = {'transport': 'lab', 'home': str(args.lab_home.expanduser().absolute())}
+                elif not args.ssh_alias:
+                    light_home=(args.light_home or Path.home()/'.local/share/csl-light').expanduser().absolute()
+                    config={'transport':'light','home':str(light_home),'peer':peer}
                 else:
                     ssh_argv(args.ssh_alias, args.ssh_config)
                     config = {'transport': 'ssh', 'alias': args.ssh_alias}
@@ -254,11 +257,12 @@ def add_commands(subparsers, csl):
     agent.add_argument('--thread', required=True)
     peer = sub.add_parser('peer', help='Configure a peer and its explicit incoming permissions, offline.')
     peer.add_argument('peer')
-    transport = peer.add_mutually_exclusive_group(required=True)
-    transport.add_argument('--ssh-alias', help='Trusted SSH config alias; fixed receiver, no arbitrary SSH options.')
+    transport = peer.add_mutually_exclusive_group()
+    transport.add_argument('--light-home', type=Path, help='Persistent light broker home (default transport for pool peers).')
+    transport.add_argument('--ssh-alias', help='Deprecated opt-in per-request SSH fallback; fixed receiver.')
     transport.add_argument('--lab-home', type=Path, help='Synthetic same-UID local transport; NOT SSH authentication.')
     transport.add_argument('--receive-only', action='store_true', help='Peer initiates requests/watch; no reverse transport or network connection is attempted.')
-    transport.add_argument('--operator-helper', type=Path, help='Trusted local executable with fixed operator SSH endpoint; JSON stdin only, no credentials in bridge.')
+    transport.add_argument('--operator-helper', type=Path, help='Deprecated opt-in per-request operator fallback; JSON stdin only.')
     peer.add_argument('--ssh-config', type=Path, help='Explicit private trusted SSH config file, separate from personal SSH setup.')
     peer.add_argument('--allow-agent', action='append', required=True)
     peer.add_argument('--allow-source', action='append', default=[],

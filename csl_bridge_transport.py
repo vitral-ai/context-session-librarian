@@ -58,6 +58,16 @@ def ssh_argv(alias, config=None):
 
 def exchange(config, local_peer, request):
     validate(request)
+    if config['transport'] == 'light':
+        from csl_light import local
+        try:
+            result = local(config['home'], {'action': 'exchange', 'peer': config['peer'],
+                                           'origin': local_peer, 'request': request})
+        except (OSError, ValueError) as error:
+            raise BridgeError('Light unavailable; inspect the durable outbox and retry the same ID') from error
+        if not result.get('ok'):
+            raise BridgeError('Light rejected operation; inspect receipt/state')
+        return result['data']
     if config['transport'] == 'lab':
         # Explicit same-UID laboratory only. This is not SSH authentication evidence.
         return local_call(config['home'], {'local_op': '_incoming', 'trusted_peer': local_peer, 'request': request})

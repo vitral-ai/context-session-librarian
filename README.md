@@ -23,6 +23,14 @@ Claude's documented Codex import is for
 import. See [native import or CSL?](docs/NATIVE_IMPORT_COMPARISON.md) for a dated,
 reproducible comparison and the distinction between migration and a new copy.
 
+## Pool agent messaging (development)
+
+Use `csl light` for persistent pool communication: one reconnecting SSH stream per
+running environment, durable message IDs, and native Codex followup delivery.
+New bridge peers default to light; old per-request transports remain explicit,
+deprecated fallbacks. See the [one-page runbook](docs/LIGHT_RUNBOOK.md).
+This feature is in the development checkout, not the v0.4.2 tag below.
+
 ## Install
 
 Requires Linux and Python 3.11+. The core CLI uses only the Python standard
