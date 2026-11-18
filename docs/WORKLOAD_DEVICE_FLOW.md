@@ -113,3 +113,6 @@ server/client integration and helper/image pinning remain to qualify. There is
 no process wrapper, live watching or final-exit delivery claim: the subsequent
 runner still needs a 20-second suspend-inclusive ACK-based final drain and
 truthful pending/incomplete outcomes.
+
+The separate [runner source](WORKLOAD_RUNNER.md) now exercises that lifecycle
+with modeled local fixtures; image/external-producer and A8 gates remain.
