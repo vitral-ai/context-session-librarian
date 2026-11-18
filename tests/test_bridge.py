@@ -266,14 +266,85 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(store.rows("SELECT * FROM config WHERE key='rollback'"), [])
         self.assertEqual(len(store.rows('SELECT * FROM outbound')), 1)
 
-    def outgoing_event(self):
+    def outgoing_event(self, local_session=False):
         request = self.request(source='worker', target='coordinator')
+        if local_session:
+            request['session'] = self.thread
         self.connector.store.reserve('outbound:alice', request)
         turn = uid()
         self.connector.store.operation(request['id'], 'delivered', {'turn_id': turn})
         return {'seq': 1, 'event': {'id': uid(), 'task_id': request['id'], 'source': 'coordinator',
             'target': 'worker', 'kind': 'final', 'text': 'Synthetic final evidence',
             'turn_id': turn, 'status': 'completed'}}
+
+    def test_event_receipt_reads_canonical_recovery_without_reinjecting(self):
+        self.connector.incoming('alice', self.request())
+        packet = self.outgoing_event(local_session=True); self.runtime.lose_ack = True
+        self.connector.accept_event('alice', packet)
+        read = lambda: self.connector.incoming('alice', self.request('receipt', request_id=packet['event']['id']))
+        before = len(self.runtime.calls)
+        unresolved = read()
+        self.assertEqual(unresolved['result']['delivery'], 'uncertain')
+        self.assertFalse(unresolved['result']['native_accepted'])
+        self.assertEqual(len(self.runtime.calls), before)
+        self.connector.maintain_events()
+        accepted = read()
+        self.assertTrue(accepted['result']['native_accepted'])
+        receipt = accepted['result']['native_receipt']
+        self.assertEqual(receipt['thread_id'], self.thread)
+        self.assertEqual(receipt['turn_id'], self.runtime.turn)
+        self.assertNotEqual(receipt['request_id'], packet['event']['id'])
+        self.assertEqual(sum(method == 'turn/steer' for method, _ in self.runtime.calls), 1)
+
+    def test_fallback_two_wire_finals_and_old_replay_share_one_native_effect(self):
+        self.connector.incoming('alice', self.request())
+        packet = self.outgoing_event(local_session=True)
+        self.connector.accept_event('alice', packet)
+        accepted_calls = len(self.runtime.calls)
+        alias = {'seq': 2, 'event': dict(packet['event'], id=uid())}
+        self.runtime.history.extend({'id': uid(), 'status': 'completed', 'items': []} for _ in range(201))
+        self.connector.accept_event('alice', alias)
+        self.connector.accept_event('alice', packet)
+        self.assertEqual(len(self.runtime.calls), accepted_calls)
+        self.assertEqual(sum(method == 'turn/steer' for method, _ in self.runtime.calls), 1)
+        self.assertEqual(len(self.connector.store.rows('SELECT * FROM event_attempts')), 1)
+        self.assertEqual(len(self.connector.store.rows("SELECT * FROM event_publications WHERE kind='final'")), 1)
+        self.assertEqual(len(self.connector.store.rows('SELECT * FROM inbound')), 2)
+
+    def test_fallback_lost_ack_beyond_history_ceiling_stays_uncertain(self):
+        self.connector.incoming('alice', self.request())
+        packet = self.outgoing_event(local_session=True); self.runtime.lose_ack = True
+        self.connector.accept_event('alice', packet)
+        self.assertEqual(self.connector.store.rows('SELECT state FROM event_effects')[0]['state'], 'uncertain')
+        self.runtime.history.extend({'id': uid(), 'status': 'completed', 'items': []} for _ in range(201))
+        before = sum(method in ('turn/start', 'turn/steer') for method, _ in self.runtime.calls)
+        self.connector.accept_event('alice', {'seq': 2, 'event': dict(packet['event'], id=uid())})
+        self.connector.maintain_events()
+        self.assertEqual(sum(method in ('turn/start', 'turn/steer') for method, _ in self.runtime.calls), before)
+        self.assertEqual(self.connector.store.rows('SELECT state FROM event_effects')[0]['state'], 'uncertain')
+        self.assertEqual(len(self.connector.store.rows('SELECT * FROM event_attempts')), 1)
+
+    def test_fallback_recovery_stops_at_two_hundred_typed_turns_in_recorded_thread(self):
+        old_thread, client_id = self.thread, uid()
+        pages = [{'id': uid(), 'status': 'completed', 'items': []} for _ in range(220)]
+        pages[200]['items'] = [{'type': 'userMessage', 'clientId': client_id}]
+        seen = []
+        def read(method, params):
+            self.assertEqual(method, 'thread/turns/list'); self.assertEqual(params['threadId'], old_thread)
+            self.assertEqual(params['limit'], 20)
+            offset = int(params['cursor'] or 0); seen.append(offset)
+            return {'data': pages[offset:offset + 20], 'nextCursor': str(offset + 20)}
+        with self.connector.store.transaction() as db:
+            db.execute('UPDATE agents SET thread=? WHERE name=?', (uid(), 'worker'))
+        with patch.object(self.runtime, 'call', side_effect=read):
+            self.assertEqual(self.connector.find_event_acceptance(old_thread, [client_id]), {})
+            pages[199]['items'] = [{'type': 'userMessage', 'clientId': client_id}]
+            self.assertEqual(self.connector.find_event_acceptance(old_thread, [client_id]), {client_id: pages[199]['id']})
+            pages[0]['items'] = [{'type': 'userMessage', 'clientId': client_id}]
+            self.assertEqual(self.connector.find_event_acceptance(old_thread, [client_id]), {})
+            pages[0]['items'][0]['type'] = 'agentMessage'
+            self.assertEqual(self.connector.find_event_acceptance(old_thread, [client_id]), {client_id: pages[199]['id']})
+        self.assertEqual(seen, list(range(0, 200, 20)) * 4)
 
     def test_correlated_events_automatic_delivery_and_duplicate_cursor(self):
         self.connector.incoming('alice', self.request())
@@ -409,7 +480,7 @@ class BridgeTests(unittest.TestCase):
     def test_recovery_requires_original_receipt_before_promoting_uncertain_event(self):
         for outcome in ('missing', 'wrong', 'confirmed'):
             with self.subTest(outcome=outcome):
-                event = self.outgoing_event()['event']
+                event = self.outgoing_event(local_session=True)['event']
                 self.connector.store.operation(event['task_id'], 'delivered' if outcome != 'missing' else 'uncertain',
                     {'turn_id': uid() if outcome == 'wrong' else event['turn_id']} if outcome != 'missing' else {})
                 with self.connector.store.transaction() as db:
@@ -417,7 +488,8 @@ class BridgeTests(unittest.TestCase):
                                (event['id'], 'alice', encode(event)))
                 self.runtime.history = [{'id': uid(), 'status': 'completed', 'items': [
                     {'type': 'userMessage', 'clientId': event['id']}]}]
-                self.connector.reconcile(flush_pending=False)
+                for _ in range(3):
+                    self.connector.reconcile(flush_pending=False)
                 expected = {'missing': 'uncertain', 'wrong': 'rejected', 'confirmed': 'delivered'}[outcome]
                 self.assertEqual(self.connector.store.rows('SELECT delivery FROM inbound WHERE id=?',
                                  (event['id'],))[0]['delivery'], expected)
@@ -442,10 +514,12 @@ class BridgeTests(unittest.TestCase):
                             ('alice', {**original, 'event': {**original['event'], 'turn_id': uid()}}),
                             ('alice', {**original, 'event': {**original['event'], 'target': 'unregistered'}}),
                             ('alice', {**original, 'event': {**original['event'], 'kind': 'approve'}})]:
+            if peer == 'alice':
+                event = {**event, 'event': {**event['event'], 'id': uid()}}
             with self.assertRaises(BridgeError):
                 self.connector.accept_event(peer, event)
         self.assertFalse(self.connector.store.rows('SELECT * FROM inbound'))
-        self.assertFalse(self.connector.store.rows('SELECT * FROM cursors'))
+        self.assertEqual(self.connector.store.rows('SELECT * FROM cursors'), [{'peer': 'alice', 'value': 1}])
         self.connector.accept_event('alice', original)
         with self.assertRaises(BridgeError):
             self.connector.accept_event('alice', {**original, 'event': {**original['event'], 'text': 'Changed'}})

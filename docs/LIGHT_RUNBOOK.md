@@ -65,6 +65,13 @@ turn. Normal committed delivery/replay remains cached; this limit concerns the
 uncertain native-acceptance crash window. Both endpoints commit before
 ACK; duplicates reuse the stored result. Progress/final CSL events are pushed over
 the same stream and appear in the inbox and existing bridge `wait` interface.
+Final event aliases now share one durable delivery claim. For event receipts,
+inspect `delivery` and `native_accepted`: persisted or uncertain is not a Native
+acceptance. An uncertain event never reinjects because its history match aged
+out; settled events replay without a Native history lookup. This event guarantee
+does not extend the ordinary request crash-recovery window described above. See
+[event history and consumer limits](BRIDGE_EVENT_HISTORY.md).
+
 Enrollment opts into registered sender session headers for light.
 Mail wakes an explicitly enrolled native recipient; existing bridge mailbox
 transport alone does not grant that behavior. Task text is not authority.

@@ -183,6 +183,10 @@ class Store:
                     delivery TEXT NOT NULL DEFAULT 'pending');
                 CREATE TABLE IF NOT EXISTS cursors (peer TEXT PRIMARY KEY, value INTEGER NOT NULL);
             ''')
+        # Event consumer integration: initialize the shared ID-purpose namespace
+        # for both old and newly created homes, without invoking Native.
+        from csl_bridge_event_state import EventState
+        EventState(self)
 
     @contextmanager
     def transaction(self):
@@ -222,6 +226,11 @@ class Store:
                 if old['peer'] != peer or old['hash'] != fingerprint:
                     raise BridgeError('Request ID collision; content or peer differs')
                 return {'state': old['state'], 'result': decode(old['result']) if old['result'] else None}
+            if not peer.startswith('outbound:') and request.get('op') in ('followup', 'send_message'):
+                target = db.execute('SELECT thread FROM agents WHERE name=?', (request.get('target'),)).fetchone()
+                if target:
+                    from csl_bridge_event_state import EventState
+                    EventState.reserve_id(db, request['id'], 'operation', fingerprint, target[0])
             db.execute('INSERT INTO operations VALUES(?,?,?,?,?,NULL)',
                        (request['id'], peer, fingerprint, encode(request), 'pending'))
             return None

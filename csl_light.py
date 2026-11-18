@@ -1,5 +1,5 @@
 """Persistent CSL stream. Standard library; no pool client, lease or governor dependency."""
-import argparse, concurrent.futures, fcntl, hashlib, json, os, queue, selectors, signal, socket, sqlite3, subprocess, sys, threading, time, uuid
+import argparse, contextlib, concurrent.futures, fcntl, hashlib, json, os, queue, selectors, signal, socket, sqlite3, subprocess, sys, threading, time, uuid
 from pathlib import Path
 from contextlib import contextmanager
 MAX = 65536
@@ -229,7 +229,19 @@ class Native:
                 pass
 
     def inject(self, agent, request, session=None):
-        home, thread = self.node.agent(agent)
+        binding = request.get('_native_binding')
+        if binding:
+            home, thread, purpose, fingerprint = binding
+            from csl_bridge_store import Store
+            from csl_bridge_event_state import EventState
+            store = Store(home)
+            try:
+                with store.transaction() as db:
+                    EventState.reserve_id(db, request['id'], purpose, fingerprint, thread)
+            finally:
+                store.close()
+        else:
+            home, thread = self.node.agent(agent)
         client = self.client(home)
         if client is None:
             return {'state': 'mail_ready_for_client', 'request_id': request['id']}
@@ -260,6 +272,91 @@ class Native:
                 result = client.call('turn/start', params)
                 turn = result['turn']['id']
             return {'state': 'delivered', 'request_id': request['id'], 'thread_id': thread, 'turn_id': turn}
+
+    def event_available(self, home, event, thread):
+        try:
+            selected, registered = self.node.agent(event['target'])
+        except ValueError:
+            return False
+        return (Path(selected).resolve() == Path(home).resolve() and registered == thread and self.client(home) is not None)
+
+    def send_event(self, home, claim, event, session=None):
+        """A NEW granted effect only; never called by uncertain recovery."""
+        from csl_bridge_store import Store, frame_message
+        from csl_bridge_event_state import digest, EventConflict
+        store = Store(home)
+        try:
+            with store.transaction() as db:
+                reserved = db.execute('SELECT * FROM event_native_ids WHERE id=?', (claim['client_id'],)).fetchone()
+                if 'key' in claim:
+                    effect = db.execute('SELECT * FROM event_effects WHERE key=?', (claim['key'],)).fetchone()
+                    if (not effect or effect['state'] != 'uncertain' or effect['attempt'] != claim['number'] or
+                            effect['client_id'] != claim['client_id'] or effect['thread'] != claim['thread']):
+                        raise EventConflict('Native final grant changed')
+                    binding = digest([effect['key'], effect['peer'], effect['task'], effect['projection']])
+                    body = db.execute('SELECT body FROM inbound WHERE seq=?', (effect['representative'],)).fetchone()[0]
+                    purpose = 'final'
+                else:
+                    effect = db.execute('SELECT * FROM event_progress_effects WHERE wire_id=?', (claim['client_id'],)).fetchone()
+                    if (not effect or effect['state'] != 'uncertain' or effect['number'] != claim['number'] or effect['thread'] != claim['thread']):
+                        raise EventConflict('Native progress grant changed')
+                    body = db.execute('SELECT body FROM inbound WHERE id=?', (claim['client_id'],)).fetchone()[0]
+                    binding, purpose = hashlib.sha256(body.encode()).hexdigest(), 'progress'
+                if (not reserved or (reserved['purpose'], reserved['binding'], reserved['thread']) != (purpose, binding, claim['thread']) or
+                        json.loads(body) != event):
+                    raise EventConflict('Native event purpose/payload binding differs')
+        finally:
+            store.close()
+        client = self.client(home)
+        if client is None:
+            return {'state': 'mail_ready_for_client', 'request_id': claim['client_id']}
+        thread = claim['thread']
+        with self.locks.setdefault(thread, threading.Lock()):
+            from csl_bridge_rpc import RuntimeRejected
+            # Metadata failures occur BEFORE user input: a new claim may retry.
+            try:
+                try:
+                    response = client.call('thread/read', {'threadId': thread, 'includeTurns': False})
+                except Exception:
+                    response = client.call('thread/resume', {'threadId': thread, 'excludeTurns': True})
+                else:
+                    if response.get('thread', {}).get('status', {}).get('type') == 'notLoaded':
+                        response = client.call('thread/resume', {'threadId': thread, 'excludeTurns': True})
+                turns = client.call('thread/turns/list', {'threadId': thread, 'limit': 20, 'itemsView': 'full', 'sortDirection': 'desc'}).get('data', [])[:20]
+                active = next((turn for turn in turns if turn.get('status') == 'inProgress'), None)
+                if response.get('thread', {}).get('status', {}).get('type') == 'active' and active is None:
+                    raise RuntimeRejected('Active recipient turn is not observable')
+            except Exception as error:
+                raise RuntimeRejected('Event metadata unavailable before user input') from error
+            params = {'threadId': thread, 'clientUserMessageId': claim['client_id'],
+                      'input': [{'type': 'text', 'text': frame_message(event['source'], event['task_id'], session or event.get('session'), event['text'])}]}
+            if active:
+                result = client.call('turn/steer', {**params, 'expectedTurnId': active['id']})
+                turn = result['turnId']
+            else:
+                turn = client.call('turn/start', params)['turn']['id']
+            return {'state': 'delivered', 'request_id': claim['client_id'], 'thread_id': thread, 'turn_id': turn}
+
+    def find_event_acceptance(self, home, thread, ids):
+        """Evidence only, exact recorded context; a miss NEVER injects or resumes."""
+        from csl_bridge_rpc import RuntimeRejected, RuntimeUnavailable
+        client = self.client(home)
+        if client is None:
+            return {}
+        try:
+            turns = client.call('thread/turns/list', {'threadId': thread, 'limit': 20,
+                'itemsView': 'full', 'sortDirection': 'desc'}).get('data', [])[:20]
+        except (RuntimeRejected, RuntimeUnavailable, OSError):
+            return {}
+        found = {}
+        wanted = set(ids)
+        for turn in turns:
+            for item in turn.get('items', []):
+                value = item.get('clientId')
+                if item.get('type') == 'userMessage' and value in wanted:
+                    found.setdefault(value, set()).add(turn['id'])
+        return {value: next(iter(turns)) for value, turns in found.items() if len(turns) == 1}
+
 
 class Channel:
     """Reader never performs pipe writes; a bounded writer owns backpressure."""
@@ -472,12 +569,24 @@ class Node:
         return result
 
     def agent(self, selector):
+        candidates, threads = [], {}
         for bridge in self.config['bridges'].values():
-            with sql('file:' + str(Path(bridge['home']) / 'bridge.sqlite') + '?mode=ro', uri=True) as db:
-                rows = db.execute('SELECT name,thread FROM agents WHERE name=? OR thread=?', (selector, selector)).fetchall()
-                if len(rows) == 1 and rows[0][0] in bridge['agents']:
-                    return (bridge['home'], rows[0][1])
-        raise ValueError('Unknown local registered agent')
+            home = bridge['home']
+            with sql('file:' + str(Path(home) / 'bridge.sqlite') + '?mode=ro', uri=True) as db:
+                for agent, thread in db.execute('SELECT name,thread FROM agents'):
+                    if agent not in bridge['agents']:
+                        continue
+                    namespace = str((Path(home)/'bridge.sqlite').resolve())
+                    threads.setdefault(thread, set()).add(namespace)
+                    if selector in (agent, thread):
+                        candidates.append((home, thread, namespace))
+        identities = {(namespace, thread) for _, thread, namespace in candidates}
+        if len(identities) != 1:
+            raise ValueError('Unknown or ambiguous local registered agent')
+        home, thread, _ = candidates[0]
+        if len(threads[thread]) != 1:
+            raise ValueError('Ambiguous recipient home/thread binding')
+        return home, thread
 
     def authenticate(self, peer, frame):
         from csl_bridge_store import validate
@@ -535,6 +644,10 @@ class Node:
                 row = db.execute('SELECT fingerprint,direction FROM mail_messages WHERE id=?', (request['id'],)).fetchone()
                 if row and (row['fingerprint'] != digest or row['direction'] != 'in'):
                     raise ValueError('Mailbox id collision')
+                target = db.execute('SELECT thread FROM agents WHERE name=?', (request['target'],)).fetchone()
+                if target:
+                    from csl_bridge_event_state import EventState
+                    EventState.reserve_id(db, request['id'], 'mail', digest, target[0])
                 db.execute('INSERT OR IGNORE INTO mail_messages(id,direction,peer,source,target,fingerprint,envelope,persisted_at)VALUES(?,?,?,?,?,?,?,?)', (request['id'], 'in', peer, request['source'], request['target'], digest, encode(request['envelope']), stamp))
             return {'state': 'persisted', 'message_id': request['id'], 'persisted_at': stamp, 'acknowledged_at': None}
         finally:
@@ -567,7 +680,8 @@ class Node:
         if request['op'] == 'mail':
             result = self.mirror(home, trusted, request)
             if request['action'] == 'send':
-                self.native.inject(target, request, frame.get('source_session'))
+                bound = {**request, '_native_binding': (home, self.agent(target)[1], 'mail', hashlib.sha256(wire(request).encode()).hexdigest())}
+                self.native.inject(target, bound, frame.get('source_session'))
             return result
         if request['op'] in ('followup', 'send_message'):
             if self.native.client(home) is None:
@@ -576,19 +690,41 @@ class Node:
             core_request = request
             raw = encode(core_request)
             digest = hashlib.sha256(raw.encode()).hexdigest()
-            with sql(Path(home) / 'bridge.sqlite') as db:
-                old = db.execute('SELECT peer,hash FROM operations WHERE id=?', (request['id'],)).fetchone()
-                if old and (old[0] != trusted or old[1] != digest):
-                    raise ValueError('Existing native operation identity collision')
-                db.execute('INSERT OR IGNORE INTO operations VALUES(?,?,?,?,?,?)', (request['id'], trusted, digest, raw, 'invoking', encode({'state': 'uncertain', 'request_id': request['id']})))
-                if request['op'] == 'followup':
-                    db.execute('INSERT OR IGNORE INTO tasks VALUES(?,?,?,?,NULL,?)', (request['id'], trusted, request['source'], target, 'pending'))
-            result = self.native.inject(target, request, frame.get('source_session'))
-            with sql(Path(home) / 'bridge.sqlite') as db:
-                db.execute('UPDATE operations SET state=?,result=? WHERE id=?', ('delivered', encode(result), request['id']))
-                if request['op'] == 'followup':
-                    db.execute('UPDATE tasks SET turn=?,status=? WHERE id=?', (result['turn_id'], 'running', request['id']))
-            return result
+            from csl_bridge_store import Store
+            from csl_bridge_event_state import EventState
+            store = Store(home)
+            try:
+                with store.transaction() as db:
+                    old = db.execute('SELECT peer,hash FROM operations WHERE id=?', (request['id'],)).fetchone()
+                    if old and (old['peer'] != trusted or old['hash'] != digest):
+                        raise ValueError('Existing native operation identity collision')
+                    thread = db.execute('SELECT thread FROM agents WHERE name=?', (target,)).fetchone()[0]
+                    EventState.reserve_id(db, request['id'], 'operation', digest, thread)
+                    db.execute('INSERT OR IGNORE INTO operations VALUES(?,?,?,?,?,?)', (request['id'], trusted, digest, raw, 'invoking', encode({'state':'uncertain','request_id':request['id']})))
+                    if request['op'] == 'followup':
+                        db.execute('INSERT OR IGNORE INTO tasks VALUES(?,?,?,?,NULL,?)', (request['id'], trusted, request['source'], target, 'pending'))
+                bound = {**request, '_native_binding': (home, thread, 'operation', digest)}
+                result = self.native.inject(target, bound, frame.get('source_session'))
+                with store.transaction() as db:
+                    db.execute('UPDATE operations SET state=?,result=? WHERE id=?', ('delivered', encode(result), request['id']))
+                    if request['op'] == 'followup':
+                        db.execute('UPDATE tasks SET turn=?,status=? WHERE id=?', (result['turn_id'], 'running', request['id']))
+                return result
+            finally:
+                store.close()
+        if request['op'] == 'receipt':
+            # A routed event's canonical logical peer may be an alias for this
+            # physical hub. Reuse only its earlier authenticated exact route;
+            # the connector still applies that peer's existing receipt ACL.
+            from csl_bridge_store import Store, decode
+            with contextlib.closing(Store(home)) as store:
+                if store.rows("SELECT 1 FROM sqlite_master WHERE name='event_catalog'"):
+                    rows = store.rows('SELECT peer,task FROM event_catalog WHERE wire_id=?', (request['request_id'],))
+                    if rows and rows[0]['peer'] != trusted:
+                        saved = store.rows('SELECT route FROM event_original_routes WHERE peer=? AND task=?', (rows[0]['peer'], rows[0]['task']))
+                        expected = {'physical_peer': peer, 'origin': trusted, 'destination': trusted}
+                        if saved and decode(saved[0]['route']) == expected:
+                            trusted = rows[0]['peer']
         return local_call(home, {'local_op': '_incoming', 'trusted_peer': trusted, 'request': request})
 
     def dispatch_event(self, peer, frame):
@@ -609,6 +745,8 @@ class Node:
         from csl_bridge_engine import confirm_event_turn
         from csl_bridge_store import Store, BridgeError
         store = Store(home)
+        from csl_bridge_event_delivery import EventDelivery
+        delivery = EventDelivery(store)
         try:
             matches = store.rows("SELECT * FROM operations WHERE id=? AND peer LIKE 'outbound:%'", (event['task_id'],))
             if not matches:
@@ -629,6 +767,8 @@ class Node:
                 origin = frame.get('origin', peer)
                 if origin != peer and not self.config['links'][peer].get('trusted_router'):
                     raise ValueError('Untrusted event origin')
+            route_context = {'physical_peer': peer, 'origin': origin, 'destination': origin}
+            cached_route = delivery.history.cached_route(logical, event['task_id'])
             request = json.loads(original['request'])
             receipt = json.loads(original['result']) if original['result'] else {}
             try:
@@ -644,7 +784,8 @@ class Node:
                         hashlib.sha256(wire(payload).encode()).hexdigest() != rpc['hash'] or
                         payload.get('destination', peer) != origin):
                     raise ValueError('Original RPC binding differs from event path')
-            elif not self.is_router and self.config['links'][peer].get('trusted_router'):
+            elif (not self.is_router and self.config['links'][peer].get('trusted_router') and
+                  cached_route != route_context):
                 raise RuntimeError('Waiting for original routed RPC provenance')
             if not confirmed:
                 reply = json.loads(rpc['result']) if rpc and rpc['state'] == 'done' and rpc['result'] else {}
@@ -652,7 +793,11 @@ class Node:
                 if (not payload or reply.get('ok') is not True or
                         recovered.get('state') != 'delivered' or
                         recovered.get('request_id') != event['task_id']):
-                    raise RuntimeError('Waiting for original native acceptance receipt')
+                    if cached_route == route_context:
+                        receipt = delivery.history.recover_original(logical, event, route_context)
+                        recovered = receipt
+                    else:
+                        raise RuntimeError('Waiting for original native acceptance receipt')
                 try:
                     if not confirm_event_turn(request, 'delivered', recovered, event):
                         raise RuntimeError('Waiting for original native acceptance receipt')
@@ -673,23 +818,55 @@ class Node:
                     local_call(home, {'local_op': '_light_events_changed'}, timeout=1)
                 except (ValueError, OSError):
                     pass
+            current_receipt = store.rows('SELECT result FROM operations WHERE id=? AND peer=?', (event['task_id'], original['peer']))
+            receipt = json.loads(current_receipt[0]['result']) if current_receipt and current_receipt[0]['result'] else {}
+            sender = self.event_sender(peer, frame, receipt)
+            admitted = delivery.accept(logical, event, route=route_context)
+            def selected_session(canonical):
+                # Use the first admitted frame's authenticated header, not a later
+                # alias's optional metadata. Compaction never invents a session.
+                saved = self.journal.get('in', peer, canonical['id'])
+                payload = json.loads(saved['payload']) if saved else None
+                if (payload and payload.get('event') == canonical and
+                        hashlib.sha256(wire(payload).encode()).hexdigest() == saved['hash']):
+                    return self.event_sender(peer, payload, receipt)
+                if admitted.get('created') and canonical['id'] == event['id']:
+                    return sender
+                return canonical.get('session')
+            callbacks = {
+                'available': lambda canonical, thread: self.native.event_available(home, canonical, thread),
+                'send': lambda claim, canonical: self.native.send_event(home, claim, canonical, selected_session(canonical)),
+                'find': lambda thread, ids: self.native.find_event_acceptance(home, thread, ids),
+            }
+            if event['kind'] == 'final':
+                result = delivery.final(logical, event['task_id'], event['id'], **callbacks)
+            else:
+                result = delivery.progress(event['id'], **callbacks)
+            try:
+                local_call(home, {'local_op': '_light_events_changed'}, timeout=1)
+            except (ValueError, OSError):
+                pass
+            return result
         finally:
             store.close()
-        with sql(Path(home)/'bridge.sqlite') as db:
-            prior = db.execute('SELECT body FROM inbound WHERE id=?',(event['id'],)).fetchone()
-            if prior and prior[0] != encode(event):
-                raise ValueError('Event id collision')
-            db.execute("INSERT OR IGNORE INTO inbound(id,peer,body,delivery)VALUES(?,?,?,'uncertain')",(event['id'],logical,encode(event)))
-        if event['text']:
-            self.native.inject(event['target'], {'id':event['id'],'source':event['source'],
-                'text':event['text'],'header_task_id':event['task_id']}, frame.get('source_session') or event.get('session'))
-        with sql(Path(home)/'bridge.sqlite') as db:
-            db.execute("UPDATE inbound SET delivery='delivered' WHERE id=?",(event['id'],))
-        try:
-            local_call(home,{'local_op':'_light_events_changed'},timeout=1)
-        except (ValueError,OSError):
-            pass
-        return {'state':'delivered','event_id':event['id']}
+
+    def event_sender(self, peer, frame, receipt):
+        event = frame['event']
+        link = self.config['links'].get(peer, {})
+        if self.is_router:
+            enrolled = self.journal.resolve(event['source'])
+            sender = link.get('agent_threads', {}).get(event['source']) or enrolled.get('thread')
+        elif link.get('trusted_router'):
+            sender = frame.get('source_session')
+        else:
+            try:
+                enrolled = self.journal.resolve(event['source'])
+                sender = enrolled.get('thread') if enrolled['peer'] == peer else None
+            except ValueError:
+                sender = None
+        if (sender and receipt.get('thread_id') and sender != receipt['thread_id']) or (sender and event.get('session') and sender != event['session']):
+            raise ValueError('Authenticated sender thread differs from original task')
+        return sender or event.get('session')
 
     def finish_pending(self):
         """Recover native completions even without a separately running connector."""
@@ -924,6 +1101,92 @@ class Node:
                 self.link_workers[peer] = worker
                 worker.start()
 
+    def schedule_event(self, home, job):
+        physical = job.get('transport_peer', job['peer'])
+        if physical not in self.config['links']:
+            return  # Legacy activation remains the owning connector's policy.
+        peer = physical
+        token = 'event:' + hashlib.sha256(wire([str(Path(home).resolve()), job['key']]).encode()).hexdigest()
+        key = (peer, token)
+        with self.exec_lock:
+            if key in self.executing or len(self.executing) >= 32 or sum(p == peer for p, _ in self.executing) >= 4:
+                return
+            if not self.journal.retry_due(peer, token):
+                return
+            self.executing.add(key)
+        self.pool.submit(self.deliver_event_job, home, peer, token, job)
+
+    def deliver_event_job(self, home, peer, token, job):
+        from csl_bridge_store import Store
+        from csl_bridge_event_delivery import EventDelivery
+        from csl_bridge_event_state import EventConflict
+        from csl_bridge_transport import local_call
+        store = Store(home)
+        try:
+            delivery = EventDelivery(store)
+            rows = store.rows('SELECT body FROM inbound WHERE id=?', (job['wire_id'],))
+            if not rows:
+                raise EventConflict('Event work has no original row')
+            event = json.loads(rows[0]['body'])
+            saved_route = delivery.history.cached_route(job['peer'], event['task_id'])
+            physical = saved_route['physical_peer'] if saved_route else peer
+            saved = self.journal.get('in', physical, event['id'])
+            payload = json.loads(saved['payload']) if saved else None
+            def session(canonical):
+                if payload and payload.get('event') == canonical and hashlib.sha256(wire(payload).encode()).hexdigest() == saved['hash']:
+                    original = store.rows('SELECT result FROM operations WHERE id=?', (canonical['task_id'],))
+                    receipt = json.loads(original[0]['result']) if original and original[0]['result'] else {}
+                    return self.event_sender(physical, payload, receipt)
+                return canonical.get('session')
+            callbacks = {
+                'available': lambda canonical, thread: self.native.event_available(home, canonical, thread),
+                'send': lambda claim, canonical: self.native.send_event(home, claim, canonical, session(canonical)),
+                'find': lambda thread, ids: self.native.find_event_acceptance(home, thread, ids),
+            }
+            if event['kind'] == 'final':
+                result = delivery.final(job['peer'], event['task_id'], event['id'], **callbacks)
+            else:
+                result = delivery.progress(event['id'], **callbacks)
+            self.journal.finish('in', peer, token, {'ok': True, 'data': result})
+            if saved:
+                response = {'ok': True, 'data': result}
+                self.journal.finish('in', physical, event['id'], response)
+                with self.channel_lock:
+                    channel = self.channels.get(physical)
+                if channel:
+                    channel.send({'type': 'response', 'id': event['id'], 'result': response})
+            try:
+                local_call(home, {'local_op': '_light_events_changed'}, timeout=1)
+            except (OSError, ValueError):
+                pass
+        except EventConflict:
+            with store.transaction() as db:
+                db.execute('UPDATE event_delivery_jobs SET dirty=0 WHERE key=?', (job['key'],))
+            self.journal.finish('in', peer, token, {'ok': False, 'data': {'error': 'Event identity refused'}})
+        except Exception as error:
+            self.journal.error('in', peer, token, error)
+        finally:
+            store.close()
+            with self.exec_lock:
+                self.executing.discard((peer, token))
+
+    def maintain_events(self):
+        from csl_bridge_store import Store
+        from csl_bridge_event_delivery import EventDelivery
+        homes = {bridge['home'] for bridge in self.config['bridges'].values()}
+        for home in homes:
+            store = Store(home)
+            try:
+                delivery = EventDelivery(store)
+                for job in delivery.housekeeping():
+                    catalog = store.rows('SELECT task FROM event_catalog WHERE wire_id=?', (job['wire_id'],))
+                    route = delivery.history.cached_route(job['peer'], catalog[0]['task']) if catalog else None
+                    job['transport_peer'] = route['physical_peer'] if route else job['peer']
+                    if job['transport_peer'] in self.config['links']:
+                        self.schedule_event(home, job)
+            finally:
+                store.close()
+
     def retry_loop(self):
         last_prune = 0
         while not STOP.is_set():
@@ -939,7 +1202,7 @@ class Node:
                     log('config_reload_deferred', error=type(error).__name__)
                 for row in self.journal.pending('in'):
                     self.schedule(row['peer'], row['id'])
-                for step in (self.finish_pending, self.queue_events):
+                for step in (self.finish_pending, self.queue_events, self.maintain_events):
                     try:
                         step()
                     except Exception as error:

@@ -55,21 +55,18 @@ def confirm_event_turn(request, state, receipt, event):
 
 def publish_task_completion(store, agent, thread, turn_id, status, answer):
     """Shared native completion publisher for connectors and light receivers."""
-    tasks = store.rows("SELECT * FROM tasks WHERE target=? AND turn=? AND status IN ('running','pending')", (agent, turn_id))
-    if contains_findings(answer):
-        answer = 'Result text withheld by partial secret detection. Review selected evidence locally; completion alone is not validation.'
+    from csl_bridge_event_history import EventHistory
+    history = EventHistory(store)
+    tasks = store.rows("SELECT id FROM tasks WHERE target=? AND turn=? AND status IN ('running','pending')", (agent, turn_id))
     for task in tasks:
-        event = {'task_id': task['id'], 'source': agent, 'target': task['source'],
-                 'kind': 'final', 'text': answer, 'turn_id': turn_id, 'status': status}
-        event['session'] = thread  # stripped at serve time unless the peer opted in
-        store.publish(task['peer'], event, event_id(task['id'] + '/' + turn_id + '/final'))
-        with store.transaction() as db:
-            db.execute('UPDATE tasks SET status=? WHERE id=?', (status, task['id']))
+        history.publish_final(task['id'], thread, status, answer)
 
 
 class Connector:
     def __init__(self, home, runtime_factory=Runtime):
         self.store = Store(home)
+        from csl_bridge_event_delivery import EventDelivery
+        self.events = EventDelivery(self.store)
         self._mailbox = None  # legacy homes do not acquire a mailbox schema on join
         self.identity = self.store.setting('identity')
         self.runtime_path = self.store.setting('runtime_socket')
@@ -212,6 +209,7 @@ class Connector:
                     try:
                         msg = runtime.events.get(timeout=.5)
                     except queue.Empty:
+                        self.maintain_events()
                         continue
                     method, params = msg.get('method'), msg.get('params', {})
                     if 'id' in msg:
@@ -268,7 +266,11 @@ class Connector:
             return {'state': 'pending', 'request_id': request_id, 'activated': False}
         if state['status'] == 'notLoaded':
             raise RuntimeUnavailable('Owner must first host this conversation; no implicit rehosting')
-        self.store.operation(request_id, 'invoking', {'state': 'uncertain', 'request_id': request_id})
+        from csl_bridge_event_state import EventState
+        import hashlib
+        with self.store.transaction() as db:
+            EventState.reserve_id(db, request_id, 'operation', hashlib.sha256(encode(request).encode()).hexdigest(), self.agents[agent])
+            db.execute("UPDATE operations SET state='invoking',result=? WHERE id=?", (encode({'state': 'uncertain', 'request_id': request_id}), request_id))
         params = {'threadId': self.agents[agent], 'clientUserMessageId': request_id,
                   'input': [{'type': 'text', 'text': self.frame(peer, request)}]}
         try:
@@ -337,7 +339,9 @@ class Connector:
                     pass
                 rows = self.store.rows('SELECT state,result FROM operations WHERE id=? AND peer=?',
                                        (request['request_id'], peer))
-            return {'state': rows[0]['state'], 'result': decode(rows[0]['result']) if rows[0]['result'] else None} if rows else {'state': 'not_found'}
+            if rows:
+                return {'state': rows[0]['state'], 'result': decode(rows[0]['result']) if rows[0]['result'] else None}
+            return self.events.receipt(peer, request['request_id']) or {'state': 'not_found'}
         if op == 'agents':
             agents = []
             for agent in self.peers[peer]['allow_agents']:
@@ -434,14 +438,13 @@ class Connector:
             self.changed.notify_all()
 
     def reconcile(self, flush_pending=True):
+        self.maintain_events()
         # Join first, then recover effects using native client message IDs. Missing
         # evidence remains uncertain; never auto-repeat an invocation.
         for agent, thread in self.agents.items():
             uncertain_ops = [row for row in self.store.rows("SELECT id,peer,request FROM operations WHERE state='uncertain'")
                              if not row['peer'].startswith('outbound:') and decode(row['request']).get('op') != 'mail'
                              and decode(row['request']).get('target') == agent]
-            uncertain_events = [row for row in self.store.rows("SELECT id,peer,body FROM inbound WHERE delivery='uncertain'")
-                                if decode(row['body'])['target'] == agent]
             # Repair only local crash windows with an already-confirmed native turn.
             # A pending, never-invoked task is not uncertain and needs no history scan.
             for task in self.store.rows("SELECT tasks.id,operations.result FROM tasks JOIN operations ON tasks.id=operations.id WHERE tasks.target=? AND tasks.status='pending' AND tasks.turn IS NULL AND operations.state='delivered'", (agent,)):
@@ -450,7 +453,7 @@ class Connector:
                     with self.store.transaction() as db:
                         db.execute("UPDATE tasks SET turn=?,status='running' WHERE id=?", (result['turn_id'], task['id']))
             unfinished_tasks = self.store.rows("SELECT turn FROM tasks WHERE target=? AND status IN ('running','pending') AND turn IS NOT NULL", (agent,))
-            if not (uncertain_ops or uncertain_events or unfinished_tasks):
+            if not (uncertain_ops or unfinished_tasks):
                 if flush_pending:
                     with self.locks[agent]:
                         self.flush(agent)
@@ -465,16 +468,6 @@ class Connector:
                     break
             by_client = {item.get('clientId'): turn['id'] for turn in turns for item in turn.get('items', [])
                          if item.get('type') == 'userMessage' and item.get('clientId')}
-            for row in uncertain_events:
-                try:
-                    confirmed = self.event_turn_confirmed(row['peer'], decode(row['body']))
-                except BridgeError:
-                    with self.store.transaction() as db:
-                        db.execute("UPDATE inbound SET delivery='rejected' WHERE id=?", (row['id'],))
-                    continue
-                if confirmed and row['id'] in by_client:
-                    with self.store.transaction() as db:
-                        db.execute("UPDATE inbound SET delivery='delivered' WHERE id=?", (row['id'],))
             for row in uncertain_ops:
                 request = decode(row['request'])
                 if request.get('target') != agent or row['id'] not in by_client:
@@ -574,20 +567,21 @@ class Connector:
     def accept_event(self, peer, row):
         if not isinstance(row, dict) or set(row) != {'seq', 'event'} or type(row['seq']) is not int or not 0 < row['seq'] <= 2**63 - 1:
             raise BridgeError('Invalid event cursor')
+        if peer not in self.peers:
+            raise BridgeError('Unknown configured event peer')
         event = row['event']
         validate_event(event)
-        if not self.event_turn_confirmed(peer, event):
-            raise BridgeError('Waiting for original native acceptance receipt')
         if not self.sends_session(peer):
-            # Not rejected: one refused event would stall this peer's cursor for every later event.
             event = {key: value for key, value in event.items() if key != 'session'}
-        with self.store.transaction() as db:
-            existing = db.execute('SELECT body FROM inbound WHERE id=?', (event['id'],)).fetchone()
-            if existing and existing['body'] != encode(event):
-                raise BridgeError('Event ID collision')
-            db.execute('INSERT OR IGNORE INTO inbound(id,peer,body) VALUES(?,?,?)', (event['id'], peer, encode(event)))
-            db.execute('INSERT INTO cursors VALUES(?,?) ON CONFLICT(peer) DO UPDATE SET value=max(value,excluded.value)',
-                       (peer, row['seq']))
+        from csl_bridge_event_state import EventConflict, EventDeferred
+        try:
+            self.events.accept(peer, event, cursor=row['seq'])
+        except EventConflict as error:
+            raise BridgeError(str(error)) from error
+        self.events.history.catalog_step()
+        if self.events.history.complete(self.store.db) and event['kind'] == 'final':
+            from csl_bridge_event_history import canonical_key
+            self.events.history.seed_step(canonical_key(peer, event['task_id']))
         with self.changed:
             self.changed.notify_all()
         with self.locks[event['target']]:
@@ -603,36 +597,70 @@ class Connector:
         return confirm_event_turn(decode(row['request']), row['state'],
                                   decode(row['result']) if row['result'] else {}, event)
 
+    def find_event_acceptance(self, thread, ids):
+        found, cursor = {}, None
+        for _ in range(10):
+            page = self.ready().call('thread/turns/list', {'threadId': thread, 'limit': 20,
+                'itemsView': 'full', 'sortDirection': 'desc', 'cursor': cursor})
+            for turn in page['data'][:20]:
+                for item in turn.get('items', []):
+                    value = item.get('clientId')
+                    if item.get('type') == 'userMessage' and value in ids:
+                        found.setdefault(value, set()).add(turn['id'])
+            cursor = page.get('nextCursor')
+            if not cursor:
+                break
+        return {value: next(iter(turns)) for value, turns in found.items() if len(turns) == 1}
+
     def deliver_event(self, row):
-        event = decode(row['body'])
-        agent = event['target']
-        if row['delivery'] != 'pending' or self.waiters[agent]:
+        event = decode(row['body']); agent = event['target']
+        if self.waiters.get(agent):
             return
-        try:
-            if not self.event_turn_confirmed(row['peer'], event):
-                return  # Retain a legacy pending row until native acceptance is confirmed.
-        except BridgeError:
-            with self.store.transaction() as db:
-                db.execute("UPDATE inbound SET delivery='rejected' WHERE id=?", (event['id'],))
-            return
-        session = event.get('session') if self.sends_session(row['peer']) else None
-        try:
+        observed = {}
+        def available(canonical, thread):
+            if self.client_only or self.agents.get(agent) != thread or self.waiters[agent]:
+                return False
             state = self.current(agent)
             if state['status'] != 'active':
-                return
-            # Commit uncertainty BEFORE invoking; a crash cannot cause silent replay.
+                return False
+            observed.update(state)
+            return True
+        def send(claim, canonical):
+            session = canonical.get('session') if self.sends_session(row['peer']) else None
+            result = self.ready().call('turn/steer', {'threadId': claim['thread'],
+                'expectedTurnId': observed['turn_id'], 'clientUserMessageId': claim['client_id'],
+                'input': [{'type': 'text', 'text': frame_message(canonical['source'], canonical['task_id'], session, canonical['text'])}]})
+            return {'state': 'delivered', 'request_id': claim['client_id'], 'thread_id': claim['thread'], 'turn_id': result['turnId']}
+        callbacks = {'available': available, 'send': send, 'find': self.find_event_acceptance}
+        from csl_bridge_event_state import EventConflict, EventDeferred
+        try:
+            if event['kind'] == 'final':
+                self.events.final(row['peer'], event['task_id'], event['id'], **callbacks)
+            else:
+                self.events.progress(event['id'], **callbacks)
+        except EventDeferred:
+            return
+        except EventConflict:
             with self.store.transaction() as db:
-                db.execute("UPDATE inbound SET delivery='uncertain' WHERE id=?", (event['id'],))
-            self.ready().call('turn/steer', {'threadId': self.agents[agent], 'expectedTurnId': state['turn_id'],
-                'clientUserMessageId': event['id'], 'input': [{'type': 'text', 'text':
-                    frame_message(event['source'], event['task_id'], session, event['text'])}]})
-            with self.store.transaction() as db:
-                db.execute("UPDATE inbound SET delivery='delivered' WHERE id=?", (event['id'],))
-        except RuntimeRejected:
-            with self.store.transaction() as db:
-                db.execute("UPDATE inbound SET delivery='pending' WHERE id=?", (event['id'],))
-        except RuntimeUnavailable:
-            pass
+                db.execute("UPDATE inbound SET delivery='rejected' WHERE id=?", (event['id'],))
+                from csl_bridge_event_history import canonical_key
+                key = canonical_key(row['peer'], event['task_id']) if event['kind'] == 'final' else 'progress:' + event['id']
+                db.execute('UPDATE event_delivery_jobs SET dirty=0 WHERE key=?', (key,))
+
+    def maintain_events(self):
+        from csl_bridge_event_state import EventConflict, EventDeferred
+        for job in self.events.housekeeping():
+            rows = self.store.rows('SELECT * FROM inbound WHERE id=?', (job['wire_id'],))
+            if not rows:
+                continue
+            event = decode(rows[0]['body'])
+            agent = event['target']
+            if agent not in self.locks:
+                continue
+            with self.locks[agent]:
+                self.deliver_event(rows[0])
+        with self.changed:
+            self.changed.notify_all()
 
     def local(self, request):
         self.reload_light_peers()
@@ -721,26 +749,13 @@ class Connector:
                 self.waiters[agent] += 1
                 try:
                     while True:
-                        rows = []
-                        for row in self.store.rows("SELECT * FROM inbound WHERE seq>? AND delivery!='rejected' ORDER BY seq", (request['after'],)):
-                            event = decode(row['body'])
-                            if event['target'] != agent:
-                                continue
-                            try:
-                                if not self.event_turn_confirmed(row['peer'], event):
-                                    break  # Keep the tool cursor before an unverified legacy row.
-                            except BridgeError:
-                                with self.store.transaction() as db:
-                                    db.execute("UPDATE inbound SET delivery='rejected' WHERE id=?", (row['id'],))
-                                continue
-                            rows.append(row)
-                            break
-                        if rows or self.stop.is_set() or time.monotonic() >= deadline:
-                            # Tool return delivers these events to the waiting conversation.
-                            with self.store.transaction() as db:
-                                for row in rows:
-                                    db.execute("UPDATE inbound SET delivery='delivered' WHERE id=?", (row['id'],))
-                            return {'notice': NOTICE, 'events': [{'cursor': r['seq'], 'event': decode(r['body'])} for r in rows]}
+                        from csl_bridge_event_state import EventDeferred
+                        try:
+                            result = self.events.observe(agent, request['after'])
+                        except EventDeferred:
+                            result = None
+                        if result or self.stop.is_set() or time.monotonic() >= deadline:
+                            return {'notice': NOTICE, 'events': [result] if result else []}
                         self.changed.wait(max(.01, deadline - time.monotonic()))
                 finally:
                     self.waiters[agent] -= 1

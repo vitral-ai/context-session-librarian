@@ -30,11 +30,38 @@ class StreamTests(unittest.TestCase):
         self.host.journal.route('worker','env-a',self.guest.agents()['worker'])
         self.guest.journal.route('coordinator','hub',self.host.agents()['coordinator'])
         self.native_calls=[]
-        self.guest.native.client=lambda home:object()
-        self.guest.native.inject=lambda agent,r,session:self.native_calls.append(r['id'])or{
-            'state':'delivered','request_id':r['id'],'thread_id':self.guest.agents()['worker'],'turn_id':self.turn}
-        self.host.native.inject=lambda *args:{'state':'delivered'}
         self.turn=str(uuid.uuid4())
+        self.endpoints = {}
+        for node, turn in ((self.host, str(uuid.uuid4())), (self.guest, self.turn)):
+            outer = self
+            class Endpoint:
+                def __init__(inner, node, turn):
+                    inner.node, inner.turn = node, turn
+                    inner.effects = []
+                    inner.calls = []; inner.lose_ack = False
+                    inner.history = [{'id': turn, 'status': 'inProgress', 'items': []}]
+                def call(inner, method, params):
+                    inner.calls.append((method, dict(params)))
+                    if method in ('thread/read', 'thread/resume'):
+                        return {'thread': {'id': params['threadId'], 'status': {'type': 'active'}}}
+                    if method == 'thread/turns/list':
+                        return {'data': inner.history[:params['limit']]}
+                    if method in ('turn/start', 'turn/steer'):
+                        if method == 'turn/steer':
+                            outer.assertEqual(params['expectedTurnId'], inner.turn)
+                        inner.effects.append(params)
+                        inner.history[0]['items'].append({'type':'userMessage','clientId':params['clientUserMessageId']})
+                        if inner.node is outer.guest:
+                            outer.native_calls.append(params['clientUserMessageId'])
+                        if inner.lose_ack:
+                            from csl_bridge_rpc import RuntimeUnavailable
+                            inner.lose_ack = False
+                            raise RuntimeUnavailable('Synthetic event input accepted before lost ACK')
+                        return {'turnId': inner.turn} if method == 'turn/steer' else {'turn': {'id': inner.turn}}
+                    raise AssertionError(method)
+            endpoint = Endpoint(node, turn)
+            self.endpoints[node.config['node']] = endpoint
+            node.native.client = lambda home, endpoint=endpoint: endpoint
         self.addCleanup(self.cleanup)
 
     def make(self,node,agent,router):
@@ -56,6 +83,156 @@ class StreamTests(unittest.TestCase):
         for c,t,s,r,w in self.connections:
             t.join(2);r.close();w.close();s.close()
         for node in self.nodes:node.pool.shutdown(wait=True)
+
+    def test_light_receipt_observes_recovery_despite_a_cached_uncertain_ack(self):
+        from csl_bridge_engine import Connector
+        store, request, event, _ = self.event_fixture()
+        store.operation(request['id'], 'delivered', {'state': 'delivered', 'request_id': request['id'], 'turn_id': self.turn})
+        endpoint = self.endpoints['hub']; endpoint.lose_ack = True
+        frame = {'type': 'event', 'id': event['id'], 'event': event}
+        first = self.host.dispatch_event('env-a', frame)
+        self.host.journal.put('in', 'env-a', event['id'], frame)
+        self.host.journal.finish('in', 'env-a', event['id'], {'ok': True, 'data': first})
+        with store.transaction() as db:
+            db.execute('INSERT INTO peers VALUES(?,?)', ('env-a', encode({'transport': 'light', 'peer': 'env-a', 'home': str(self.host.home), 'allow_ops': ['receipt'], 'allow_agents': [], 'allow_sources': []})))
+        connector = Connector(store.home); self.addCleanup(connector.close)
+        def incoming(home, request):
+            self.assertEqual(home, str(store.home))
+            if request['local_op'] == '_light_events_changed':
+                return connector.local(request)
+            return connector.incoming(request['trusted_peer'], request['request'])
+        def query():
+            request = {'version': 1, 'op': 'receipt', 'id': str(uuid.uuid4()), 'request_id': event['id']}
+            return self.host.dispatch('env-a', {'type': 'request', 'request': request, 'origin': 'env-a', 'destination': 'hub'})
+        with patch('csl_bridge_transport.local_call', side_effect=incoming):
+            before = len(endpoint.calls)
+            self.assertFalse(query()['result']['native_accepted'])
+            self.assertEqual(len(endpoint.calls), before)
+        self.host.maintain_events()
+        until = time.monotonic() + 3
+        while time.monotonic() < until:
+            rows = store.rows('SELECT state FROM event_effects')
+            if rows and rows[0]['state'] == 'native_delivered':
+                break
+            time.sleep(.01)
+        with patch('csl_bridge_transport.local_call', side_effect=incoming):
+            accepted = query()
+        self.assertTrue(accepted['result']['native_accepted'])
+        self.assertEqual(accepted['result']['native_receipt']['turn_id'], endpoint.turn)
+        self.assertEqual(len(endpoint.effects), 1)
+
+    def test_routed_event_receipt_reuses_exact_route_and_existing_peer_acl(self):
+        from csl_bridge_engine import Connector
+        store, request, event, payload = self.event_fixture(node=self.guest, peer='host-alias', source='worker', target='coordinator')
+        with store.transaction() as db:
+            db.execute('INSERT INTO peers VALUES(?,?)', ('host-alias', encode({'transport': 'light', 'peer': 'hub', 'home': str(self.guest.home), 'allow_ops': ['receipt'], 'allow_agents': [], 'allow_sources': []})))
+        payload['destination'] = 'hub'
+        self.guest.journal.put('out', 'hub', request['id'], payload)
+        self.guest.journal.finish('out', 'hub', request['id'], {'ok': True, 'data': {'state': 'delivered', 'request_id': request['id'], 'turn_id': self.turn}})
+        self.guest.dispatch_event('hub', {'type': 'event', 'id': event['id'], 'event': event, 'origin': 'hub'})
+        connector = Connector(store.home); self.addCleanup(connector.close)
+        seen = []
+        def incoming(home, request):
+            seen.append(request['trusted_peer'])
+            return connector.incoming(request['trusted_peer'], request['request'])
+        query = {'version': 1, 'op': 'receipt', 'id': str(uuid.uuid4()), 'request_id': event['id']}
+        with patch('csl_bridge_transport.local_call', side_effect=incoming):
+            result = self.guest.dispatch('hub', {'type': 'request', 'request': query, 'origin': 'hub', 'destination': 'env-a'})
+            self.assertTrue(result['result']['native_accepted'])
+            self.assertEqual(seen[-1], 'host-alias')
+            with self.assertRaises(ValueError):
+                self.guest.dispatch('hub', {'type': 'request', 'request': query, 'origin': 'unproven-origin', 'destination': 'env-a'})
+            connector.peers['host-alias']['allow_ops'] = []
+            with self.assertRaises(ValueError):
+                self.guest.dispatch('hub', {'type': 'request', 'request': query, 'origin': 'hub', 'destination': 'env-a'})
+        self.assertEqual(len(self.endpoints['env-a'].effects), 1)
+
+    def test_two_wire_finals_share_one_real_native_grant_after_history_age(self):
+        store, request, event, _ = self.event_fixture()
+        receipt = {'state': 'delivered', 'request_id': request['id'], 'turn_id': self.turn,
+                   'thread_id': self.guest.agents()['worker']}
+        store.operation(request['id'], 'delivered', receipt)
+        frame = {'type': 'event', 'id': event['id'], 'event': event}
+        first = self.host.dispatch_event('env-a', frame)
+        self.assertTrue(first['native_accepted'])
+        endpoint = self.endpoints['hub']; before = len(endpoint.calls)
+        endpoint.turn = str(uuid.uuid4())
+        endpoint.history = [{'id': endpoint.turn, 'status': 'inProgress', 'items': []}] + [{'id': str(uuid.uuid4()), 'status': 'completed', 'items': []} for _ in range(20)]
+        alias = dict(event, id=str(uuid.uuid4()), session=receipt['thread_id'])
+        self.assertTrue(self.host.dispatch_event('env-a', {'type': 'event', 'id': alias['id'], 'event': alias})['native_accepted'])
+        self.assertTrue(self.host.dispatch_event('env-a', frame)['native_accepted'])
+        self.assertEqual(len(endpoint.effects), 1)
+        self.assertEqual(len(endpoint.calls), before)
+        self.assertNotIn(endpoint.effects[0]['clientUserMessageId'], (event['id'], alias['id'], request['id']))
+        self.assertEqual(len(store.rows('SELECT * FROM event_attempts')), 1)
+        self.assertEqual(len(store.rows("SELECT * FROM event_publications WHERE kind='final'")), 1)
+        self.assertEqual(len(store.rows('SELECT * FROM inbound')), 2)
+
+    def test_light_uncertain_final_aged_out_of_twenty_turns_never_reinjects(self):
+        store, request, event, _ = self.event_fixture()
+        store.operation(request['id'], 'delivered', {'state': 'delivered', 'request_id': request['id'], 'turn_id': self.turn})
+        endpoint = self.endpoints['hub']; endpoint.lose_ack = True
+        result = self.host.dispatch_event('env-a', {'type': 'event', 'id': event['id'], 'event': event})
+        self.assertEqual(result['delivery'], 'uncertain'); self.assertFalse(result['native_accepted'])
+        endpoint.turn = str(uuid.uuid4())
+        endpoint.history = [{'id': endpoint.turn, 'status': 'inProgress', 'items': []}] + [{'id': str(uuid.uuid4()), 'status': 'completed', 'items': []} for _ in range(20)]
+        alias = dict(event, id=str(uuid.uuid4()))
+        again = self.host.dispatch_event('env-a', {'type': 'event', 'id': alias['id'], 'event': alias})
+        self.assertEqual(again['delivery'], 'uncertain')
+        self.assertEqual(len(endpoint.effects), 1)
+        self.assertEqual(len(store.rows('SELECT * FROM event_attempts')), 1)
+        self.assertTrue(all(params['limit'] == 20 for method, params in endpoint.calls if method == 'thread/turns/list'))
+
+    def test_light_client_only_and_empty_final_never_report_native_acceptance(self):
+        for empty in (False, True):
+            with self.subTest(empty=empty):
+                store, request, event, _ = self.event_fixture()
+                store.operation(request['id'], 'delivered', {'state': 'delivered', 'request_id': request['id'], 'turn_id': self.turn})
+                if empty:
+                    event['text'] = ''
+                with patch.object(self.host.native, 'client', return_value=None):
+                    result = self.host.dispatch_event('env-a', {'type': 'event', 'id': event['id'], 'event': event})
+                self.assertEqual(result['state'], 'persisted'); self.assertFalse(result['native_accepted'])
+                self.assertEqual(result['delivery'], 'receipt_available' if empty else 'pending')
+        self.assertEqual(self.endpoints['hub'].effects, [])
+
+    def test_rejected_light_alternate_does_not_poison_accepted_native_replay(self):
+        store, request, event, _ = self.event_fixture()
+        store.operation(request['id'], 'delivered', {'state': 'delivered', 'request_id': request['id'], 'turn_id': self.turn})
+        frame = {'type': 'event', 'id': event['id'], 'event': event}
+        first = self.host.dispatch_event('env-a', frame)
+        changed = dict(event, text='Rejected changed final')
+        with self.assertRaises(ValueError):
+            self.host.dispatch_event('env-a', {'type': 'event', 'id': changed['id'], 'event': changed})
+        self.assertEqual(self.host.dispatch_event('env-a', frame)['delivery'], first['delivery'])
+        self.assertEqual(len(self.endpoints['hub'].effects), 1)
+        self.assertEqual(len(store.rows('SELECT * FROM inbound')), 1)
+
+    def test_light_broker_does_not_activate_legacy_only_event_jobs(self):
+        store, request, event, _ = self.event_fixture(peer='legacy')
+        store.operation(request['id'], 'delivered', {'state': 'delivered', 'request_id': request['id'], 'turn_id': self.turn})
+        with store.transaction() as db:
+            db.execute('INSERT INTO inbound(id,peer,body)VALUES(?,?,?)', (event['id'], 'legacy', encode(event)))
+        with patch.object(self.host, 'schedule_event') as schedule:
+            self.host.maintain_events()
+            schedule.assert_not_called()
+        self.assertEqual(self.endpoints['hub'].effects, [])
+
+    def test_light_recovery_uses_only_recorded_thread_and_twenty_typed_turns(self):
+        home, old_thread = self.host.agent('coordinator')
+        client_id = str(uuid.uuid4()); endpoint = self.endpoints['hub']
+        endpoint.history = [{'id': str(uuid.uuid4()), 'status': 'completed', 'items': []} for _ in range(21)]
+        endpoint.history[20]['items'] = [{'type': 'userMessage', 'clientId': client_id}]
+        with contextlib.closing(Store(home)) as store:
+            with store.transaction() as db:
+                db.execute('UPDATE agents SET thread=? WHERE name=?', (str(uuid.uuid4()), 'coordinator'))
+        self.assertEqual(self.host.native.find_event_acceptance(home, old_thread, [client_id]), {})
+        endpoint.history[0]['items'] = [{'type': 'agentMessage', 'clientId': client_id}]
+        self.assertEqual(self.host.native.find_event_acceptance(home, old_thread, [client_id]), {})
+        endpoint.history[0]['items'][0]['type'] = 'userMessage'
+        self.assertEqual(self.host.native.find_event_acceptance(home, old_thread, [client_id]), {client_id: endpoint.history[0]['id']})
+        self.assertTrue(all(method == 'thread/turns/list' and params['limit'] == 20 and params['threadId'] == old_thread for method, params in endpoint.calls))
+        self.assertEqual(endpoint.effects, [])
 
     def test_followup_and_final_push_survive_ack_loss_and_use_existing_event_envelope(self):
         self.connect();identifier=str(uuid.uuid4());request={'version':1,'op':'followup','id':identifier,'source':'coordinator','target':'worker','text':'synthetic work'}
@@ -97,8 +274,7 @@ class StreamTests(unittest.TestCase):
         self.addCleanup(store.close)
         store.reserve('outbound:env-a', request)
         store.operation(identifier, 'uncertain', {'state': 'uncertain'})
-        injections = []
-        self.host.native.inject = lambda *args: injections.append(args) or {'state': 'delivered'}
+        injections = self.endpoints['hub'].effects
         event = {'id': str(uuid.uuid4()), 'task_id': identifier, 'source': 'worker',
                  'target': 'coordinator', 'kind': 'final', 'text': 'Synthetic final',
                  'turn_id': self.turn, 'status': 'completed'}
@@ -150,7 +326,7 @@ class StreamTests(unittest.TestCase):
                 if fault == 'hash':
                     with self.host.journal.db() as db:
                         db.execute("UPDATE rpc SET hash='bad' WHERE id=?", (request['id'],))
-                with patch.object(self.host.native, 'inject') as inject:
+                with patch.object(self.host.native, 'send_event') as inject:
                     with self.assertRaises((ValueError, RuntimeError)):
                         self.host.dispatch_event('env-a', {'type': 'event', 'id': event['id'], 'event': event})
                     inject.assert_not_called()
@@ -159,7 +335,7 @@ class StreamTests(unittest.TestCase):
     def test_authenticated_peer_cannot_answer_other_peer_operation(self):
         store, request, event, _ = self.event_fixture(peer='env-b')
         store.operation(request['id'], 'delivered', {'turn_id': self.turn})
-        with patch.object(self.host.native, 'inject') as inject:
+        with patch.object(self.host.native, 'send_event') as inject:
             with self.assertRaisesRegex(ValueError, 'peer differs'):
                 self.host.dispatch_event('env-a', {'type': 'event', 'event': event})
             inject.assert_not_called()
@@ -201,7 +377,7 @@ class StreamTests(unittest.TestCase):
         store, request, event, _ = self.event_fixture(
             node=self.guest, peer='hub', source='worker', target='coordinator')
         store.operation(request['id'], 'delivered', {'turn_id': self.turn})
-        with patch.object(self.guest.native, 'inject') as inject:
+        with patch.object(self.guest.native, 'send_event') as inject:
             with self.assertRaisesRegex(RuntimeError, 'routed RPC provenance'):
                 self.guest.dispatch_event('hub', {'type': 'event', 'event': event, 'origin': 'hub'})
             inject.assert_not_called()
@@ -265,7 +441,12 @@ class StreamTests(unittest.TestCase):
             with store.transaction() as db:
                 db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?)',
                            (request['id'], peer, 'coordinator', 'worker', turn, 'running'))
-            publish_task_completion(store, 'worker', thread, turn, 'completed', 'Synthetic final')
+            if accepted:
+                publish_task_completion(store, 'worker', thread, turn, 'completed', 'Synthetic final')
+            else:
+                # Retained legacy row predates the atomic, receipt-gated publisher.
+                store.publish(peer, {'task_id': request['id'], 'source': 'worker', 'target': 'coordinator',
+                    'turn_id': turn, 'kind': 'final', 'status': 'completed', 'text': 'Synthetic legacy final'}, str(uuid.uuid4()))
         else:
             store.publish(peer, {'task_id': request['id'], 'source': 'worker', 'target': 'coordinator',
                 'turn_id': turn, 'kind': 'progress', 'status': 'progress', 'text': 'Synthetic progress'}, str(uuid.uuid4()))

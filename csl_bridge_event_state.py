@@ -1,9 +1,7 @@
-"""Inert event-effect transaction primitives; no transport imports or activation.
+"""Canonical event-effect transactions and per-home Native ID purposes.
 
-Consumers must supply independently correlated identities and complete historical
-seeding before setting seed_complete/pending. This module does not implement that
-admission/upgrade integration and is deliberately unused by production consumers.
-All ID purposes and claims are scoped to this Store's exact bridge.sqlite.
+Store initializes the ID namespace; EventDelivery supplies independent original
+correlation and bounded historical seeding. All effects occur outside SQLite.
 """
 from contextlib import nullcontext
 import hashlib
@@ -32,8 +30,8 @@ class EventState:
 
     def __init__(self, store):
         self.store = store
-        # Not called from Store.__init__: this contribution is inert until the
-        # reviewed consumer/old-home integration explicitly activates it.
+        # Store initializes these shared tables before any operation/mail/event
+        # Native ID reservation; classification remains EventDelivery work.
         with store.transaction() as db:
             for statement in (
                 '''CREATE TABLE IF NOT EXISTS event_effects(
@@ -133,10 +131,10 @@ class EventState:
             watermark = metadata['watermark']
             if watermark != db.execute('SELECT max(seq) FROM inbound').fetchone()[0]:
                 raise EventDeferred('Historical catalog has an unresolved tail')
-        if not row['seed_complete'] or row['state'] in ('seeding', 'deferred'):
-            raise EventDeferred('Historical/correlation proof is incomplete')
         if row['state'] in ('conflict', 'rejected'):
             raise EventConflict('Canonical event identity is conflicted')
+        if not row['seed_complete'] or row['state'] in ('seeding', 'deferred'):
+            raise EventDeferred('Historical/correlation proof is incomplete')
         barrier = db.execute('SELECT 1 FROM event_history_barriers WHERE peer IS NULL OR peer=? LIMIT 1',
                              (row['peer'],)).fetchone()
         if barrier:

@@ -1,8 +1,7 @@
-"""Inactive bounded history helpers; transport admission and Native remain separate.
+"""Bounded history substrate shared by Native, wait and transport consumers.
 
-Local preparation depends on the separately reviewed event-state contribution.
-No production consumer imports or opens this module. Old and new effect writers
-must never share a home during eventual activation.
+No Native I/O runs here. A home must have one coordinated consumer version;
+old per-wire effect writers cannot safely coexist with canonical claims.
 """
 import hashlib
 import struct
@@ -77,7 +76,7 @@ class EventHistory:
                 'CREATE INDEX IF NOT EXISTS event_legacy_thread ON event_legacy_attempts(key,thread)',
                 '''CREATE TABLE IF NOT EXISTS event_publications(
                     seq INTEGER PRIMARY KEY,wire_id TEXT NOT NULL,kind TEXT NOT NULL,
-                    key TEXT,target TEXT NOT NULL)''',
+                    key TEXT,target TEXT NOT NULL,visible INTEGER NOT NULL DEFAULT 1)''',
                 "CREATE UNIQUE INDEX IF NOT EXISTS event_final_representative ON event_publications(key) WHERE kind='final'",
                 'CREATE INDEX IF NOT EXISTS event_publication_wait ON event_publications(target,seq)',
                 '''CREATE TABLE IF NOT EXISTS event_history_conflicts(
@@ -99,6 +98,10 @@ class EventHistory:
                     reason TEXT NOT NULL,PRIMARY KEY(task,wire_id,raw_hash,reason))''',
             ):
                 db.execute(statement)
+            columns = {row[1] for row in db.execute('PRAGMA table_info(event_publications)')}
+            if 'visible' not in columns:
+                db.execute('ALTER TABLE event_publications ADD COLUMN visible INTEGER NOT NULL DEFAULT 1')
+            db.execute('CREATE INDEX IF NOT EXISTS event_publication_visible ON event_publications(target,visible,seq)')
             if db.execute('SELECT version FROM event_catalog_meta WHERE id=1').fetchone()[0] != 1:
                 raise EventDeferred('Unknown historical catalog schema version')
 
@@ -160,37 +163,42 @@ class EventHistory:
                     row['delivery'], int(legacy), conflict))
         if conflict:
             self.note(db, row, conflict)
+        if kind in ('final', 'progress'):
+            self.capture_original(db, row, decode(row['body']), key or 'progress:' + row['id'], legacy=legacy)
         if key:
             event = decode(row['body'])
             db.execute('INSERT INTO event_final_gaps VALUES(?,?,?) ON CONFLICT(key,target)DO UPDATE SET seq=min(seq,excluded.seq)',
                        (key, event['target'], row['seq']))
-            proof = self.proof(db, peer, event)
-            if proof['state'] == 'conflict':
-                reason = 'Contradictory original proof during catalog: ' + proof.get('reason', 'wrong original peer')
-                if proof.get('evidence'):
-                    reason += ' proof=' + proof['evidence']
-                db.execute('UPDATE event_catalog SET conflict=? WHERE seq=?', (reason, row['seq']))
-                self.note(db, row, reason)
-            if proof['binding'] is not None:
-                db.execute('INSERT OR IGNORE INTO event_original_bindings VALUES(?,?)',
-                           (key, digest(proof['binding'])))
-                known = db.execute('SELECT signature FROM event_original_bindings WHERE key=?', (key,)).fetchone()
-                if known[0] != digest(proof['binding']):
-                    db.execute('UPDATE event_catalog SET conflict=? WHERE seq=?', ('Known original authority changed during catalog', row['seq']))
-                    self.note(db, row, 'Known original authority changed during catalog')
-            # Capture historical uncertainty NOW, before a later restored original
-            # could lend an unknown old attempt a newly discovered thread.
-            if legacy and row['delivery'] == 'uncertain':
-                db.execute('INSERT OR IGNORE INTO event_legacy_attempts VALUES(?,?,?,?,?)',
-                           (row['seq'], key, row['id'], fingerprint, proof['thread']))
             effect = db.execute('SELECT state,seed_complete FROM event_effects WHERE key=?', (key,)).fetchone()
             if effect and effect['seed_complete']:
                 db.execute('UPDATE event_seed_state SET resume_state=? WHERE key=?', (effect['state'], key))
                 db.execute('UPDATE event_effects SET seed_complete=0,revision=revision+1 WHERE key=?', (key,))
         if kind == 'progress':
             event = decode(row['body'])
-            db.execute('INSERT OR IGNORE INTO event_publications VALUES(?,?,?,?,?)',
+            db.execute('INSERT OR IGNORE INTO event_publications(seq,wire_id,kind,key,target) VALUES(?,?,?,?,?)',
                        (row['seq'], row['id'], kind, None, event['target']))
+
+    def capture_original(self, db, row, event, key, *, legacy):
+        peer, fingerprint = row['peer'], raw_hash(row['body'])
+        proof = self.proof(db, peer, event)
+        if proof['state'] == 'conflict':
+            reason = 'Contradictory original proof during catalog: ' + proof.get('reason', 'wrong original peer')
+            if proof.get('evidence'):
+                reason += ' proof=' + proof['evidence']
+            db.execute('UPDATE event_catalog SET conflict=? WHERE seq=?', (reason, row['seq']))
+            self.note(db, row, reason)
+        if proof['binding'] is not None:
+            db.execute('INSERT OR IGNORE INTO event_original_bindings VALUES(?,?)',
+                       (key, digest(proof['binding'])))
+            known = db.execute('SELECT signature FROM event_original_bindings WHERE key=?', (key,)).fetchone()
+            if known[0] != digest(proof['binding']):
+                db.execute('UPDATE event_catalog SET conflict=? WHERE seq=?', ('Known original authority changed during catalog', row['seq']))
+                self.note(db, row, 'Known original authority changed during catalog')
+        # Capture historical uncertainty NOW, before a later restored original
+        # could lend an unknown old attempt a newly discovered thread.
+        if legacy and row['delivery'] == 'uncertain':
+            db.execute('INSERT OR IGNORE INTO event_legacy_attempts VALUES(?,?,?,?,?)',
+                       (row['seq'], key, row['id'], fingerprint, proof['thread']))
 
     def catalog_step(self, limit=128):
         if type(limit) is not int or not 1 <= limit <= 128:
@@ -408,7 +416,7 @@ class EventHistory:
                        (projection or '', representative, outcome, thread,
                         encode({'legacy_delivered_unproven': bool(delivered), 'legacy_uncertain': bool(uncertain)}), key))
             db.execute('UPDATE event_seed_state SET sealed=1,resume_state=? WHERE key=?', (outcome, key))
-            db.execute("INSERT INTO event_publications VALUES(?,?,?,?,?) ON CONFLICT(seq)DO NOTHING",
+            db.execute("INSERT INTO event_publications(seq,wire_id,kind,key,target) VALUES(?,?,?,?,?) ON CONFLICT(seq)DO NOTHING",
                        (representative, first['wire_id'], 'final', key, event['target']))
             return {'processed': len(rows), 'complete': True, 'state': outcome}
 
@@ -436,6 +444,8 @@ class EventHistory:
             raise EventConflict('Canonical original identity changed')
         if proof['state'] != 'confirmed':
             raise EventDeferred('Original Native acceptance is unresolved')
+        if seeded['sender'] and proof['sender'] and seeded['sender'] != proof['sender']:
+            raise EventConflict('Known original sender binding changed')
         self.projection(row['peer'], event, proof)
         frozen = self.projection(row['peer'], event, {**proof, 'sender': seeded['sender']})
         if frozen != effect['projection'] or event['target'] != effect['agent']:
@@ -491,7 +501,7 @@ class EventHistory:
             db.execute("UPDATE operations SET state='delivered',result=? WHERE id=?", (saved['receipt'], event['task_id']))
             return saved_receipt
 
-    def admit(self, peer, event, *, cursor=None, route=None):
+    def admit(self, peer, event, *, cursor=None, route=None, include_created=False):
         """Persist an alias/cursor atomically; result is persistence, NOT Native acceptance."""
         name(peer)
         try:
@@ -544,12 +554,12 @@ class EventHistory:
                     return refused('Original authenticated route changed')
                 if encoded_route is None or saved:
                     advance_cursor()
-                    return {'state': 'persisted', 'event_id': event['id'], 'seq': prior['seq']}
+                    return {'state': 'persisted', 'event_id': event['id'], 'seq': prior['seq'], **({'created': False} if include_created else {})}
             proof = self.proof(db, peer, event)
             if proof['state'] == 'conflict':
                 return refused('Contradictory original identity')
             if proof['state'] != 'confirmed':
-                raise EventDeferred('Waiting for original Native acceptance')
+                raise EventDeferred('Waiting for original native acceptance receipt')
             try:
                 self.projection(peer, event, proof)
             except EventConflict as error:
@@ -593,49 +603,63 @@ class EventHistory:
                 db.execute('UPDATE event_catalog_meta SET watermark=? WHERE id=1', (db.execute('SELECT max(seq) FROM inbound').fetchone()[0],))
             if cursor is not None:
                 db.execute('INSERT INTO cursors VALUES(?,?) ON CONFLICT(peer)DO UPDATE SET value=max(value,excluded.value)', (peer, cursor))
-            return {'state': 'persisted', 'event_id': event['id'], 'seq': prior['seq']}
+            return {'state': 'persisted', 'event_id': event['id'], 'seq': prior['seq'], **({'created': created} if include_created else {})}
 
-    def next_publication(self, agent, after):
+    def next_publication(self, agent, after, *, progress_guard=None):
         """Read only. Consumer must still win/recheck the shared effect claim."""
-        with self.store.transaction() as db:
-            if not self.complete(db):
-                raise EventDeferred('History catalog has an unresolved tail')
-            row = db.execute('SELECT p.*,i.body FROM event_publications p JOIN inbound i USING(seq) WHERE p.target=? AND p.seq>? ORDER BY p.seq LIMIT 1', (agent, after)).fetchone()
-            gap = db.execute('SELECT * FROM event_final_gaps WHERE target=? AND seq>? ORDER BY seq LIMIT 1', (agent, after)).fetchone()
-            if gap and (row is None or gap['seq'] < row['seq']):
-                raise EventDeferred('Earlier canonical final holds the wait cursor')
-            if row is None:
-                return None
-            if db.execute('SELECT 1 FROM event_history_barriers WHERE seq<=? LIMIT 1', (row['seq'],)).fetchone():
-                raise EventDeferred('Unknown earlier recipient holds the wait cursor')
-            entry = db.execute('SELECT * FROM event_catalog WHERE seq=?', (row['seq'],)).fetchone()
-            if raw_hash(row['body']) != entry['raw_hash']:
-                raise EventConflict('Publication body changed')
-            event = decode(row['body'])
-            result = dict(row)
-            effect = None
-            seeded = None
-            if row['kind'] == 'final':
-                seeded = db.execute('SELECT * FROM event_seed_state WHERE key=?', (row['key'],)).fetchone()
-                effect = db.execute('SELECT * FROM event_effects WHERE key=?', (row['key'],)).fetchone()
-                if not effect or not effect['seed_complete']:
-                    raise EventDeferred('Canonical final seed is incomplete')
-                self.effects.checked(db, row['key'], effect['revision'])
-                if effect['state'] == 'uncertain':
-                    raise EventDeferred('Uncertain final attempt holds this cursor')
-                result['revision'] = effect['revision']
-                if effect['state'] in SETTLED:
+        row = entry = None
+        try:
+            with self.store.transaction() as db:
+                if not self.complete(db):
+                    raise EventDeferred('History catalog has an unresolved tail')
+                row = db.execute('SELECT p.*,i.body FROM event_publications p JOIN inbound i USING(seq) WHERE p.target=? AND p.visible=1 AND p.seq>? ORDER BY p.seq LIMIT 1', (agent, after)).fetchone()
+                gap = db.execute("SELECT g.* FROM event_final_gaps g WHERE g.target=? AND g.seq>? AND NOT EXISTS(SELECT 1 FROM event_publications p WHERE p.key=g.key AND p.kind='final' AND p.visible=0) ORDER BY g.seq LIMIT 1", (agent, after)).fetchone()
+                if gap and (row is None or gap['seq'] < row['seq']):
+                    refused = db.execute('SELECT state FROM event_effects WHERE key=?', (gap['key'],)).fetchone()
+                    raw = db.execute('SELECT c.raw_hash,i.body FROM event_catalog c JOIN inbound i USING(seq) WHERE c.seq=?', (gap['seq'],)).fetchone()
+                    if refused and refused['state'] in ('conflict', 'rejected') and raw and raw_hash(raw['body']) == raw['raw_hash']:
+                        error = EventConflict('Earlier canonical final has a terminal refusal')
+                        error.event_seq = gap['seq']
+                        raise error
+                    raise EventDeferred('Earlier canonical final holds the wait cursor')
+                if row is None:
+                    return None
+                if db.execute('SELECT 1 FROM event_history_barriers WHERE seq<=? LIMIT 1', (row['seq'],)).fetchone():
+                    raise EventDeferred('Unknown earlier recipient holds the wait cursor')
+                entry = db.execute('SELECT * FROM event_catalog WHERE seq=?', (row['seq'],)).fetchone()
+                if raw_hash(row['body']) != entry['raw_hash']:
+                    raise EventConflict('Publication body changed')
+                event = decode(row['body'])
+                result = dict(row)
+                effect = None
+                seeded = None
+                if row['kind'] == 'final':
+                    seeded = db.execute('SELECT * FROM event_seed_state WHERE key=?', (row['key'],)).fetchone()
+                    effect = db.execute('SELECT * FROM event_effects WHERE key=?', (row['key'],)).fetchone()
+                    if not effect or not effect['seed_complete']:
+                        raise EventDeferred('Canonical final seed is incomplete')
+                    self.effects.checked(db, row['key'], effect['revision'])
+                    if effect['state'] == 'uncertain':
+                        raise EventDeferred('Uncertain final attempt holds this cursor')
+                    result['revision'] = effect['revision']
                     self.guard(db, effect)
                     return result
-            proof = self.proof(db, entry['peer'], event)
-            if proof['state'] == 'conflict' or entry['conflict']:
-                raise EventConflict('Publication has contradictory original proof')
-            if proof['state'] != 'confirmed':
-                raise EventDeferred('Original Native acceptance is unresolved')
-            self.projection(entry['peer'], event, proof)
-            if effect and (not seeded or seeded['signature'] != digest(proof['binding'])):
-                raise EventConflict('Publication original authority changed')
-            return result
+                proof = progress_guard(db, row['wire_id'])[2] if progress_guard else self.proof(db, entry['peer'], event)
+                if proof['state'] == 'conflict' or entry['conflict']:
+                    raise EventConflict('Publication has contradictory original proof')
+                if proof['state'] != 'confirmed':
+                    raise EventDeferred('Original Native acceptance is unresolved')
+                self.projection(entry['peer'], event, proof)
+                if effect and (not seeded or seeded['signature'] != digest(proof['binding'])):
+                    raise EventConflict('Publication original authority changed')
+                return result
+        except EventConflict as error:
+            # Only a stable, permanently refused publication can be hidden.
+            # Tampered raw history holds the cursor instead of being skipped.
+            if row is not None and entry is not None and raw_hash(row['body']) == entry['raw_hash']:
+                error.event_seq = row['seq']
+            raise
+
 
     def publish_final(self, task_id, thread, status, text):
         """Freeze first exact final and finalize task in one bridge transaction."""
