@@ -2,68 +2,37 @@
 from contextlib import contextmanager
 import ctypes
 import hashlib
+import http.client
 import json
 import math
 import os
 from pathlib import Path
-import re
 import signal
 import stat
 import subprocess
 import sys
 import time
 import uuid
+import urllib.request
+import urllib.parse
 
-from csl_canonical import strict_json
 from csl_gemini_workload import WorkloadGeminiProvider
-from csl_sync_engine import Collector
-from csl_sync_http import Registry
-from csl_sync_state import State, SyncError, exclusive, private_directory, private_json
+from csl_sync_engine import Collector, digest
+from csl_sync_http import Registry, NoRedirect
+from csl_sync_state import State, SyncError, exclusive, private_json
 from csl_text_workload import WorkloadTextProvider
 from csl_workload_auth import WorkloadTokens, boot_clock
 from csl_workload_config import Configuration, PREFIX
 from csl_workload_http import WorkloadHTTP
 from csl_workload_identity import WorkloadKey, canonical, metadata
 from csl_workload_stream import Bounds, opened_source, verify_prefix
+from csl_workload_state import child, read_record
+from csl_workload_producer import Producer, recover as recover_producer
 
 POLL_SECONDS = 0.1
 PASS_SECONDS = 60
 WRITER_SECONDS = 5
 REAP_SECONDS = 0.5
-
-
-def child(root, name):
-    if (not isinstance(name, str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', name)
-            or root.resolve() != root):
-        raise SyncError('workload_runtime_storage_refused')
-    path = root/name
-    if path.exists() or path.is_symlink():
-        info = path.lstat()
-        if (not stat.S_ISDIR(info.st_mode) or path.resolve() != path
-                or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700):
-            raise SyncError('workload_runtime_storage_refused')
-    return private_directory(path)
-
-
-def read_record(path):
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except FileNotFoundError:
-        return None
-    except OSError:
-        raise SyncError('workload_runtime_storage_refused') from None
-    with os.fdopen(fd, 'rb') as stream:
-        info = os.fstat(stream.fileno())
-        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()
-                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 65536):
-            raise SyncError('workload_runtime_storage_refused')
-        data = stream.read(65537)
-    try:
-        value = strict_json(data)
-        if isinstance(value, dict) and len(data) <= 65536: return value
-    except (ValueError, UnicodeError, RecursionError):
-        pass
-    raise SyncError('workload_runtime_record_refused')
 
 
 def clean_receipts(runtime):
@@ -150,6 +119,28 @@ class DeadlineHTTP(WorkloadHTTP):
         if type(deadline) not in (int, float) or not math.isfinite(deadline) or deadline <= boot_clock():
             raise SyncError('workload_flush_deadline')
         super().__init__(origin, **options)
+        self.deadline = deadline
+        context = next(handler._context for handler in self.opener.handlers
+                       if isinstance(handler, urllib.request.HTTPSHandler))
+        def check():
+            if boot_clock() >= deadline: raise SyncError('workload_flush_deadline')
+        class Connection(http.client.HTTPSConnection):
+            def connect(self):
+                check()
+                super().connect()
+                try: check()
+                except SyncError:
+                    self.close(); raise
+
+            def send(self, data):
+                if self.sock is None: self.connect()
+                check()  # After DNS/TLS and immediately before each byte write.
+                return super().send(data)
+
+        class Handler(urllib.request.HTTPSHandler):
+            def https_open(self, request):
+                return self.do_open(Connection, request, context=self._context)
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(), Handler(context=context))
         opener = self.opener
         class Guard:
             def open(self, request, timeout):
@@ -157,6 +148,71 @@ class DeadlineHTTP(WorkloadHTTP):
                 if remaining <= 0: raise SyncError('workload_flush_deadline')
                 return opener.open(request, timeout=min(timeout, remaining))
         self.opener = Guard()
+
+    def request(self, *args, **kwargs):
+        if kwargs.get('data') is not None and not isinstance(kwargs['data'], bytes):
+            raise SyncError('workload_request_body_refused')
+        try: return super().request(*args, **kwargs)
+        finally:
+            # Covers response bodies and HTTP-error reads as well as headers.
+            if boot_clock() >= self.deadline: raise SyncError('workload_flush_deadline')
+
+
+class ProofRegistry(Registry):
+    """Fresh final proof of the exact existing plan, never a new generation."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.plans = {}
+
+    def call(self, method, path, **kwargs):
+        result = super().call(method, path, **kwargs)
+        if method == 'PUT' and path.startswith('/sessions/') and len(path.split('/')) == 4:
+            self.plans[path] = json.loads(json.dumps(kwargs['body']))
+        return result
+
+    def prove(self, state, provider):
+        if not self.plans: raise SyncError('workload_final_proof_refused')
+        for path, plan in list(self.plans.items()):
+            local = state.session(provider, urllib.parse.unquote(path.split('/')[-1]))
+            expected = {(row['file_key'], row['revision']): row for row in plan['files']}
+            cursor, seen, found, count = None, set(), set(), 0
+            for _ in range(1000):
+                suffix = '/files?limit=100' + ('&cursor='+urllib.parse.quote(cursor, safe='') if cursor else '')
+                page = self.call('GET', path+suffix)
+                rows = page.get('items')
+                if not isinstance(rows, list) or len(rows)+count > 10000: raise SyncError('workload_final_proof_refused')
+                count += len(rows)
+                for row in rows:
+                    if not isinstance(row, dict) or not isinstance(row.get('file_key'), str) or not isinstance(row.get('revision'), str):
+                        raise SyncError('workload_final_proof_refused')
+                    key = row['file_key'], row['revision']
+                    if key in expected:
+                        target = expected[key]
+                        if key in found or type(row.get('length')) is not int or row['length'] != target['length'] or row.get('sha256') != target['sha256']:
+                            raise SyncError('workload_final_proof_refused')
+                        found.add(key)
+                cursor = page.get('next_cursor')
+                if cursor is None: break
+                if not isinstance(cursor, str) or not 1 <= len(cursor) <= 2048 or cursor in seen: raise SyncError('workload_final_proof_refused')
+                seen.add(cursor)
+            else: raise SyncError('workload_final_proof_refused')
+            if found != set(expected) or local.get('snapshot_id') != plan['snapshot_id'] or local.get('status') != 'synced':
+                raise SyncError('workload_final_proof_refused')
+            if (local.get('view', {}).get('generation') != plan['view']['generation']
+                    or local.get('view', {}).get('last_seq') != plan['view']['last_seq']):
+                raise SyncError('workload_final_proof_refused')
+            for (file_key, revision), target in expected.items():
+                checkpoint = local['files'][file_key]
+                if (checkpoint['revision'] != revision or checkpoint.get('offset') != target['length']
+                        or checkpoint.get('offset_sha256') != target['sha256']):
+                    raise SyncError('workload_final_proof_refused')
+            result = self.call('PUT', path, body=plan, key=digest(plan))
+            view = result.get('view')
+            if (result.get('snapshot_id') != plan['snapshot_id'] or not isinstance(view, dict)
+                    or view.get('generation') != plan['view']['generation'] or type(view.get('last_seq')) is not int
+                    or view['last_seq'] != plan['view']['last_seq'] or not isinstance(result.get('sync'), dict)
+                    or result['sync'].get('complete') is not True):
+                raise SyncError('workload_final_proof_refused')
 
 
 def source_manifest(config, adapter):
@@ -192,7 +248,10 @@ def run_pass(config, deadline):
         binding = {'scope': scope(config), 'account_id': identity['account_id'], 'device_id': identity['device_id']}
         previous = read_record(runtime/'binding.json')
         if previous is not None and previous != binding: raise SyncError('workload_runtime_binding_changed')
-        if previous is None and ((sync/'state.sqlite').exists() or (runtime/'sources.json').exists()):
+        projection_path = config.state_root/'projection'
+        populated_projection = projection_path.exists() and (projection_path.is_symlink() or not projection_path.is_dir()
+                                                            or any(projection_path.iterdir()))
+        if previous is None and ((sync/'state.sqlite').exists() or (runtime/'sources.json').exists() or populated_projection):
             raise SyncError('workload_runtime_binding_changed')
         private_json(runtime/'binding.json', binding)
         selected = sources(config.transcript_root)
@@ -213,9 +272,11 @@ def run_pass(config, deadline):
         try:
             state.set('device_id', identity['device_id'])
             state.set('settings', {'label': config.location['label'], 'kind': 'workload'})
-            result = Collector(state, Registry(http.origin.registry, tokens, http=http), adapter).run(
+            registry = ProofRegistry(http.origin.registry, tokens, http=http)
+            result = Collector(state, registry, adapter).run(
                 providers=[config.provider], days=None)
             if result['pending']: return {'ok': False, 'synced': result['synced'], 'pending': result['pending'], 'manifest': []}
+            registry.prove(state, config.provider)
             manifest = source_manifest(config, adapter)
             return {'ok': True, 'synced': result['synced'], 'pending': 0, 'manifest': manifest}
         finally:
@@ -267,17 +328,6 @@ class PassProcess:
         return True
 
 
-def group_exists(pid):
-    try: os.killpg(pid, 0)
-    except ProcessLookupError: return False
-    return True
-
-
-def signal_group(pid, signum):
-    try: os.killpg(pid, signum)
-    except ProcessLookupError: pass
-
-
 @contextmanager
 def stop_signals(stop):
     previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
@@ -299,7 +349,7 @@ class Runner:
     def run(self, command=None):
         runtime = child(self.config.state_root, 'runtime')
         with exclusive(runtime, 'runner.lock'), stop_signals(self.stop):
-            owner = {'version': 1, 'scope': scope(self.config)}
+            owner = {'version': 2, 'scope': scope(self.config)}
             previous = read_record(runtime/'runner.json')
             if previous is None:
                 # The lock is the only expected entry before the first claim.
@@ -309,6 +359,7 @@ class Runner:
                 private_json(runtime/'runner.json', owner)
             elif previous != owner:
                 raise SyncError('workload_runtime_binding_changed')
+            recover_producer(runtime, scope(self.config))
             clean_receipts(runtime)
             private_json(runtime/'configuration.json', environment(self.config))
             return self._run(command)
@@ -327,8 +378,7 @@ class Runner:
                 if self.stopping: return report
                 # The writer inherits its own environment without inspection;
                 # collector children instead receive only the allowlist above.
-                writer = subprocess.Popen(command, start_new_session=True,
-                    stdin=None, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                writer = Producer(child(self.config.state_root, 'runtime'), scope(self.config), command)
             next_pass = self.clock()
             while not self.stopping and (writer is None or writer.poll() is None):
                 if worker is None and self.clock() >= next_pass:
@@ -345,14 +395,12 @@ class Runner:
                             worker.remove_receipt(); worker = None; next_pass = self.clock()+1
                 self.sleep(POLL_SECONDS)
             if writer is not None:
-                signal_group(writer.pid, signal.SIGTERM)
-                until = self.clock()+WRITER_SECONDS
-                while group_exists(writer.pid) and self.clock() < until:
-                    writer.poll(); self.sleep(POLL_SECONDS)
-                if group_exists(writer.pid): signal_group(writer.pid, signal.SIGKILL)
-                try: writer.wait(timeout=REAP_SECONDS)
+                writer.stop()
+                until = self.clock()+WRITER_SECONDS+2*REAP_SECONDS
+                while writer.poll() is None and self.clock() < until: self.sleep(POLL_SECONDS)
+                try: writer.wait(timeout=max(0, min(REAP_SECONDS, until-self.clock())))
                 except subprocess.TimeoutExpired: pass
-                report['producer_quiesced'] = not group_exists(writer.pid)
+                report['producer_quiesced'] = writer.quiesced()
                 writer_group_finished = report['producer_quiesced']
                 report['writer_exit'] = writer.returncode
             # The budget begins after producer quiescence/its bounded attempt.
@@ -385,7 +433,7 @@ class Runner:
                 remaining = REAP_SECONDS if drain_deadline is None else min(REAP_SECONDS, max(0, drain_deadline-self.clock()))
                 report['worker_reaped'] = worker.reap(remaining); worker.remove_receipt()
             if writer is not None and not writer_group_finished:
-                signal_group(writer.pid, signal.SIGKILL)
+                writer.stop()
                 remaining = REAP_SECONDS if drain_deadline is None else min(REAP_SECONDS, max(0, drain_deadline-self.clock()))
                 try: writer.wait(timeout=remaining)
                 except subprocess.TimeoutExpired: pass

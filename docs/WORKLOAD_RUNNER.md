@@ -42,7 +42,8 @@ cannot fall back to desktop credentials. There is no harness credential access.
 The exclusive runner claim binds provider/profile, origin, transcript root and
 workload metadata. Its private receipt directory cannot be adopted or cleaned
 without that claim. The sync journal is additionally bound to the approved
-account/device. A populated unbound journal refuses before registration/upload.
+account/device. Populated unbound ACK or projection/capture caches refuse before
+registration/upload; original cache files are preserved, never silently adopted.
 Changing that context is not an automatic cache reset. Receipts are private,
 bounded, run-ID/scope checked, never authoritative instead of durable uploader
 ACKs. Restart removes only generated, owned regular receipt/orphan files from
@@ -95,12 +96,39 @@ worker is killed, not abandoned in a background thread or replaced while alive.
 On producer exit or SIGTERM/SIGINT, a supervised producer group gets a bounded
 five-second TERM/KILL attempt. The final drain then gets at most the configured
 1-20 seconds, using CLOCK_BOOTTIME. The final half second is reserved for killing
-and reaping. Both the worker launch and every HTTPS opener check that same
-deadline; proof-based auth also observes it. Suspend cannot admit later writes.
+and reaping. Both the worker launch and every HTTPS connection check that same
+deadline. It is rechecked after DNS/TLS and before each headers/body write,
+and expired response/error reads cannot be accepted. Lazy/streaming request
+bodies are refused; production registry/auth requests use bounded bytes.
+Proof-based auth also observes the deadline. Already admitted in-flight effects
+may remain uncertain, never a completed close after the budget.
 An unreaped worker is reported as such and can never make a completed close.
 
-A fresh final worker runs after the producer stop attempt. It checks complete
-EOF and an unchanged input set after BOTH content and view ACKs. Partial tails,
+The owned producer has a separate guardian, not just worker PDEATHSIG. A durable
+launch claim precedes the guardian; a gated producer cannot exec literal argv
+until its identity is persisted. A lifetime pipe closes when Runner crashes or
+dies, so the guardian stops the original group and reaps ordinary adopted
+children. The producer shim also binds its own lifetime to that guardian.
+Only a matching durable `stopped` witness permits another run/complete close.
+Unknown launch/guardian outcomes are not cleared by restart, a new command, a
+quiet file, a bare PID check or a different boot. Prior literal argv is never
+retried automatically. Guardian PID metadata is diagnostic, not recovery authority.
+
+Runner ownership is now version 2. Existing version-1 runner state has no
+producer ownership proof and refuses automatic upgrade. If the guardian could
+not write a valid stop witness, an operator must independently establish that
+the original declared producer scope is stopped before any ownership recovery;
+otherwise keep the state blocked and use a separately approved workload. Do not
+delete credentials/keys or mark a claim stopped based only on PID absence.
+
+A fresh final worker runs after the producer stop attempt. After ordinary
+delivery it freshly checks remote file revisions/lengths/hashes and re-PUTs the
+EXACT existing snapshot plan with its original idempotency key. The server must
+confirm that snapshot ID, exact view generation/last sequence and authoritative
+`sync.complete == true`. Missing, mismatched or negative proof, including after
+an unchanged or empty view, is pending. A local view cursor at EOF is not proof.
+No new snapshot or view generation is invented for this check.
+It then checks complete EOF and an unchanged input set after those fresh ACKs. Partial tails,
 source append/rewrite during ACK, deleted inputs, outage, lost ACK, deadline or
 identity uncertainty remain pending. Unknown remote results are recovered by
 the existing journal/replay rules, never by retrying the producer command.

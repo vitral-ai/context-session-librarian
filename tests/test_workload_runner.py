@@ -2,6 +2,8 @@
 import copy
 from dataclasses import replace
 import hashlib
+import http.client
+import io
 import json
 import os
 from pathlib import Path
@@ -24,6 +26,7 @@ from csl_workload_config import Configuration, PREFIX, PROVIDER_PROFILES
 from csl_workload_identity import AUDIENCE, CLIENT_ID, SCOPES, WorkloadKey, b64, canonical
 from csl_workload_runner import (DeadlineHTTP, PassProcess, Runner, bounds, child, environment,
     clean_receipts, parent_death, read_record, run_pass, scope, sources)
+from csl_workload_producer import guardian, producer_exec
 from sync_support import Peer
 from test_workload_text import CANARY, SID, native
 from test_workload_gemini import records as gemini_records, CANARY as GEMINI_CANARY
@@ -96,20 +99,17 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(worker.reap_budgets, [0])
 
     def test_literal_command_launched_once_and_only_final_ack_can_complete(self):
-        clock = Clock(); writer = Mock(pid=123456, returncode=7); writer.poll.return_value = 7
+        clock = Clock(); writer = Mock(returncode=7); writer.poll.return_value = 7; writer.quiesced.return_value = True
         worker = FakePass(); calls = []
         def launch(*args): calls.append(args); return worker
         runner = Runner(self.config, clock=clock, sleep=clock.sleep, pass_factory=launch)
         command = ['/literal/program', 'space value', ';not-a-shell', '$(not-executed)']
-        with patch('csl_workload_runner.subprocess.Popen', return_value=writer) as popen, \
-             patch('csl_workload_runner.group_exists', return_value=False), \
-             patch('csl_workload_runner.signal_group'):
+        with patch('csl_workload_runner.Producer', return_value=writer) as launched:
             result = runner.run(command)
         self.assertTrue(result['complete']); self.assertFalse(result['pending'])
         self.assertEqual(result['writer_exit'], 7); self.assertEqual(len(calls), 1)
-        popen.assert_called_once()
-        self.assertEqual(popen.call_args.args[0], command)
-        self.assertNotIn('shell', popen.call_args.kwargs)
+        launched.assert_called_once()
+        self.assertEqual(launched.call_args.args[-1], command)
 
     def test_receipt_without_view_ack_or_without_reaped_worker_cannot_complete(self):
         clock = Clock(); worker = FakePass({'ok': False, 'synced': 1, 'pending': 1, 'manifest': []})
@@ -122,10 +122,9 @@ class LifecycleTests(unittest.TestCase):
         writer.poll.side_effect = [None, 0]
         def failed(*args): raise SyncError('fixture_failure')
         runner = Runner(self.config, clock=clock, sleep=clock.sleep, pass_factory=failed)
-        with patch('csl_workload_runner.subprocess.Popen', return_value=writer), \
-             patch('csl_workload_runner.signal_group') as signaled:
+        with patch('csl_workload_runner.Producer', return_value=writer):
             self.assertTrue(runner.run(['/literal/command'])['pending'])
-        signaled.assert_called_once_with(writer.pid, signal.SIGKILL)
+        writer.stop.assert_called_once()
         writer.wait.assert_called_once()
 
     def test_worker_environment_is_allowlisted_and_no_configuration_in_argv(self):
@@ -152,6 +151,13 @@ class LifecycleTests(unittest.TestCase):
                 with self.assertRaisesRegex(SyncError, '^workload_flush_deadline$'):
                     PassProcess(self.config, str(uuid.uuid4()), 999)
                 popen.assert_not_called()
+
+    def test_lazy_request_bodies_cannot_read_past_the_write_admission_check(self):
+        client = DeadlineHTTP(self.config.origin, boot_clock()+5, attempts=1)
+        with patch('http.client.HTTPSConnection.connect', side_effect=AssertionError('no connect')):
+            for data in (io.BytesIO(b'private fixture'), iter([b'fixture']), 'not bytes'):
+                with self.assertRaisesRegex(SyncError, '^workload_request_body_refused$'):
+                    client.request(self.config.origin+'/native-auth/v1/token', 'POST', data=data)
 
     def test_worker_refuses_wrong_parent_lifetime(self):
         # Do not change this test process's PDEATHSIG; exercise a synthetic libc.
@@ -208,6 +214,57 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(SyncError, '^workload_runtime_storage_refused$'): runner.run()
         self.assertEqual(path.read_text(), 'unrelated private data')
 
+    def test_v1_runtime_cannot_silently_assume_an_old_producer_was_stopped(self):
+        runtime = child(self.config.state_root, 'runtime')
+        private_json(runtime/'runner.json', {'version': 1, 'scope': scope(self.config)})
+        with patch('csl_workload_runner.Producer') as producer:
+            with self.assertRaisesRegex(SyncError, '^workload_runtime_binding_changed$'):
+                Runner(self.config).run(['/not-launched'])
+            producer.assert_not_called()
+        self.assertEqual(read_record(runtime/'runner.json')['version'], 1)
+
+    def test_uncertain_guardian_launch_is_durable_and_not_retried(self):
+        with patch('csl_workload_producer.subprocess.Popen', side_effect=OSError('synthetic failure')) as launched:
+            self.assertTrue(Runner(self.config).run(['/not-launched'])['pending'])
+            with self.assertRaisesRegex(SyncError, '^workload_producer_outcome_unknown$'):
+                Runner(self.config).run(['/still-not-launched'])
+            self.assertEqual(launched.call_count, 1)
+        self.assertEqual(read_record(self.config.state_root/'runtime/producer.json')['phase'], 'launching')
+
+    def test_exec_gate_refuses_eof_and_parent_death_before_literal_exec(self):
+        for allow in (False, True):
+            read_fd, write_fd = os.pipe()
+            if allow: os.write(write_fd, b'G')
+            os.close(write_fd)
+            libc = Mock(); libc.prctl.return_value = 0
+            with patch('csl_workload_producer.ctypes.CDLL', return_value=libc), \
+                 patch('csl_workload_producer.os.getppid', side_effect=[123, 124]), \
+                 patch('csl_workload_producer.os.execvp') as execute:
+                with self.assertRaisesRegex(SyncError, '^workload_parent_unavailable$'):
+                    producer_exec(123, read_fd, ['/not-launched'])
+                execute.assert_not_called()
+
+    def test_guardian_does_not_release_exec_gate_before_identity_is_durable(self):
+        runtime = child(self.config.state_root, 'runtime')
+        run_id = str(uuid.uuid4())
+        claim = {'version': 1, 'scope': scope(self.config), 'run_id': run_id,
+                 'boot': boot_identity(), 'phase': 'launching'}
+        control, parent_control = os.pipe()
+        writer = Mock(pid=123456, returncode=None)
+        libc = Mock(); libc.prctl.return_value = 0
+        try:
+            with patch('csl_workload_producer.ctypes.CDLL', return_value=libc), \
+                 patch('csl_workload_producer.read_record', return_value=claim), \
+                 patch('csl_workload_producer.os.getppid', return_value=123), \
+                 patch('csl_workload_producer.subprocess.Popen', return_value=writer), \
+                 patch('csl_workload_producer.private_json', side_effect=OSError('fixture disk failure')), \
+                 patch('csl_workload_producer.os.write') as release, \
+                 patch('csl_workload_producer.group_signal'):
+                with self.assertRaises(OSError): guardian(runtime, run_id, 123, control, ['/not-executed'])
+                release.assert_not_called()
+                writer.wait.assert_called_once()
+        finally: os.close(parent_control)
+
 
 @unittest.skipUnless(shutil.which('openssl'), 'OpenSSL for owned TLS and replica key fixture')
 class UploaderTests(unittest.TestCase):
@@ -236,6 +293,27 @@ class UploaderTests(unittest.TestCase):
             'boot': boot_identity(), 'expires_boot': boot_clock()+300, 'expires_wall': time.time()+300})
         handler = self.peer.server.RequestHandlerClass
         original = handler.handle_request
+        answer = handler.answer
+        self.proof_gate, self.proof_seen, self.proof_mutation = None, threading.Event(), None
+        self.proof_transport = None
+        self.access = access
+        def proved_response(request, status, value):
+            if request.command == 'PUT' and request.path.startswith('/sessions/') and len(request.path.strip('/').split('/')) == 3:
+                key = request.path.strip('/')
+                plan = self.peer.sessions.get(key)
+                if status == 200 and plan:
+                    complete = all(len(self.peer.files.get((key, f['file_key'], f['revision']), b'')) == f['length']
+                        and hashlib.sha256(self.peer.files.get((key, f['file_key'], f['revision']), b'')).hexdigest() == f['sha256']
+                        for f in plan['files'])
+                    complete = complete and len(self.peer.views.get((key, plan['view']['generation']), [])) == plan['view']['last_seq']
+                    value = {**value, 'snapshot_id': plan['snapshot_id'], 'view': copy.deepcopy(plan['view']), 'sync': {'complete': complete}}
+                    if complete:
+                        self.proof_seen.set()
+                        if self.proof_gate is not None: self.proof_gate.wait(10)
+                    if self.proof_mutation: self.proof_mutation(value)
+                    if self.proof_transport and not self.proof_transport(request, value): return None
+            try: return answer(request, status, value)
+            except (BrokenPipeError, ConnectionResetError, ssl.SSLError): return None
         def mounted(request):
             if not request.path.startswith('/session-registry/v1/') or request.headers.get('Authorization') != 'Bearer '+access:
                 return request.fail(401, 'unauthenticated')
@@ -243,6 +321,7 @@ class UploaderTests(unittest.TestCase):
             request.headers.replace_header('Authorization', 'Bearer fixture-access')
             return original(request)
         handler.handle_request = mounted
+        handler.answer = proved_response
         self.write(native('codex'))
 
     def write(self, rows):
@@ -380,16 +459,120 @@ class UploaderTests(unittest.TestCase):
         self.assertTrue(self.peer.views)
 
     def test_stalled_upload_final_deadline_is_pending_and_next_run_reconciles(self):
-        self.peer.first_chunk, self.peer.release = threading.Event(), threading.Event()
+        gate = threading.Event()
+        final_started = []
+        def launch(config, sequence, deadline):
+            claim = read_record(config.state_root/'runtime/producer.json')
+            if claim and claim.get('phase') == 'stopped':
+                final_started.append(sequence)
+                self.proof_seen.clear()
+                self.proof_gate = gate
+            return PassProcess(config, sequence, deadline)
         command = [sys.executable, '-S', '-c', 'pass']
         started = boot_clock()
         try:
-            result = Runner(replace(self.config, flush_seconds=1)).run(command)
+            result = Runner(replace(self.config, flush_seconds=3), pass_factory=launch).run(command)
             self.assertFalse(result['complete']); self.assertTrue(result['pending'])
-            self.assertLess(boot_clock()-started, 3)
-        finally: self.peer.release.set()
-        self.peer.first_chunk = None
+            self.assertTrue(final_started); self.assertTrue(self.proof_seen.is_set())
+            self.assertLess(boot_clock()-started, 5)
+        finally: gate.set()
+        self.proof_gate = None
         self.assertTrue(self.one_pass()['ok'])
+
+    def test_interrupted_live_content_can_reconcile_and_complete_in_final_budget(self):
+        self.peer.first_chunk, self.peer.release = threading.Event(), threading.Event()
+        exit_gate = self.root/'writer-exit'
+        observed = []
+        def finish_writer():
+            observed.append(self.peer.first_chunk.wait(5)); exit_gate.touch()
+        helper = threading.Thread(target=finish_writer); helper.start()
+        command = [sys.executable, '-S', '-c',
+            'import sys,time;from pathlib import Path;end=time.monotonic()+6;'
+            '\nwhile not Path(sys.argv[1]).exists() and time.monotonic()<end: time.sleep(.01)', str(exit_gate)]
+        try:
+            result = Runner(replace(self.config, flush_seconds=5)).run(command)
+            self.assertTrue(result['complete'], result)
+            self.assertEqual(observed, [True])
+        finally: self.peer.release.set(); exit_gate.touch(); helper.join(6)
+        self.peer.first_chunk = None
+
+    def test_post_tls_suspend_refuses_headers_and_body_before_peer_contact(self):
+        clock = Clock()
+        connect = http.client.HTTPSConnection.connect
+        def jumped(connection):
+            connect(connection); clock.now += 100
+        with patch('csl_workload_runner.boot_clock', clock):
+            client = DeadlineHTTP(self.config.origin, clock()+2, ca_file=self.config.ca_file, attempts=1)
+            with patch.object(http.client.HTTPSConnection, 'connect', jumped):
+                with self.assertRaisesRegex(SyncError, '^workload_flush_deadline$'):
+                    client.request(self.config.origin+'/session-registry/v1/devices/ses_fixture', 'PUT',
+                        data=b'{}', headers={'Authorization': 'Bearer '+self.access})
+        self.assertEqual(self.peer.calls, [])
+
+    def test_suspend_during_response_read_cannot_accept_success(self):
+        clock = Clock()
+        read = http.client.HTTPResponse.read
+        def jumped(response, *args, **kwargs):
+            result = read(response, *args, **kwargs); clock.now += 100
+            return result
+        with patch('csl_workload_runner.boot_clock', clock):
+            client = DeadlineHTTP(self.config.origin, clock()+2, ca_file=self.config.ca_file, attempts=1)
+            with patch.object(http.client.HTTPResponse, 'read', jumped):
+                with self.assertRaisesRegex(SyncError, '^workload_flush_deadline$'):
+                    client.request(self.config.origin+'/session-registry/v1/limits',
+                                   headers={'Authorization': 'Bearer '+self.access})
+        self.assertEqual(len(self.peer.calls), 1)
+
+    def test_unchanged_empty_missing_mismatched_and_negative_final_proofs(self):
+        self.assertTrue(self.one_pass()['ok'])
+        before = len(self.peer.calls)
+        self.assertTrue(self.one_pass()['ok'])
+        self.assertEqual(sum(method == 'PUT' and path == '/sessions/codex/'+SID
+                             for method, path in self.peer.calls[before:]), 2)
+        for mutate in (lambda value: value.pop('sync'), lambda value: value.update(sync={'complete': False}),
+                       lambda value: value.update(snapshot_id='not-the-plan'),
+                       lambda value: value['view'].update(generation='another-generation'),
+                       lambda value: value['view'].update(last_seq=1000)):
+            self.proof_mutation = mutate
+            with self.assertRaisesRegex(SyncError, '^workload_final_proof_refused$'): self.one_pass()
+        self.proof_mutation = None
+        self.write([native('codex')[0]])
+        self.assertTrue(self.one_pass()['ok'])
+        plan = next(iter(self.peer.sessions.values()))
+        self.assertEqual(plan['view']['last_seq'], 0)
+        self.assertTrue(self.one_pass()['ok'])
+
+    def test_lost_fresh_final_proof_is_pending_and_restart_uses_same_plan(self):
+        self.assertTrue(self.one_pass()['ok'])
+        plan = copy.deepcopy(next(iter(self.peer.sessions.values())))
+        calls = [0]
+        def lost(request, value):
+            calls[0] += 1
+            if calls[0] == 2:
+                request.connection.shutdown(2); request.connection.close()
+                return False
+            return True
+        self.proof_transport = lost
+        # Use the subprocess boundary: failures are private pending receipts.
+        runtime = child(self.config.state_root, 'runtime')
+        private_json(runtime/'configuration.json', environment(self.config))
+        worker = PassProcess(self.config, str(uuid.uuid4()), boot_clock()+5)
+        try:
+            self.assertTrue(worker.reap(6)); self.assertFalse(worker.receipt()['ok'])
+        finally: worker.kill(); worker.reap(1); worker.remove_receipt()
+        self.assertEqual(calls[0], 2)
+        self.proof_transport = None
+        self.assertTrue(self.one_pass()['ok'])
+        self.assertEqual(next(iter(self.peer.sessions.values()))['snapshot_id'], plan['snapshot_id'])
+        self.assertEqual(next(iter(self.peer.sessions.values()))['view'], plan['view'])
+
+    def test_projection_only_unbound_cache_is_refused_and_preserved(self):
+        projection = child(self.config.state_root, 'projection')
+        (projection/'streams').mkdir()
+        path = projection/'streams/original'; path.write_bytes(b'original private projection'); path.chmod(0o600)
+        with self.assertRaisesRegex(SyncError, '^workload_runtime_binding_changed$'): self.one_pass()
+        self.assertEqual(self.peer.calls, [])
+        self.assertEqual(path.read_bytes(), b'original private projection')
 
     @unittest.skipUnless(hasattr(os, 'pidfd_open'), 'Linux pidfd for exact owned worker lifetime')
     def test_worker_dies_with_parent_and_restart_reconciles_uncertain_upload(self):
@@ -466,6 +649,59 @@ class UploaderTests(unittest.TestCase):
                 process.send_signal(signal.SIGTERM)
                 try: process.communicate(timeout=12)
                 except subprocess.TimeoutExpired: process.kill(); process.communicate(timeout=2)
+
+    @unittest.skipUnless(hasattr(os, 'pidfd_open'), 'Linux pidfd for owned producer crash proof')
+    def test_supervisor_crash_stops_original_group_before_restart_close(self):
+        root_pid, child_pid = self.root/'root.pid', self.root/'child.pid'
+        release, counter = self.root/'release', self.root/'launches'
+        source_path = self.config.transcript_root/'main.jsonl'
+        child_script = ('import json,os,sys,time;from pathlib import Path;'
+            'Path(sys.argv[1]).write_text(str(os.getpid()));end=time.monotonic()+15;'
+            '\nwhile not Path(sys.argv[2]).exists() and time.monotonic()<end: time.sleep(.01)\n'
+            'with Path(sys.argv[3]).open("ab") as out: out.write(json.dumps({"type":"response_item",'
+            '"payload":{"type":"message","role":"user","content":"late child write"}}).encode()+b"\\n")')
+        root_script = ('import os,sys,time,subprocess;from pathlib import Path;'
+            'Path(sys.argv[1]).write_text(str(os.getpid()));'
+            'with_counter=Path(sys.argv[2]);with_counter.write_text(with_counter.read_text()+"launch\\n" if with_counter.exists() else "launch\\n");'
+            'subprocess.Popen([sys.executable,"-S","-c",sys.argv[3],*sys.argv[4:]]);'
+            'time.sleep(15)')
+        script = Path(__file__).parents[1]/'csl_workload_runner.py'
+        command = [sys.executable, '-S', str(script), '--', sys.executable, '-S', '-c', root_script,
+            str(root_pid), str(counter), child_script, str(child_pid), str(release), str(source_path)]
+        process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env={'PATH': os.defpath, 'HOME': str(self.root), **environment(self.config)})
+        descriptors = []
+        try:
+            until = boot_clock()+6
+            while not child_pid.exists() and boot_clock() < until and process.poll() is None: time.sleep(.01)
+            self.assertTrue(child_pid.exists())
+            descriptors = [os.pidfd_open(int(path.read_text())) for path in (root_pid, child_pid)]
+            process.kill(); process.wait(timeout=2)
+            # An immediate restart either refuses the live claim or observes its
+            # completed guardian stop. It never relaunches the original argv.
+            try: result = Runner(replace(self.config, flush_seconds=5)).run([sys.executable, '-S', '-c', 'pass'])
+            except SyncError as error:
+                self.assertEqual(error.code, 'workload_producer_outcome_unknown'); result = {'complete': False}
+            if result['complete']:
+                for fd in descriptors:
+                    poll = select.poll(); poll.register(fd, select.POLLIN); self.assertTrue(poll.poll(0))
+            for fd in descriptors:
+                poll = select.poll(); poll.register(fd, select.POLLIN); self.assertTrue(poll.poll(6000))
+            until = boot_clock()+3
+            while read_record(self.config.state_root/'runtime/producer.json')['phase'] != 'stopped' and boot_clock() < until:
+                time.sleep(.01)
+            before = source_path.read_bytes(); release.touch()
+            result = Runner(replace(self.config, flush_seconds=5)).run([sys.executable, '-S', '-c', 'pass'])
+            self.assertTrue(result['complete'], result)
+            self.assertEqual(source_path.read_bytes(), before)
+            self.assertEqual(counter.read_text().splitlines(), ['launch'])
+        finally:
+            release.touch()
+            if process.poll() is None: process.kill(); process.wait(timeout=2)
+            for fd in descriptors:
+                try: signal.pidfd_send_signal(fd, signal.SIGKILL)
+                except ProcessLookupError: pass
+                os.close(fd)
 
 
 if __name__ == '__main__': unittest.main()
