@@ -573,3 +573,12 @@ class EventHistoryTests(unittest.TestCase):
             self.history.effects.observe_wait(key, self.effect(key)['revision'], guard=self.history.guard)
         self.assertEqual(self.effect(key)['state'], 'pending')
         self.assertEqual(self.store.rows('SELECT * FROM event_attempts'), [])
+
+    def test_known_other_peer_is_refused_but_missing_original_stays_deferred(self):
+        _, _, event = self.task(peer='actual')
+        result = self.history.admit('different', event)
+        self.assertEqual(result['state'], 'rejected')
+        missing = dict(event, id=uid(), task_id=uid())
+        with self.assertRaises(EventDeferred):
+            self.history.admit('different', missing)
+        self.assertEqual(self.store.rows('SELECT * FROM inbound'), [])

@@ -153,7 +153,8 @@ class EventHistory:
         original = db.execute('SELECT * FROM operations WHERE id=? AND peer=?',
                               (event['task_id'], 'outbound:' + peer)).fetchone()
         if not original:
-            return {'state': 'deferred', 'binding': None, 'thread': None, 'sender': None}
+            other = db.execute('SELECT 1 FROM operations WHERE id=?', (event['task_id'],)).fetchone()
+            return {'state': 'conflict' if other else 'deferred', 'binding': None, 'thread': None, 'sender': None}
         try:
             request = decode(original['request'])
             if raw_hash(original['request']) != original['hash']:
