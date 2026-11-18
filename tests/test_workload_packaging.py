@@ -20,6 +20,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 
+from csl_workload_config import Configuration
+
+
 ROOT = Path(__file__).resolve().parents[1]
 CHART = ROOT / 'packaging/workload-collector'
 HELM = os.environ.get('VITRAL_FIXTURE_HELM') or shutil.which('helm')
@@ -154,6 +157,39 @@ class WorkloadChartTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, result.stdout)
             result = self.render(mode=mode, omit=('transcripts.profile',), **options)
             self.assertNotEqual(result.returncode, 0, result.stdout)
+
+    def test_rendered_integer_values_are_accepted_by_runner_configuration(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            source, state, ca = root / 'transcripts', root / 'state', root / 'ca.crt'
+            source.mkdir()
+            state.mkdir()
+            ca.touch()
+            for mode in ('sidecar', 'daemonSet'):
+                options = ({'daemonSet.narrowSameOwnerExport': 'true',
+                            'daemonSet.existingClaim': 'approved-transcripts'}
+                           if mode == 'daemonSet' else {})
+                for provider, profile in PROFILES.items():
+                    for spool, flush in ((None, None), ('536870912', '1')):
+                        with self.subTest(mode=mode, provider=provider, spool=spool):
+                            values = {'transcripts.provider': provider, 'transcripts.profile': profile}
+                            if spool is not None:
+                                values.update({'collector.spoolLimitBytes': spool,
+                                               'collector.flushSeconds': flush})
+                            render = self.render(mode=mode, **options, **values)
+                            self.assertEqual(render.returncode, 0, render.stderr)
+                            rows = re.findall(r'^ +?- name: (VITRAL_[A-Z_]+)\n +value: (.+)$',
+                                              render.stdout, re.MULTILINE)
+                            env = {key: json.loads(val) if val.startswith('"') else val for key, val in rows}
+                            env.update(VITRAL_LOCATION_NAMESPACE='test',
+                                       VITRAL_LOCATION_REPLICA='synthetic-replica',
+                                       VITRAL_COLLECTOR_TRANSCRIPT_ROOT=str(source),
+                                       VITRAL_COLLECTOR_STATE=str(state),
+                                       VITRAL_COLLECTOR_TRUST_CA=str(ca))
+                            config = Configuration.from_environment(env)
+                            self.assertEqual(config.spool_bytes, int(spool or '134217728'))
+                            self.assertEqual(config.flush_seconds, int(flush or '20'))
+                            self.assertEqual((config.provider, config.profile), (provider, profile))
 
     def test_daemonset_uses_only_explicit_readonly_claim_and_private_state(self):
         result = self.render(mode='daemonSet', **{'daemonSet.narrowSameOwnerExport': 'true',
