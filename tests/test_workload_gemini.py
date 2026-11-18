@@ -171,7 +171,7 @@ class GeminiWorkloadTests(unittest.TestCase):
             with self.path.open('ab') as stream:
                 stream.write(b'{"id":"u2","type":"user","content":"later"}\n')
             original(root, relative, cursor)
-        with patch('csl_gemini_workload.verify_prefix', side_effect=growing):
+        with patch('csl_workload_provider.verify_prefix', side_effect=growing):
             self.prepare()
         self.assertEqual(len(self.view()['records']), 4)
         self.prepare()

@@ -5,6 +5,8 @@ command or a deployable workload image. Existing desktop raw sync and the public
 provider/command matrix are unchanged. Workload device authorization, registry
 namespaces, continuous collection, final flush and the job wrapper are separate
 changes. Do not route workload transcripts through the existing raw CLI.
+Additional [Codex/Claude text profiles](WORKLOAD_TEXT_PROFILES.md) share this
+prepared-view boundary without enabling the CLI or expanding Gemini's profile.
 
 ## Qualified Input
 
@@ -25,8 +27,8 @@ into the ordered map, preserving existing history and duplicate-ID positions.
 Only `$set.messages` replaces the history. Other bare shapes refuse.
 Unknown fields/control records, non-text parts, subagents, opaque attachments and
 legacy JSON snapshots refuse rather than falling back to raw bytes. Antigravity
-remains a distinct provider; Codex and Claude workload projections are not yet
-implemented by this module. There is no native Gemini import/resume support.
+remains a distinct provider; the separate Codex/Claude module has its own bounded
+qualification and explicit omission policy. There is no native Gemini import/resume support.
 In particular, structured `functionResponse` parts and non-text `resultDisplay`
 objects are not qualified by this initial profile; their presence refuses the
 session, not just the individual part. General Gemini tool-session coverage
