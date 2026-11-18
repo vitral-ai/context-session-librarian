@@ -78,6 +78,110 @@ class EventHistoryTests(unittest.TestCase):
     def effect(self, key):
         return self.store.rows('SELECT * FROM event_effects WHERE key=?', (key,))[0]
 
+    def test_sqlite_scalar_fingerprints_preserve_type_and_bound_output(self):
+        from csl_bridge_event_history import sqlite_fingerprint
+        values = (None, -2**63, -1, 0, 1, 2**63 - 1, 0.0, 1.0, float('inf'), '', '1', 'payload', b'', b'1', b'payload', b'\xff')
+        fingerprints = []
+        for value in values:
+            kind, stored = self.store.db.execute('SELECT typeof(?),?', (value, value)).fetchone()
+            fingerprint = sqlite_fingerprint(stored)
+            self.assertEqual(fingerprint[0], kind)
+            self.assertEqual(sqlite_fingerprint(stored), fingerprint)
+            self.assertLess(len(encode(fingerprint)), 120)
+            fingerprints.append(encode(fingerprint))
+        self.assertEqual(len(set(fingerprints)), len(values))
+        self.assertNotEqual(sqlite_fingerprint(0.0), sqlite_fingerprint(-0.0))
+        for value in ('x' * 1000000, b'x' * 1000000):
+            self.assertLess(len(encode(sqlite_fingerprint(value))), 120)
+
+    def test_sqlite_metadata_contradictions_advance_catalog_and_isolate_bad_key(self):
+        cases = (('hash', b'\xff'), ('hash', 7), ('hash', 1.5), ('state', b'\xff'),
+                 ('state', b'delivered'), ('state', 7), ('state', 1.5), ('state', 'malformed-state'),
+                 ('result', None), ('result', b'\xff'), ('result', 'receipt_blob'), ('request', 'request_blob'))
+        for n, (field, value) in enumerate(cases):
+            with self.subTest(field=field, value=value):
+                request, receipt, event = self.task(known_thread=True)
+                self.alias(event); self.catalog()
+                if value == 'receipt_blob':
+                    value = encode(receipt).encode()
+                elif value == 'request_blob':
+                    value = encode(request).encode()
+                with self.store.transaction() as db:
+                    db.execute('UPDATE operations SET ' + field + '=? WHERE id=?', (value, request['id']))
+                    # Exercise malformed text/number/null state fingerprints too;
+                    # these aren't independent acceptance evidence.
+                    if type(value) is not bytes and field != 'hash':
+                        db.execute('UPDATE operations SET hash=? WHERE id=?', ('mismatched text hash', request['id']))
+                _, seq = self.alias(event, delivery='uncertain')
+                _, _, healthy = self.task(peer='healthy-' + str(n), known_thread=True)
+                self.alias(healthy, peer='healthy-' + str(n))
+                self.assertTrue(self.catalog()['complete'])
+                row = self.store.rows('SELECT * FROM event_catalog WHERE seq=?', (seq,))[0]
+                self.assertIsNotNone(row['conflict'])
+                evidence = self.store.rows('SELECT reason FROM event_history_conflicts WHERE seq=?', (seq,))
+                self.assertTrue(any('proof=' in item['reason'] for item in evidence))
+                healthy_key, result = self.seed(healthy, peer='healthy-' + str(n))
+                self.assertEqual(result['state'], 'pending')
+                self.assertIsNotNone(self.history.effects.claim_native(healthy_key, self.effect(healthy_key)['revision'], guard=self.history.guard))
+                with self.store.transaction() as db:
+                    db.execute('UPDATE operations SET request=?,hash=?,state=?,result=? WHERE id=?',
+                               (encode(request), raw_hash(encode(request)), 'delivered', encode(receipt), request['id']))
+                bad_key, result = self.seed(event)
+                self.assertEqual(result['state'], 'conflict')
+                with self.assertRaises(EventConflict):
+                    self.history.effects.claim_native(bad_key, self.effect(bad_key)['revision'], guard=self.history.guard)
+
+    def test_blob_proof_commit_busy_rolls_back_audit_classification_and_watermark(self):
+        request, _, event = self.task(); self.alias(event); self.catalog()
+        before = {table: self.store.rows('SELECT * FROM ' + table) for table in ('event_catalog', 'event_history_conflicts', 'event_catalog_meta', 'event_legacy_attempts')}
+        with self.store.transaction() as db:
+            db.execute('UPDATE operations SET hash=?,state=? WHERE id=?', (b'\xff', b'broken-state', request['id']))
+        self.alias(event, delivery='uncertain')
+        self.store.db.execute('PRAGMA busy_timeout=1')
+        try:
+            with closing(sqlite3.connect(self.home / 'bridge.sqlite', isolation_level=None)) as reader:
+                reader.execute('BEGIN'); reader.execute('SELECT count(*) FROM inbound').fetchone()
+                try:
+                    with self.assertRaises(sqlite3.OperationalError) as caught:
+                        self.history.catalog_step()
+                    self.assertEqual(caught.exception.sqlite_errorcode, sqlite3.SQLITE_BUSY)
+                finally:
+                    reader.execute('ROLLBACK')
+        finally:
+            self.store.db.execute('PRAGMA busy_timeout=5000')
+        for table, rows in before.items():
+            self.assertEqual(self.store.rows('SELECT * FROM ' + table), rows)
+        self.assertTrue(self.catalog()['complete'])
+        self.assertTrue(self.store.rows('SELECT * FROM event_history_conflicts'))
+
+    def test_cached_original_readers_refuse_blob_metadata_without_coercion(self):
+        for field in ('request', 'hash', 'state', 'result'):
+            with self.subTest(field=field):
+                request, receipt, event = self.task()
+                route = {'physical_peer': 'hub', 'origin': 'remote', 'destination': 'codex-host'}
+                self.history.admit('remote', event, route=route)
+                value = {'request': encode(request).encode(), 'hash': b'\xff', 'state': b'delivered', 'result': encode(receipt).encode()}[field]
+                with self.store.transaction() as db:
+                    db.execute('UPDATE operations SET ' + field + '=? WHERE id=?', (value, request['id']))
+                if field in ('request', 'hash'):
+                    self.assertIsNone(self.history.cached_route('remote', request['id']))
+                with self.assertRaises(EventConflict):
+                    self.history.recover_original('remote', event, route)
+
+    def test_final_publisher_refuses_blob_original_cells_without_finalizing_task(self):
+        for field in ('request', 'hash', 'state', 'result'):
+            with self.subTest(field=field):
+                request = self.publisher_task()
+                original = self.store.rows('SELECT * FROM operations WHERE id=?', (request['id'],))[0]
+                value = original[field].encode() if field != 'hash' else b'\xff'
+                with self.store.transaction() as db:
+                    db.execute('UPDATE operations SET ' + field + '=? WHERE id=?', (value, request['id']))
+                before = self.store.rows('SELECT * FROM outbound')
+                with self.assertRaises(EventConflict):
+                    self.history.publish_final(request['id'], self.local_thread, 'completed', 'Synthetic result')
+                self.assertEqual(self.store.rows('SELECT * FROM outbound'), before)
+                self.assertEqual(self.store.rows('SELECT status FROM tasks WHERE id=?', (request['id'],)), [{'status': 'running'}])
+
     def test_catalog_proof_contradictions_survive_repair_with_guarded_refusal(self):
         for corruption in ('hash', 'request_json', 'request_shape', 'actors', 'receipt_json', 'receipt_shape', 'receipt_turn', 'receipt_thread'):
             with self.subTest(corruption=corruption):

@@ -46,8 +46,11 @@ missing original authority.
 Known original authority is frozen at the first independently known catalog/seed
 binding, before any partial seed may complete. Every catalog-observed proof
 contradiction retains refusal evidence and a proof fingerprint with the watermark,
-including invalid hashes or malformed originals/receipts. Repair cannot erase that
-observation. A different known binding records
+including invalid hashes or malformed originals/receipts. Evidence fingerprints
+use bounded, explicit null/integer/real/text/BLOB tags; corrupt SQLite metadata
+cannot escape classification through JSON encoding or be coerced into authority.
+The original's expected text storage classes are checked before using it. Repair
+cannot erase that observation. A different known binding records
 a conflict without replacing the signature, cursor, thread or projection. Unknown
 binding is represented separately, not by a digest of absence: an independently
 restored original may trigger a bounded alias re-evaluation while preserving all

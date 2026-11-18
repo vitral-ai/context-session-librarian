@@ -5,6 +5,7 @@ No production consumer imports or opens this module. Old and new effect writers
 must never share a home during eventual activation.
 """
 import hashlib
+import struct
 
 from csl_bridge_engine import confirm_event_turn, event_id, validate_event
 from csl_bridge_event_state import EventConflict, EventDeferred, EventState, SETTLED, digest
@@ -13,6 +14,28 @@ from csl_bridge_store import BridgeError, decode, encode, identifier, name, vali
 
 def raw_hash(raw):
     return hashlib.sha256(raw if isinstance(raw, bytes) else raw.encode()).hexdigest()
+
+
+def sqlite_fingerprint(value):
+    """Bounded, type-preserving fingerprint of a scalar read from SQLite."""
+    if value is None:
+        kind, payload = 'null', b''
+    elif type(value) is int:
+        kind, payload = 'integer', struct.pack('!q', value)
+    elif type(value) is float:
+        kind, payload = 'real', struct.pack('!d', value)
+    elif type(value) is str:
+        kind, payload = 'text', value.encode('utf-8')
+    elif type(value) is bytes:
+        kind, payload = 'blob', value
+    else:
+        raise TypeError('Not a SQLite scalar')
+    return [kind, len(payload), hashlib.sha256(payload).hexdigest()]
+
+
+def original_text_cells(row):
+    return (all(type(row[field]) is str for field in ('id', 'peer', 'hash', 'request', 'state')) and
+            (row['result'] is None or type(row['result']) is str))
 
 
 def canonical_key(peer, task):
@@ -193,6 +216,8 @@ class EventHistory:
             return {'state': 'conflict' if other else 'deferred', 'binding': None, 'thread': None, 'sender': None}
         binding, thread = None, None
         try:
+            if not original_text_cells(original):
+                raise BridgeError('Invalid original SQLite storage class')
             request = decode(original['request'])
             if raw_hash(original['request']) != original['hash']:
                 raise BridgeError('Original request fingerprint differs')
@@ -218,8 +243,8 @@ class EventHistory:
         except (BridgeError, TypeError, AttributeError) as error:
             # Retain a non-payload fingerprint of the observed contradiction,
             # even if a subsequent repair replaces the mutable operation row.
-            evidence = digest([peer, original['id'], original['hash'], raw_hash(original['request']),
-                               original['state'], raw_hash(original['result']) if original['result'] is not None else None])
+            evidence = digest([sqlite_fingerprint(peer)] + [sqlite_fingerprint(original[field])
+                               for field in ('id', 'peer', 'hash', 'request', 'state', 'result')])
             return {'state': 'conflict', 'binding': binding, 'thread': thread, 'sender': None,
                     'reason': str(error) if isinstance(error, BridgeError) else 'Malformed original proof',
                     'evidence': evidence}
@@ -433,7 +458,8 @@ class EventHistory:
                                ('outbound:' + peer, peer, task))
         if rows:
             row = rows[0]
-            if (raw_hash(row['request_body']) == row['request_hash'] and
+            if (type(row['request_hash']) is str and type(row['request_body']) is str and
+                    raw_hash(row['request_body']) == row['request_hash'] and
                     row['signature'] == digest([peer, row['request_hash'], row['request_body']])):
                 return decode(row['route'])
         return None
@@ -447,6 +473,8 @@ class EventHistory:
             original = db.execute('SELECT * FROM operations WHERE peer=? AND id=?', ('outbound:' + peer, event['task_id'])).fetchone()
             if not saved or not original or saved['route'] != encoded_route:
                 raise EventDeferred('No exact cached original route')
+            if not original_text_cells(original):
+                raise EventConflict('Cached original SQLite storage class differs')
             signature = digest([peer, original['hash'], original['request']])
             if saved['signature'] != signature or raw_hash(original['request']) != original['hash']:
                 raise EventConflict('Cached original request binding differs')
@@ -626,6 +654,8 @@ class EventHistory:
             original = db.execute('SELECT * FROM operations WHERE id=? AND peer=?', (task_id, task['peer'])).fetchone()
             if not original:
                 raise EventDeferred('Original task receipt is missing')
+            if not original_text_cells(original):
+                raise EventConflict('Original task SQLite storage class differs')
             request = decode(original['request']); receipt = decode(original['result']) if original['result'] else {}
             if raw_hash(original['request']) != original['hash']:
                 raise EventConflict('Original task fingerprint differs')
