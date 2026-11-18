@@ -154,7 +154,10 @@ class Conversation:
         elif 'id' in record:
             self.message(record, offset)
         else:
-            values = record.get('$set') if set(record) == {'$set'} else record
+            checkpoint = set(record) == {'$set'}
+            if not checkpoint and not {'sessionId', 'projectHash'} <= set(record):
+                refused()
+            values = record.get('$set') if checkpoint else record
             if not isinstance(values, dict) or not set(values) <= METADATA | {'messages'}:
                 refused()
             for field in ('sessionId', 'projectHash'):
@@ -165,7 +168,8 @@ class Conversation:
             if 'messages' in values:
                 if not isinstance(values['messages'], list):
                     refused()
-                self.messages.clear()
+                if checkpoint:
+                    self.messages.clear()
                 for message in values['messages']:
                     self.message(message, offset)
             self.metadata.update({k: v for k, v in values.items() if k != 'messages'})
@@ -203,6 +207,7 @@ class WorkloadGeminiProvider:
     One exclusively locked collector owns each projection store.
     """
     supported_providers = ('gemini',)
+    pair_view_revisions = True
 
     def __init__(self, sources, store, *, bounds=None, extra_literals=()):
         self.bounds = bounds or Bounds()

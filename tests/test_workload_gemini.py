@@ -108,6 +108,7 @@ class GeminiWorkloadTests(unittest.TestCase):
             json.dumps({'$unknown':{'x':1}}).encode()+b'\n',
             json.dumps(dict(id='opaque',type='gemini',content=[{'inlineData':{'data':'hidden'}}])).encode()+b'\n',
             json.dumps(dict(id='malformed',type={},content='not qualified')).encode()+b'\n',
+            json.dumps({'messages':[dict(id='u2',type='user',content='unqualified')]}).encode()+b'\n',
             json.dumps(dict(id=CANARY,type='user',content='bad identity')).encode()+b'\n']
         for tail in changes:
             with self.subTest(tail=tail[:12]):
@@ -273,6 +274,99 @@ class GeminiWorkloadTests(unittest.TestCase):
             content = peer.files[('sessions/gemini/'+SID, 'main', changed['files']['main']['revision'])]
             self.assertNotIn(b'answer', content)
             self.assertFalse(descriptor['package']['available'])
+        finally:
+            peer.close(); state.close()
+
+    def test_unrendered_byte_rewrites_pair_raw_and_view_after_restart(self):
+        for kind in ('summary', 'thought', 'empty', 'policy', 'legacy-binding'):
+            with self.subTest(kind=kind):
+                rows = records()
+                rows[0]['summary'] = 'before'
+                rows[-1]['thoughts'] = [{'subject': 'fixture', 'description': 'aaaa'}]
+                if kind == 'empty': rows = rows[:1]
+                self.write(rows)
+                peer = Peer(); state_root = self.root/('rewrite-state-'+kind)
+                state = State(state_root)
+                try:
+                    def run(provider, attempts=3):
+                        collector = Collector(state, Registry(peer.url, FakeTokens(),
+                            http=HTTP(attempts=attempts, sleep=lambda _: None)), provider)
+                        return collector.run(providers=['gemini'], days=None)
+                    self.assertEqual(run(self.make())['synced'], 1)
+                    first = copy.deepcopy(state.session('gemini', SID))
+                    first_rows = copy.deepcopy(peer.views.get(
+                        ('sessions/gemini/'+SID, first['view']['generation']), []))
+                    if kind == 'legacy-binding':
+                        first['view'].pop('source_revisions')
+                        state.save_session('gemini', SID, first)
+                    state.close(); state = State(state_root)
+                    if kind in ('summary', 'empty', 'legacy-binding'):
+                        rows[0]['summary'] = 'after!'
+                    elif kind == 'thought':
+                        rows[-1]['thoughts'][0]['description'] = 'bbbb'
+                    self.write(rows)
+                    policy = ('aaaa',) if kind == 'policy' else ()
+                    # Local capture checkpoints are not delivery/lineage authority.
+                    for checkpoint in (self.root/'projection/source-cursors').glob('*.json'):
+                        checkpoint.unlink()
+                    loss = {'thought': 'drop_once', 'policy': 'drop_view_once'}.get(kind, 'drop_metadata_once')
+                    setattr(peer, loss, True)
+                    self.assertEqual(run(self.make(extra_literals=policy), attempts=1)['pending'], 1)
+                    planned = copy.deepcopy(state.session('gemini', SID))
+                    self.assertNotEqual(first['files']['main']['revision'], planned['files']['main']['revision'])
+                    self.assertNotEqual(first['view']['generation'], planned['view']['generation'])
+                    snapshot_id = peer.sessions['sessions/gemini/'+SID]['snapshot_id']
+                    state.close(); state = State(state_root)
+                    self.assertEqual(run(self.make(extra_literals=policy))['synced'], 1)
+                    current = state.session('gemini', SID)
+                    self.assertEqual(planned['view']['generation'], current['view']['generation'])
+                    self.assertEqual(snapshot_id, peer.sessions['sessions/gemini/'+SID]['snapshot_id'])
+                    self.assertEqual(first_rows, peer.views.get(
+                        ('sessions/gemini/'+SID, current['view']['generation']), []))
+                    self.assertEqual(current['view']['source_revisions'],
+                        {'main': current['files']['main']['revision']})
+                    if kind == 'policy':
+                        self.assertEqual(run(self.make(extra_literals=('aaaa', 'absent')))['synced'], 1)
+                        identical = state.session('gemini', SID)
+                        self.assertEqual(current['files']['main']['revision'], identical['files']['main']['revision'])
+                        self.assertEqual(current['view']['generation'], identical['view']['generation'])
+                finally:
+                    peer.close(); state.close()
+
+    def test_bare_metadata_merges_but_set_messages_replaces(self):
+        bare = {'sessionId': SID, 'projectHash': 'fixture-project', 'messages': [
+            dict(id='u2', type='user', content='later'),
+            dict(id='u1', type='user', content='replacement')]}
+        self.write(self.rows + [bare, {**bare, 'messages': []}])
+        self.prepare()
+        view = self.view()['records']
+        self.assertEqual([r['native_pointer'] for r in view],
+            ['/messages/u1', '/messages/a1', '/messages/a1', '/messages/a1', '/messages/u2'])
+        self.assertEqual(view[0]['text'], 'replacement')
+        self.assertEqual(view[-1]['text'], 'later')
+        self.write(self.rows + [bare, {'$set': {'messages': bare['messages']}},
+            {'$set': {'summary': 'no reset'}},
+            {**bare, 'messages': [dict(id='u3', type='user', content='merged')]}])
+        self.prepare()
+        self.assertEqual([r['text'] for r in self.view()['records']],
+            ['later', 'replacement', 'merged'])
+
+    def test_remote_revision_recovery_also_rebinds_view_generation(self):
+        peer = Peer(); state = State(self.root/'remote-mismatch-state')
+        try:
+            def run():
+                collector = Collector(state, Registry(peer.url, FakeTokens(),
+                    http=HTTP(sleep=lambda _: None)), self.make())
+                return collector.run(providers=['gemini'], days=None)
+            self.assertEqual(run()['synced'], 1)
+            before = copy.deepcopy(state.session('gemini', SID))
+            peer.files[('sessions/gemini/'+SID, 'main', before['files']['main']['revision'])] = bytearray(b'wrong')
+            self.assertEqual(run()['pending'], 1)
+            self.assertEqual(run()['synced'], 1)
+            after = state.session('gemini', SID)
+            self.assertNotEqual(before['files']['main']['revision'], after['files']['main']['revision'])
+            self.assertNotEqual(before['view']['generation'], after['view']['generation'])
+            self.assertEqual(after['view']['source_revisions'], {'main': after['files']['main']['revision']})
         finally:
             peer.close(); state.close()
 

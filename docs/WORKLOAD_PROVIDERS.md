@@ -20,6 +20,9 @@ pinned at `5a5c7180ff3f0a02511f54b54db7f228d4982a30`:
 Synthetic fixtures exercise metadata, text messages, tool arguments/results,
 patches, duplicate IDs, ordering, inclusive rewinds and checkpoints. They do not
 prove a real Gemini invocation or every possible transcript from that release.
+Bare metadata requires `sessionId` and `projectHash`; its embedded messages merge
+into the ordered map, preserving existing history and duplicate-ID positions.
+Only `$set.messages` replaces the history. Other bare shapes refuse.
 Unknown fields/control records, non-text parts, subagents, opaque attachments and
 legacy JSON snapshots refuse rather than falling back to raw bytes. Antigravity
 remains a distinct provider; Codex and Claude workload projections are not yet
@@ -59,6 +62,13 @@ revision but resets the view generation. Rewriting historical sanitized bytes,
 including a policy change which changes that prefix, atomically replaces the
 spool; the uploader starts a new raw revision and matching view generation.
 Identical projected bytes under a new policy can resume the existing revision.
+For this provider the uploader durably binds the planned view generation to its
+file revision map before remote writes. A replacement revision resets the view
+even if only metadata/unrendered fields changed or the view is empty. A lost ACK
+and restart replay the same persisted plan; source-capture checkpoints cannot
+authorize or advance it. Journals predating this binding derive the prior map
+from their persisted file plan. Existing desktop providers do not opt into this
+additional pairing rule.
 Lost metadata/content/view responses use existing ACK validation and idempotent
 retry, including after state reopen. No source cursor asserts delivery success.
 
