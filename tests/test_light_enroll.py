@@ -172,7 +172,7 @@ class EnrollmentTests(unittest.TestCase):
         self.assertEqual([r['id']for r in node.journal.pending('in')],[good])
         with node.journal.db()as db:
             when=db.execute('SELECT next FROM delivery_retries WHERE id=?',(bad,)).fetchone()[0]
-        self.assertLessEqual(when-time.time(),60)
+        self.assertLessEqual(when-time.monotonic(),60)
         node.executing={('offline',str(i))for i in range(4)}
         with patch.object(node.pool,'submit')as submit:
             node.schedule('offline',bad);submit.assert_not_called()
@@ -253,6 +253,84 @@ class EnrollmentTests(unittest.TestCase):
             journal.put('in','env-a',identifier,{'type':'request','id':identifier,'request':request})
         messages=inbox(self.home)['messages'];self.assertEqual(len(messages),3)
         self.assertTrue(all(len(m['body'])==12000 for m in messages))
+
+    def test_outbound_retry_window_is_in_memory_and_ack_wins_without_sql(self):
+        node=light.Node(self.config);self.addCleanup(node.pool.shutdown,False)
+        journal=node.journal;channel=light.Channel(node,'env-a',None,None,lambda:None)
+        self.addCleanup(channel.close)
+        first,second=str(uuid.uuid4()),str(uuid.uuid4())
+        journal.put('out','env-a',first,{'synthetic':1})
+        self.assertTrue(channel.reserve_send(first))
+        with patch.object(journal,'db',side_effect=AssertionError('ACK must not touch SQLite')):
+            channel.acknowledged(first)
+        self.assertFalse(channel.reserve_send(first))
+        journal.put('out','env-a',second,{'synthetic':2})
+        self.assertEqual([r['id']for r in journal.ready_out('env-a',channel.retry_at)],[second])
+        fresh=light.Channel(node,'env-a',None,None,lambda:None);self.addCleanup(fresh.close)
+        self.assertEqual({r['id']for r in journal.ready_out('env-a',fresh.retry_at)},{first,second})
+        with patch('csl_light.time.monotonic',return_value=time.monotonic()+61), \
+             patch('csl_light.time.time',return_value=time.time()-86400):
+            self.assertIn(first,[r['id']for r in journal.ready_out('env-a',channel.retry_at)])
+        journal.finish('out','env-a',first,{'ok':True})
+        self.assertNotIn(first,[r['id']for r in journal.ready_out('env-a',fresh.retry_at)])
+
+    def test_full_queue_drops_advisory_frames_without_closing(self):
+        import queue
+        node=light.Node(self.config);self.addCleanup(node.pool.shutdown,False)
+        channel=light.Channel(node,'env-a',None,None,lambda:None);self.addCleanup(channel.close)
+        with patch.object(channel.outgoing,'put_nowait',side_effect=queue.Full):
+            for kind in ('ack','pong','hello','ping'):
+                self.assertFalse(channel.send({'type':kind}));self.assertFalse(channel.closed)
+            self.assertFalse(channel.send({'type':'request','id':str(uuid.uuid4())}))
+            self.assertTrue(channel.closed)
+
+    def test_inbound_retry_is_monotonic_and_broker_restart_resets_old_deadlines(self):
+        journal=light.Journal(self.home/'light.sqlite');identifier=str(uuid.uuid4())
+        journal.put('in','env-a',identifier,{'synthetic':True});journal.error('in','env-a',identifier,RuntimeError())
+        with patch('csl_light.time.time',return_value=time.time()-86400):
+            self.assertFalse(journal.retry_due('env-a',identifier))
+            with patch('csl_light.time.monotonic',return_value=time.monotonic()+2):
+                self.assertTrue(journal.retry_due('env-a',identifier))
+                self.assertEqual([r['id']for r in journal.pending('in')],[identifier])
+        with journal.db()as db:db.execute('UPDATE delivery_retries SET next=?',(10**15,))
+        journal.reset_retries()
+        self.assertTrue(journal.retry_due('env-a',identifier))
+        self.assertIsNotNone(journal.get('in','env-a',identifier))
+
+    def test_parked_peer_spawns_no_threads_until_marker_removed(self):
+        node=light.Node(self.config);self.addCleanup(node.pool.shutdown,False)
+        cfg=json.loads(json.dumps(self.config));cfg['links']['env-a']={'endpoint':'owner-env-a','agents':['worker'],'key':str(self.key)}
+        enroll.atomic(self.home/'config.json',encode(cfg).encode())
+        marker=self.home/'revoked-env-a';marker.write_text('parked')
+        with patch('csl_light.threading.Thread')as thread:
+            for _ in range(10):node.sync_links()
+            thread.assert_not_called()
+            marker.unlink();node.sync_links();thread.assert_called_once()
+            thread.return_value.start.assert_called_once()
+
+    def test_malformed_peer_rows_are_logged_once_and_valid_rows_keep_reloading(self):
+        connector=Connector(self.host)
+        try:
+            enroll.adopt_peers(self.config,'env-a','worker')
+            store=Store(self.host)
+            try:
+                with store.transaction()as db:
+                    db.execute('INSERT INTO peers VALUES(?,?)',('bad-json','{'))
+                    db.execute('INSERT INTO peers VALUES(?,?)',('bad-shape','[]'))
+                    db.execute('INSERT INTO peers VALUES(?,?)',('bad-fields',encode({'transport':'light','home':1,'peer':'bad','allow_ops':None})))
+            finally:store.close()
+            with self.assertLogs('csl_bridge_engine',level='WARNING')as logs:
+                connector.reload_light_peers();connector.reload_light_peers()
+            self.assertEqual(len(logs.output),3)
+            self.assertEqual(connector.peers['env-a']['transport'],'light')
+            self.assertNotIn('bad-json',connector.peers)
+            self.assertNotIn('bad-shape',connector.peers)
+            self.assertNotIn('bad-fields',connector.peers)
+        finally:connector.close()
+        with self.assertLogs('csl_bridge_engine',level='WARNING'):
+            restarted=Connector(self.host)
+        try:self.assertIn('env-a',restarted.peers)
+        finally:restarted.close()
 
     def test_stop_terminates_a_stubborn_owned_process_group(self):
         child = subprocess.Popen([sys.executable, '-c',
