@@ -192,7 +192,10 @@ class Store:
                 yield self.db
                 self.db.execute('COMMIT')
             except BaseException:
-                self.db.execute('ROLLBACK')
+                # SQLITE_FULL and some I/O failures roll back automatically.
+                # A second ROLLBACK must not hide the original failure.
+                if self.db.in_transaction:
+                    self.db.execute('ROLLBACK')
                 raise
 
     def rows(self, query, args=()):
