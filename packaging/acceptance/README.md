@@ -54,7 +54,7 @@ values or transcripts in the evidence.
    `safe_load_all`. Supply a separate trusted pins JSON object containing
    `collector_image`, `writer_image`, `origin`, `provider`, `ca_configmap`,
    `writer_argv` (the exact literal array including the writer shutdown budget and
-   `--`), `supervisor_name`, `supervisor_sha256`, `grace_seconds`, and
+   `--`), `supervisor_name`, `supervisor_sha256`, `namespace`, `grace_seconds`, and
    `location` (label, provider, cluster, workload). For nondefault collector
    budgets, supply `flush_seconds` and `spool_limit_bytes`. Hash the script bytes
    from the reviewed source checkout. Compute the name from the reviewed Helm
@@ -66,7 +66,12 @@ values or transcripts in the evidence.
    python3 packaging/acceptance/check_rendered_abi.py rendered.json reviewed-pins.json
    ```
 
-   Submit the checked objects. Independently compare the admission result and
+   Submit the checked objects with the reviewed namespace explicitly selected
+   (for example, `kubectl --namespace "$fixture_namespace" apply -f reviewed.yaml`
+   using the owned fixture kubeconfig). The checker resolves omitted namespace
+   fields to that pin and rejects conflicting explicit namespaces. Compare the
+   actual Pod namespace and namespace-local supervisor and CA references to the
+   reviewed inputs. Independently compare the admission result and
    actual Pod against the checked execution boundary, accounting for API default
    fields. Reject mutation of the checked inputs and any injected execution path.
    Record actual digest, mounts, process boundary and CA.

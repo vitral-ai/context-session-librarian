@@ -21,7 +21,7 @@ def by_name(rows):
 
 
 def check(manifests, *, collector_image, writer_image, origin, provider, ca_configmap,
-          writer_argv, supervisor_name, supervisor_sha256, location, grace_seconds,
+          writer_argv, supervisor_name, supervisor_sha256, namespace, location, grace_seconds,
           flush_seconds=20, spool_limit_bytes=134217728):
     """Return bounded assertion labels. Pins are trusted inputs from review."""
     if (type(flush_seconds) is not int or not 1 <= flush_seconds <= 20
@@ -31,7 +31,17 @@ def check(manifests, *, collector_image, writer_image, origin, provider, ca_conf
     kinds = {row['kind']: row for row in manifests}
     if len(kinds) != len(manifests) or set(kinds) != {'ConfigMap', 'Deployment'}:
         return ['unexpected_fixture_resources']
-    pod = kinds['Deployment']['spec']['template']['spec']
+    if (type(namespace) is not str
+            or not re.fullmatch(r'[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?', namespace)):
+        return ['invalid_reviewed_namespace']
+    # Apply must use the reviewed namespace for resources that omit it.
+    if any(row.get('metadata', {}).get('namespace', namespace) != namespace
+           for row in kinds.values()):
+        return ['fixture_namespace']
+    template = kinds['Deployment']['spec']['template']
+    if template.get('metadata', {}).get('namespace', namespace) != namespace:
+        return ['fixture_namespace']
+    pod = template['spec']
     pod_fields = {'automountServiceAccountToken', 'securityContext',
                   'terminationGracePeriodSeconds', 'initContainers', 'containers', 'volumes'}
     if set(pod) - pod_fields - {'hostPID', 'hostIPC', 'hostNetwork', 'shareProcessNamespace'}:

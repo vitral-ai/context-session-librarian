@@ -1,5 +1,8 @@
 from copy import deepcopy
 import hashlib
+import json
+import subprocess
+import tempfile
 from pathlib import Path
 import sys
 import unittest
@@ -21,7 +24,7 @@ PINS = {'collector_image': 'test/csl@sha256:' + '1' * 64,
         'writer_image': 'test/writer@sha256:' + '1' * 64,
         'origin': 'https://vitral.fixture.test', 'provider': 'codex', 'ca_configmap': 'test-ca',
         'writer_argv': ['15', '--', 'python3'], 'supervisor_name': SUPERVISOR,
-        'supervisor_sha256': hashlib.sha256(SCRIPT).hexdigest(), 'grace_seconds': 40,
+        'supervisor_sha256': hashlib.sha256(SCRIPT).hexdigest(), 'grace_seconds': 40, 'namespace': 'default',
         'location': {'provider': 'kubernetes', 'cluster': 'test:cluster',
                      'label': 'Fixture', 'workload': 'local/workload'}}
 
@@ -119,3 +122,37 @@ class RenderedABI(unittest.TestCase):
         self.assertEqual(check(local_only_manifests(result.stdout),
                                **(PINS | {'writer_argv': ['15', '--', 'python3',
                                                           'space and $(literal); --']})), [])
+
+    def test_cli_binds_namespace_local_references(self):
+        cases = (
+            (None, None, None, 0),
+            ('default', 'default', 'default', 0),
+            ('default', None, None, 0),
+            (None, 'default', None, 0),
+            ('foreign', 'default', None, 1),
+            ('default', 'foreign', None, 1),
+            ('foreign', 'foreign', None, 1),
+            (None, None, 'foreign', 1),
+            ('', None, None, 1),
+        )
+        with tempfile.TemporaryDirectory() as home:
+            input_file = Path(home) / 'render.json'
+            pin_file = Path(home) / 'pins.json'
+            pin_file.write_text(json.dumps(PINS), encoding='utf-8')
+            for config_ns, deployment_ns, template_ns, expected_exit in cases:
+                with self.subTest(config=config_ns, deployment=deployment_ns, pod=template_ns):
+                    manifests = deepcopy(self.manifests)
+                    config = next(row for row in manifests if row['kind'] == 'ConfigMap')
+                    deployment = next(row for row in manifests if row['kind'] == 'Deployment')
+                    for row, namespace in ((config, config_ns), (deployment, deployment_ns),
+                                           (deployment['spec']['template'], template_ns)):
+                        if namespace is not None:
+                            row['metadata']['namespace'] = namespace
+                    input_file.write_text(json.dumps(manifests), encoding='utf-8')
+                    result = subprocess.run(
+                        [sys.executable, str(Path(__file__).with_name('check_rendered_abi.py')),
+                         str(input_file), str(pin_file)],
+                        capture_output=True, text=True, check=False, timeout=10)
+                    self.assertEqual(result.returncode, expected_exit, result.stderr)
+                    self.assertEqual(json.loads(result.stdout)['failures'],
+                                     ['fixture_namespace'] if expected_exit else [])
