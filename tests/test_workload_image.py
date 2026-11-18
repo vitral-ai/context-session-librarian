@@ -139,7 +139,9 @@ class WorkloadImageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='context-verdict-') as temporary:
             target = Path(temporary)/'sentinel'
             accepted = subprocess.CompletedProcess([], 0, stdout=b'')
-            missing = subprocess.CompletedProcess([], 1, stdout=(candidate+': not found').encode())
+            missing = subprocess.CompletedProcess([], 1, stdout=(
+                'ERROR: failed to solve: failed to compute cache key: failed to calculate checksum of ref '
+                'synthetic::ref: '+json.dumps('/'+candidate)+': not found\n').encode())
             infra = subprocess.CompletedProcess([], 1, stdout=b'cannot connect to Docker daemon')
             verify = probe['verify_result']
             verify(missing, candidate, False, target, b'public control')
@@ -150,6 +152,35 @@ class WorkloadImageTests(unittest.TestCase):
             verify(accepted, candidate, True, target, b'public control')
             with self.assertRaises(RuntimeError): verify(missing, candidate, False, target, b'public control')
             with self.assertRaises(RuntimeError): verify(accepted, candidate, True, target, b'wrong bytes')
+
+    def test_context_refusal_requires_candidate_specific_terminal_buildkit_error(self):
+        verify = runpy.run_path(str(ROOT/'scripts/check_workload_build_context.py'))['verify_result']
+        candidate = 'packaging/collector-image/review-private.sqlite'
+        shown = '#4 COPY '+json.dumps([candidate, '/sentinel'])+'\n'
+        def error(name, *, build=False):
+            return ('ERROR: '+('failed to build: ' if build else '')
+                    +'failed to solve: failed to compute cache key: failed to calculate checksum of ref '
+                    +'synthetic::ref: '+json.dumps('/'+name)+': not found\n')
+        failures = [shown+'ERROR: docker-credential-helper: executable file not found\n',
+                    shown+error('elsewhere/review-private.sqlite'),
+                    shown+error(candidate+'.bak'), shown+candidate+': not found\n',
+                    shown+'#4 '+error(candidate)+'ERROR: context canceled\n',
+                    shown+error(candidate).rstrip()+'; context canceled\n']
+        with tempfile.TemporaryDirectory(prefix='candidate-error-') as temporary:
+            output = Path(temporary)/'sentinel'
+            for diagnostic in failures:
+                with self.subTest(diagnostic=diagnostic), self.assertRaises(RuntimeError):
+                    verify(subprocess.CompletedProcess([], 1, stdout=diagnostic.encode()),
+                           candidate, False, output, b'public')
+            for code in (-9, 2, 127):
+                with self.subTest(code=code), self.assertRaises(RuntimeError):
+                    verify(subprocess.CompletedProcess([], code, stdout=error(candidate).encode()),
+                           candidate, False, output, b'public')
+            for build in (False, True):
+                result = subprocess.CompletedProcess([], 1, stdout=(shown+error(candidate, build=build)).encode())
+                verify(result, candidate, False, output, b'public')
+            output.symlink_to(Path(temporary)/'missing-artifact')
+            with self.assertRaises(RuntimeError): verify(result, candidate, False, output, b'public')
 
     def test_fixed_exec_nonroot_pins_and_no_inherited_default_command(self):
         launcher = (IMAGE/'csl-workload-collector').read_text()

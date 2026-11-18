@@ -55,7 +55,10 @@ python3 -S scripts/check_workload_build_context.py
 This uses unchanged filter bytes with temporary synthetic public files and real
 BuildKit scratch COPY/local-export probes. Three positive controls must succeed;
 ten unlisted root, nested, hidden and filename-suffix siblings must refuse with
-an actual missing/excluded-source diagnostic, not an infrastructure error. Four
+a terminal BuildKit checksum error naming that exact source, not an echoed COPY
+argument plus an unrelated "not found". Legacy/unknown diagnostics, canceled
+builds, nonstandard exit codes and partial exports fail rather than count as a
+policy refusal. Four
 old-filter controls reproduce the historical directory-reopening bug. No real
 state/secret is used, no checkout file is mutated, and no probe image is pushed
 or tagged. Temporary exports are removed; ordinary BuildKit caches remain.
