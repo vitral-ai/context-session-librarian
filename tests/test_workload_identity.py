@@ -2,6 +2,7 @@
 import base64
 import copy
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -131,6 +132,95 @@ class WorkloadKeyTests(unittest.TestCase):
         with self.assertRaisesRegex(SyncError, '^workload_key_storage_refused$'):
             WorkloadKey(shared)
         self.assertEqual(shared.stat().st_mode & 0o777, 0o755)
+
+    def test_fifo_key_refuses_promptly_before_helper(self):
+        os.mkfifo(self.key.path, 0o600)
+        before = self.key.path.lstat()
+        script = '''
+import sys
+from csl_workload_identity import WorkloadKey
+from csl_sync_state import SyncError, exclusive
+key = WorkloadKey(sys.argv[1])
+with exclusive(key.root):
+    try:
+        key.ensure()
+    except SyncError as error:
+        print(error.code)
+        raise SystemExit(0)
+raise SystemExit(1)
+'''
+        try:
+            result = subprocess.run([sys.executable, '-S', '-c', script, str(self.key.root)],
+                cwd=str(Path(__file__).resolve().parents[1]), capture_output=True, text=True, timeout=2)
+        except subprocess.TimeoutExpired:
+            self.fail('FIFO key admission blocked while holding the collector lock')
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), 'workload_key_storage_refused')
+        after = self.key.path.lstat()
+        self.assertEqual((before.st_ino, before.st_mode, before.st_nlink),
+                         (after.st_ino, after.st_mode, after.st_nlink))
+
+    def test_hardlinked_key_refuses_all_entry_points_without_changing_either_root(self):
+        self.seed_key(); original = self.key.path.read_bytes()
+        other = WorkloadKey(self.root/'other-state')
+        os.link(self.key.path, other.path)
+        inode = self.key.path.stat().st_ino
+        for key in (self.key, other):
+            with patch.object(key, '_run', side_effect=AssertionError('helper must not run')) as helper:
+                for action in (key.ensure, key.public,
+                        lambda: key.proof(ISSUER, 'fixture', bytes(32), bytes(32), expected_thumbprint=bytes(32))):
+                    with self.assertRaisesRegex(SyncError, '^workload_key_storage_refused$'):
+                        action()
+                helper.assert_not_called()
+            self.assertEqual(key.path.read_bytes(), original)
+            self.assertEqual(key.path.stat().st_ino, inode)
+            self.assertEqual(key.path.stat().st_nlink, 2)
+
+    def test_other_invalid_key_descriptors_refuse_before_helper(self):
+        for kind in ('directory', 'empty', 'oversized'):
+            with self.subTest(kind=kind):
+                if kind == 'directory': self.key.path.mkdir(mode=0o700)
+                else:
+                    self.key.path.write_bytes(b'' if kind == 'empty' else b'x'*4097)
+                    self.key.path.chmod(0o600)
+                before = self.key.path.lstat()
+                with patch.object(self.key, '_run', side_effect=AssertionError('helper must not run')):
+                    with self.assertRaisesRegex(SyncError, '^workload_key_storage_refused$'):
+                        self.key.ensure()
+                self.assertEqual(self.key.path.lstat().st_ino, before.st_ino)
+                # Remove only this owned synthetic fixture to exercise the next shape.
+                if kind == 'directory': self.key.path.rmdir()
+                else: self.key.path.unlink()
+
+    def test_mount_root_keeps_mode_while_private_child_owns_key(self):
+        volume = self.root/'volume'; volume.mkdir(); volume.chmod(0o770)
+        with self.assertRaises(SyncError): WorkloadKey(volume)
+        key = WorkloadKey(volume/'identity'); key.ensure()
+        self.assertEqual(volume.stat().st_mode & 0o777, 0o770)
+        self.assertEqual(key.root.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(key.path.stat().st_mode & 0o777, 0o600)
+
+    def test_original_public_workload_fixture_payloads_and_signatures_match(self):
+        raw = (Path(__file__).parent/'fixtures/native-workload-key-proof-v1.json').read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(),
+            '552c7d6957173b9ef219da3a7f2459b6400d663d012cdd6ac21994691539bb77')
+        fixture = json.loads(raw)
+        clean, digest = metadata(json.loads(fixture['canonical_metadata']))
+        self.assertEqual(canonical(clean).decode(), fixture['canonical_metadata'])
+        self.assertEqual(digest, fixture['metadata_sha256_hex'])
+        self.assertEqual(SEED.hex(), fixture['seed_hex']); self.seed_key()
+        jwk, thumb = self.key.ensure()
+        self.assertEqual(canonical(jwk).decode(), fixture['canonical_jwk'])
+        self.assertEqual(thumb.hex(), fixture['thumbprint_hex'])
+        for row in fixture['proofs']:
+            nonce = unb64(row['nonce_b64url'], 32)
+            payload = proof_message(fixture['issuer'], row['credential'], nonce, thumb,
+                bytes.fromhex(digest), refresh=row['kind'] == 'refresh')
+            self.assertEqual(payload.hex(), row['signed_hex'])
+            self.assertEqual(len(payload), row['signed_byte_count'])
+            self.assertEqual(self.key.proof(fixture['issuer'], row['credential'], nonce,
+                bytes.fromhex(digest), expected_thumbprint=thumb, refresh=row['kind'] == 'refresh'),
+                row['signature_b64url'])
 
     def test_malformed_public_symlink_and_permissive_key_refuse_without_replacement(self):
         self.seed_key(); original = self.key.path.read_bytes()

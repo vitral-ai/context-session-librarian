@@ -1,0 +1,35 @@
+{
+  "seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+  "canonical_jwk": "{\"crv\":\"Ed25519\",\"kty\":\"OKP\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}",
+  "thumbprint_hex": "90facafea9b1556698540f70c0117a22ea37bd5cf3ed3c47093c1707282b4b89",
+  "thumbprint_b64url": "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k",
+  "issuer": "https://identity.example.test/native-auth/v1",
+  "client_id": "vitral-workload-collector",
+  "canonical_metadata": "{\"cluster\":\"local-kind\",\"label\":\"W7 workload café\",\"namespace\":\"test\",\"provider\":\"kubernetes\",\"replica\":\"fixture-1\",\"workload\":\"fixture-job\"}",
+  "metadata_sha256_hex": "4b185ea69956fa08e0fa0fcd19330ea2ac8b7c898e3d5d95564123ad78a5cdd1",
+  "proofs": [
+    {
+      "kind": "device",
+      "domain": "vitral-host-key-proof-v1",
+      "credential": "workload-vector-device",
+      "credential_sha256_hex": "87a90a223a12ee9e07a3830754c6e0b8232702f76c8fe41e652707a495ace3ab",
+      "nonce_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "nonce_b64url": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "signed_byte_count": 245,
+      "signed_hex": "76697472616c2d686f73742d6b65792d70726f6f662d76310000002c68747470733a2f2f6964656e746974792e6578616d706c652e746573742f6e61746976652d617574682f76310000001976697472616c2d776f726b6c6f61642d636f6c6c6563746f720000002087a90a223a12ee9e07a3830754c6e0b8232702f76c8fe41e652707a495ace3ab00000020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000002090facafea9b1556698540f70c0117a22ea37bd5cf3ed3c47093c1707282b4b89000000204b185ea69956fa08e0fa0fcd19330ea2ac8b7c898e3d5d95564123ad78a5cdd1",
+      "signature_b64url": "CJFQqhzABQZdIVQgOBiRJY_qmOQPgK4sUAJHogR1e9kTWlIHZ6n_Hg9FKOQ9LfYVnAsPQyB299EDSB5CepojCw"
+    },
+    {
+      "kind": "refresh",
+      "domain": "vitral-host-refresh-proof-v1",
+      "credential": "workload-vector-refresh",
+      "credential_sha256_hex": "675e8ace120e6767a8d771d17ae83fb1895d9da0f133f1dfe1350aef61e4468a",
+      "nonce_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "nonce_b64url": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+      "signed_byte_count": 249,
+      "signed_hex": "76697472616c2d686f73742d726566726573682d70726f6f662d76310000002c68747470733a2f2f6964656e746974792e6578616d706c652e746573742f6e61746976652d617574682f76310000001976697472616c2d776f726b6c6f61642d636f6c6c6563746f7200000020675e8ace120e6767a8d771d17ae83fb1895d9da0f133f1dfe1350aef61e4468a00000020202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f0000002090facafea9b1556698540f70c0117a22ea37bd5cf3ed3c47093c1707282b4b89000000204b185ea69956fa08e0fa0fcd19330ea2ac8b7c898e3d5d95564123ad78a5cdd1",
+      "signature_b64url": "O5Vlj-b5RmCSlC3WCleQW5wy4pRpTkxNTHXSGLs_3swDViuUBRCxl6oZce1bIHsC09_vK-oEpeqFHah8a0HKBQ"
+    }
+  ]
+}

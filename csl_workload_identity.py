@@ -135,16 +135,18 @@ class WorkloadKey:
 
     def _existing(self):
         try:
-            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except FileNotFoundError:
             return False
         except OSError:
             raise SyncError('workload_key_storage_refused') from None
-        with os.fdopen(fd, 'rb') as source:
-            info = os.fstat(source.fileno())
-            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()
                     or info.st_mode & 0o077 or not 1 <= info.st_size <= 4096):
                 raise SyncError('workload_key_storage_refused')
+        finally:
+            os.close(fd)
         return True
 
     def ensure(self):

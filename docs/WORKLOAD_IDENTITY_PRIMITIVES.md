@@ -65,6 +65,18 @@ key is owned 0600, regular and no-follow. Initialization is exclusive and fsynce
 restart reuses the same key. A malformed, permissive, symlinked or mismatched key
 refuses; there is no automatic rotation, replacement or import from harness
 credential stores. Each replica needs independent state and person approval.
+Key admission opens nonblocking, then checks the opened descriptor for regular
+type, one link, owner, private mode and bounded size. FIFO/special files cannot
+hold the collector lock waiting for a writer. A hard-linked key refuses in both
+replica roots, without unlinking, rotating or modifying either link.
+
+`VITRAL_COLLECTOR_STATE` is the per-replica volume root, not the key directory.
+The runner must create a private child such as `/collector-state/identity` and
+leave the kubelet/fsGroup-managed mount root untouched. Tests qualify an owned
+0770 parent with a 0700 key child and 0600 key. The runner must also pass
+`VITRAL_COLLECTOR_TRUST_CA`, when present, to `WorkloadHTTP(ca_file=...)`; hostname
+validation remains enabled. This is a source integration contract, not evidence
+of a deployed image or in-pod run.
 
 OpenSSL gets a minimal environment, no inherited cloud/harness credentials or
 config overrides, no password prompt, captured output and suppressed stderr.
@@ -79,10 +91,12 @@ is secret-free or that a malicious same-user process cannot read owned state.
 `tests/test_workload_identity.py` uses the public RFC 8032 test seed shared by the
 W7 vectors. Independent payload/signature expectations were constructed with
 cryptography 45.0.3; tests run with site packages disabled and use OpenSSL instead.
-The workload fixture parameters match env7's issuer, client, metadata and
-credential names. The original author-reported fixture-file hash has NOT been
-independently verified from original bytes; these are field/signature fixtures,
-not a claim of byte-identical artifact reproduction.
+The original public `tests/fixtures/native-workload-key-proof-v1.json` bytes are
+now included and independently verified as SHA-256
+`552c7d6957173b9ef219da3a7f2459b6400d663d012cdd6ac21994691539bb77`.
+Tests compare canonical metadata/JWK, exact device/refresh LP payload bytes and
+actual OpenSSL signatures against the original fixture. Its public RFC seed is
+test data, never a live credential or workload identity.
 
 `tests/test_workload_http.py` uses an owned loopback HTTPS server and public test
 CA. It proves GET/PUT path/header/body preservation, wrong-CA/hostname refusal,
