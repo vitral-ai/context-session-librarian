@@ -5,6 +5,7 @@ seeding before setting seed_complete/pending. This module does not implement tha
 admission/upgrade integration and is deliberately unused by production consumers.
 All ID purposes and claims are scoped to this Store's exact bridge.sqlite.
 """
+from contextlib import nullcontext
 import hashlib
 import uuid
 
@@ -59,6 +60,13 @@ class EventState:
                     consumer TEXT PRIMARY KEY,after_seq INTEGER NOT NULL,horizon INTEGER NOT NULL)''',
             ):
                 db.execute(statement)
+
+    def write(self, transaction=None):
+        if transaction is None:
+            return self.store.transaction()
+        if transaction is not self.store.db or not transaction.in_transaction:
+            raise EventConflict('Event transaction must belong to the exact recipient home')
+        return nullcontext(transaction)
 
     @staticmethod
     def reserve_id(db, value, purpose, binding, thread):
@@ -118,6 +126,10 @@ class EventState:
         row = db.execute('SELECT * FROM event_effects WHERE key=?', (key,)).fetchone()
         if row is None or row['revision'] != revision:
             raise EventDeferred('Event identity changed; re-read its durable outcome')
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='event_catalog_meta'").fetchone():
+            watermark = db.execute('SELECT watermark FROM event_catalog_meta WHERE id=1').fetchone()[0]
+            if watermark != db.execute('SELECT max(seq) FROM inbound').fetchone()[0]:
+                raise EventDeferred('Historical catalog has an unresolved tail')
         if not row['seed_complete'] or row['state'] in ('seeding', 'deferred'):
             raise EventDeferred('Historical/correlation proof is incomplete')
         if row['state'] in ('conflict', 'rejected'):
@@ -134,10 +146,12 @@ class EventState:
         if not row['thread'] or not registered or registered[0] != row['thread']:
             raise EventDeferred('Recipient binding is unknown or changed')
 
-    def claim_native(self, key, revision):
+    def claim_native(self, key, revision, *, transaction=None, guard=None):
         """One committed winner; caller invokes outside the returned transaction."""
-        with self.store.transaction() as db:
+        with self.write(transaction) as db:
             row = self.checked(db, key, revision)
+            if guard:
+                guard(db, row)
             if row['state'] in SETTLED:
                 return None
             if row['state'] != 'pending':
@@ -156,10 +170,12 @@ class EventState:
             return {'key': key, 'number': number, 'client_id': value,
                     'thread': row['thread'], 'revision': revision + 1}
 
-    def observe_wait(self, key, revision):
+    def observe_wait(self, key, revision, *, transaction=None, guard=None):
         """Claim+observation commit together. Old-cursor reads never reopen effects."""
-        with self.store.transaction() as db:
+        with self.write(transaction) as db:
             row = self.checked(db, key, revision)
+            if guard:
+                guard(db, row)
             if row['state'] in SETTLED:
                 return {'state': row['state'], 'history_read': True}
             if row['state'] == 'receipt_available':
@@ -176,10 +192,12 @@ class EventState:
                        (key, number, 'wait', row['thread'], None, 'wait_delivered', outcome))
             return {'state': 'wait_delivered', 'history_read': False}
 
-    def finish_native(self, claim, result, *, definitely_unaccepted=False):
+    def finish_native(self, claim, result, *, definitely_unaccepted=False, transaction=None, guard=None):
         """Ambiguous failures stay uncertain; only actual typed acceptance settles."""
-        with self.store.transaction() as db:
+        with self.write(transaction) as db:
             row = self.checked(db, claim['key'], claim['revision'])
+            if guard:
+                guard(db, row)
             attempt = db.execute('SELECT * FROM event_attempts WHERE key=? AND number=?',
                                  (claim['key'], claim['number'])).fetchone()
             if (row['state'] != 'uncertain' or not attempt or attempt['mode'] != 'native' or
