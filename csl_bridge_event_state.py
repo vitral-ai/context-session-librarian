@@ -127,7 +127,10 @@ class EventState:
         if row is None or row['revision'] != revision:
             raise EventDeferred('Event identity changed; re-read its durable outcome')
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='event_catalog_meta'").fetchone():
-            watermark = db.execute('SELECT watermark FROM event_catalog_meta WHERE id=1').fetchone()[0]
+            metadata = db.execute('SELECT watermark,version FROM event_catalog_meta WHERE id=1').fetchone()
+            if not metadata or metadata['version'] != 1:
+                raise EventDeferred('Unknown historical catalog schema version')
+            watermark = metadata['watermark']
             if watermark != db.execute('SELECT max(seq) FROM inbound').fetchone()[0]:
                 raise EventDeferred('Historical catalog has an unresolved tail')
         if not row['seed_complete'] or row['state'] in ('seeding', 'deferred'):

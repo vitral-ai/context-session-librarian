@@ -62,10 +62,15 @@ class EventHistory:
                     reason TEXT NOT NULL,PRIMARY KEY(task,wire_id,raw_hash,reason))''',
             ):
                 db.execute(statement)
+            if db.execute('SELECT version FROM event_catalog_meta WHERE id=1').fetchone()[0] != 1:
+                raise EventDeferred('Unknown historical catalog schema version')
 
     @staticmethod
     def complete(db):
-        watermark = db.execute('SELECT watermark FROM event_catalog_meta WHERE id=1').fetchone()[0]
+        metadata = db.execute('SELECT watermark,version FROM event_catalog_meta WHERE id=1').fetchone()
+        if not metadata or metadata['version'] != 1:
+            raise EventDeferred('Unknown historical catalog schema version')
+        watermark = metadata['watermark']
         tail = db.execute('SELECT max(seq) FROM inbound').fetchone()[0]
         return watermark == tail
 
@@ -132,6 +137,7 @@ class EventHistory:
         if type(limit) is not int or not 1 <= limit <= 128:
             raise ValueError('Catalog step must contain 1..128 rows')
         with self.store.transaction() as db:
+            self.complete(db)  # Check the schema before any catalog writes.
             watermark = db.execute('SELECT watermark FROM event_catalog_meta WHERE id=1').fetchone()[0]
             query = 'SELECT * FROM inbound' + (' WHERE seq>?' if watermark is not None else '') + ' ORDER BY seq LIMIT ?'
             args = (watermark, limit) if watermark is not None else (limit,)
@@ -317,19 +323,28 @@ class EventHistory:
     def route_shape(route):
         if not isinstance(route, dict) or set(route) != {'physical_peer', 'origin', 'destination'}:
             raise EventConflict('Invalid verified event route')
-        for value in route.values():
-            name(value)
+        try:
+            for value in route.values():
+                name(value)
+        except BridgeError as error:
+            raise EventConflict(str(error)) from error
         return encode(route)
 
     def cached_route(self, peer, task):
-        rows = self.store.rows('SELECT r.* FROM event_original_routes r JOIN operations o ON o.id=r.task AND o.peer=? WHERE r.peer=? AND r.task=?',
+        rows = self.store.rows('SELECT r.*,o.hash AS request_hash,o.request AS request_body FROM event_original_routes r JOIN operations o ON o.id=r.task AND o.peer=? WHERE r.peer=? AND r.task=?',
                                ('outbound:' + peer, peer, task))
-        return decode(rows[0]['route']) if rows else None
+        if rows:
+            row = rows[0]
+            if (raw_hash(row['request_body']) == row['request_hash'] and
+                    row['signature'] == digest([peer, row['request_hash'], row['request_body']])):
+                return decode(row['route'])
+        return None
 
     def recover_original(self, peer, event, route):
         """Reuse only earlier independent route/acceptance evidence, never event text."""
         encoded_route = self.route_shape(route)
         with self.store.transaction() as db:
+            self.complete(db)
             saved = db.execute('SELECT * FROM event_original_routes WHERE peer=? AND task=?', (peer, event['task_id'])).fetchone()
             original = db.execute('SELECT * FROM operations WHERE peer=? AND id=?', ('outbound:' + peer, event['task_id'])).fetchone()
             if not saved or not original or saved['route'] != encoded_route:
@@ -362,6 +377,7 @@ class EventHistory:
         encoded_route = self.route_shape(route) if route is not None else None
         body = encode(event)
         with self.store.transaction() as db:
+            was_complete = self.complete(db)
             proof = self.proof(db, peer, event)
             def refused(reason):
                 db.execute('INSERT OR IGNORE INTO event_admission_conflicts VALUES(?,?,?,?,?)',
@@ -402,7 +418,6 @@ class EventHistory:
                     candidate = self.projection(peer, event, {**proof, 'sender': seeded['sender']})
                     if seeded['signature'] != digest(proof['binding']) or candidate != seeded['projection']:
                         return refused('Conflicting final proposal')
-            was_complete = self.complete(db)
             created = prior is None
             if not prior:
                 db.execute('INSERT INTO inbound(id,peer,body)VALUES(?,?,?)', (event['id'], peer, body))
@@ -454,6 +469,7 @@ class EventHistory:
         if contains_findings(text):
             text = 'Result text withheld by partial secret detection. Review selected evidence locally; completion alone is not validation.'
         with self.store.transaction() as db:
+            self.complete(db)
             task = db.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
             if not task or not task['turn']:
                 raise EventDeferred('No independently accepted task turn')

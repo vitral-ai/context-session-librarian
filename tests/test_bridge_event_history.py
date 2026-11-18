@@ -531,3 +531,45 @@ class EventHistoryTests(unittest.TestCase):
         self.assertEqual(self.effect(key)['state'], 'pending')
         self.assertEqual(self.store.rows('SELECT * FROM event_attempts'), [])
         self.assertEqual(self.store.rows('SELECT * FROM event_native_ids'), [])
+
+    def test_unknown_schema_version_cannot_seed_or_claim(self):
+        _, _, event = self.task(); self.alias(event)
+        key, _ = self.seed(event)
+        with self.store.transaction() as db:
+            db.execute('UPDATE event_catalog_meta SET version=2')
+        with self.assertRaises(EventDeferred):
+            EventHistory(self.store)
+        with self.assertRaises(EventDeferred):
+            self.history.effects.claim_native(key, self.effect(key)['revision'])
+        self.assertEqual(self.effect(key)['state'], 'pending')
+
+    def test_unavailable_cached_receipt_does_not_grant_native_acceptance(self):
+        request, _, event = self.task()
+        route = {'physical_peer': 'hub', 'origin': 'remote', 'destination': 'remote'}
+        self.history.admit('remote', event, route=route)
+        self.store.operation(request['id'], 'uncertain', {})
+        with self.store.transaction() as db:
+            db.execute('UPDATE event_original_routes SET receipt=?', (encode({'state': 'queued'}),))
+        with self.assertRaises(EventDeferred):
+            self.history.recover_original('remote', event, route)
+        self.assertEqual(self.store.rows('SELECT state FROM operations'), [{'state': 'uncertain'}])
+
+    def test_cached_route_does_not_outlive_changed_original_request_identity(self):
+        request, _, event = self.task()
+        route = {'physical_peer': 'hub', 'origin': 'remote', 'destination': 'remote'}
+        self.history.admit('remote', event, route=route)
+        changed = dict(request, text='Different original')
+        with self.store.transaction() as db:
+            db.execute('UPDATE operations SET request=?,hash=?', (encode(changed), raw_hash(encode(changed))))
+        self.assertIsNone(self.history.cached_route('remote', event['task_id']))
+        with self.assertRaises(EventConflict):
+            self.history.recover_original('remote', event, route)
+
+    def test_native_and_wait_claim_guards_rollback_with_original_proof_failure(self):
+        request, _, event = self.task(); self.alias(event)
+        key, _ = self.seed(event)
+        self.store.operation(request['id'], 'uncertain', {})
+        with self.assertRaises(EventDeferred):
+            self.history.effects.observe_wait(key, self.effect(key)['revision'], guard=self.history.guard)
+        self.assertEqual(self.effect(key)['state'], 'pending')
+        self.assertEqual(self.store.rows('SELECT * FROM event_attempts'), [])
