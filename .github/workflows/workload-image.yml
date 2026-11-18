@@ -1,0 +1,61 @@
+name: Workload image source
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  collector-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build pinned collector image (no push)
+        run: docker build --file packaging/collector-image/Containerfile --tag csl-workload:fixture .
+      - name: No-network read-only helper and import smoke
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,size=64m \
+            --entrypoint /usr/local/bin/python3 csl-workload:fixture \
+            -E -s -S /opt/vitral/collector/check-runtime.py
+      - name: Unconfigured entry point refuses without enrollment
+        shell: bash
+        run: |
+          set +e
+          result=$(docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,size=64m \
+            csl-workload:fixture)
+          rc=$?
+          set -e
+          test "$rc" -eq 2
+          test "$result" = '{"complete":false,"pending":true,"error":"workload_run_refused"}'
+      - name: Literal producer and private state without an approved identity stay pending
+        shell: bash
+        run: |
+          trap 'docker rm -f csl-workload-entrypoint >/dev/null 2>&1 || true' EXIT
+          set +e
+          result=$(timeout 30s docker run --name csl-workload-entrypoint --network none \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,size=64m --entrypoint /bin/sh \
+            csl-workload:fixture -c '
+              mkdir /tmp/transcripts /tmp/state
+              export VITRAL_COLLECTOR_ORIGIN=https://identity.example.test
+              export VITRAL_COLLECTOR_PROVIDER=codex
+              export VITRAL_COLLECTOR_PROFILE=codex-0.169.0-text-v1
+              export VITRAL_COLLECTOR_TRANSCRIPT_ROOT=/tmp/transcripts
+              export VITRAL_COLLECTOR_STATE=/tmp/state
+              export VITRAL_COLLECTOR_REDACTION=required
+              export VITRAL_COLLECTOR_FLUSH_SECONDS=2
+              export VITRAL_COLLECTOR_SPOOL_LIMIT_BYTES=134217728
+              export VITRAL_LOCATION_LABEL=fixture VITRAL_LOCATION_PROVIDER=kubernetes
+              export VITRAL_LOCATION_CLUSTER=kind VITRAL_LOCATION_NAMESPACE=test
+              export VITRAL_LOCATION_WORKLOAD=fixture VITRAL_LOCATION_REPLICA=fixture-1
+              exec /usr/local/bin/csl-workload-collector -- /usr/local/bin/python3 -S -c pass
+            ')
+          rc=$?
+          set -e
+          test "$rc" -eq 2
+          printf '%s' "$result" | python3 -c '
+          import json,sys
+          r=json.load(sys.stdin)
+          assert r["complete"] is False and r["pending"] is True
+          assert r["producer_quiesced"] is True and r["writer_exit"] == 0
+          assert r["worker_reaped"] is True and r["synced"] == 0'

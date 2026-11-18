@@ -1,0 +1,38 @@
+# Immutable official Python 3.12.16 / Debian bookworm indexes, retrieved 2026-11-18.
+FROM docker.io/library/python:3.12.16-bookworm@sha256:4209fae09a3e20afd863e528bfddc235da5fd5977983e1996cd54cc9a72e6267 AS helper
+WORKDIR /build
+COPY packaging/collector-image/fetch-openssl.py /build/fetch-openssl.py
+RUN python3 -I /build/fetch-openssl.py
+WORKDIR /build/openssl-3.5.9
+RUN ./Configure no-shared no-module no-tests no-zlib --prefix=/opt/helper --openssldir=/etc/ssl \
+    && make -j2 build_sw \
+    && make install_sw
+
+FROM docker.io/library/python:3.12.16-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS assemble
+COPY packaging/collector-image/assemble.py /build/assemble.py
+COPY packaging/collector-image/runtime.json /source/packaging/collector-image/runtime.json
+COPY packaging/workload-collector/profiles.json /source/packaging/workload-collector/profiles.json
+COPY LICENSE csl_antigravity.py csl_canonical.py csl_codex_history.py \
+    csl_content.py csl_display.py csl_gemini_workload.py csl_history.py \
+    csl_media.py csl_secrets.py csl_sync_cache.py csl_sync_engine.py csl_sync_http.py \
+    csl_sync_providers.py csl_sync_state.py csl_text_workload.py csl_version.py \
+    csl_workload_auth.py csl_workload_config.py csl_workload_http.py \
+    csl_workload_identity.py csl_workload_producer.py csl_workload_provider.py \
+    csl_workload_runner.py csl_workload_state.py csl_workload_stream.py /source/
+RUN python3 -I /build/assemble.py /source /out
+
+FROM docker.io/library/python:3.12.16-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df
+COPY --from=helper /opt/helper/bin/openssl /usr/bin/openssl
+COPY --from=helper /build/openssl-3.5.9/LICENSE.txt /usr/local/share/licenses/workload-openssl/LICENSE.txt
+COPY --from=assemble /out /opt/vitral/collector
+COPY packaging/collector-image/csl-workload-collector /usr/local/bin/csl-workload-collector
+COPY packaging/collector-image/check-runtime.py /opt/vitral/collector/check-runtime.py
+RUN chmod 0555 /usr/bin/openssl /usr/local/bin/csl-workload-collector \
+    && chmod 0444 /opt/vitral/collector/check-runtime.py /usr/local/share/licenses/workload-openssl/LICENSE.txt
+ENV PATH=/usr/local/bin:/usr/bin:/bin HOME=/nonexistent PYTHONDONTWRITEBYTECODE=1
+WORKDIR /opt/vitral/collector
+USER 10001:10001
+RUN python3 -E -s -S /opt/vitral/collector/check-runtime.py
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/csl-workload-collector"]
+CMD []
