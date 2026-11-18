@@ -7,6 +7,9 @@ Vitral. Providers are `codex`, `claude` and `antigravity`.
 The separate internal [workload projection](WORKLOAD_PROVIDERS.md) implements this
 collector seam over sanitized Gemini text, not raw native files. It is not enabled
 by the CLI and does not alter this desktop raw-provider contract.
+Separate [workload identity primitives](WORKLOAD_IDENTITY_PRIMITIVES.md) enforce
+the future workload client's origin, metadata and proof encoding; they also
+activate no login or command.
 
 ```python
 list_sessions(provider, *, home=None, active_seconds=300) -> list[dict]
