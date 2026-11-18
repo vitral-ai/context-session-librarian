@@ -28,7 +28,10 @@ New aliases join the existing immutable body. Changed same-ID bodies, cross-kind
 IDs, changed original request/route identity and conflicting final proposals are
 refused with durable fingerprints. A terminal refusal binds that peer/wire ID:
 identical retries replay the refusal, and changed proposals retain collision
-evidence instead of becoming aliases. Transient absence of independent acceptance
+evidence instead of becoming aliases. The first accepted/refused decision is
+stored separately from later rejected-proposal audits: an alternate body cannot
+poison replay of the originally accepted raw identity. Decision, alias, route and
+cursor writes use the same transaction. Transient absence of independent acceptance
 remains retryable and creates no terminal refusal. Alias admission and a supplied fallback cursor
 commit together. Persistence is not Native acceptance. An in-flight canonical
 attempt is never reset to pending by a later alias or a resumed seed.
@@ -41,11 +44,18 @@ the sender thread; otherwise presence/value remain exact. Headers do not supply
 missing original authority.
 
 Known original authority is frozen at the first independently known catalog/seed
-binding, before any partial seed may complete. A different known binding records
+binding, before any partial seed may complete. Every catalog-observed proof
+contradiction retains refusal evidence and a proof fingerprint with the watermark,
+including invalid hashes or malformed originals/receipts. Repair cannot erase that
+observation. A different known binding records
 a conflict without replacing the signature, cursor, thread or projection. Unknown
 binding is represented separately, not by a digest of absence: an independently
 restored original may trigger a bounded alias re-evaluation while preserving all
-old delivered/uncertain suppression and attempt evidence. No restoration authorizes
+old delivered/uncertain suppression and attempt evidence. A known binding whose
+original temporarily disappears before the first seed stays unsealed until its
+proof returns; pending is never published with a NULL frozen signature. Original
+ID, reversed actors and valid source-session syntax must agree before an original
+can establish a historical attempted local thread. No restoration authorizes
 an original-work resend.
 
 Settled canonical history retains independent original acceptance evidence. Its

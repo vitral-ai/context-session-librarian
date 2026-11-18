@@ -8,7 +8,7 @@ import hashlib
 
 from csl_bridge_engine import confirm_event_turn, event_id, validate_event
 from csl_bridge_event_state import EventConflict, EventDeferred, EventState, SETTLED, digest
-from csl_bridge_store import BridgeError, decode, encode, identifier, name
+from csl_bridge_store import BridgeError, decode, encode, identifier, name, validate
 
 
 def raw_hash(raw):
@@ -66,6 +66,11 @@ class EventHistory:
                 '''CREATE TABLE IF NOT EXISTS event_admission_conflicts(
                     peer TEXT NOT NULL,task TEXT NOT NULL,wire_id TEXT NOT NULL,raw_hash TEXT NOT NULL,reason TEXT NOT NULL,
                     PRIMARY KEY(peer,wire_id,raw_hash,reason))''',
+                'CREATE INDEX IF NOT EXISTS event_admission_wire ON event_admission_conflicts(peer,wire_id)',
+                '''CREATE TABLE IF NOT EXISTS event_wire_decisions(
+                    peer TEXT NOT NULL,wire_id TEXT NOT NULL,task TEXT NOT NULL,
+                    raw_hash TEXT NOT NULL,state TEXT NOT NULL,seq INTEGER,reason TEXT,
+                    PRIMARY KEY(peer,wire_id))''',
                 '''CREATE TABLE IF NOT EXISTS event_final_conflicts(
                     task TEXT NOT NULL,wire_id TEXT NOT NULL,raw_hash TEXT NOT NULL,
                     reason TEXT NOT NULL,PRIMARY KEY(task,wire_id,raw_hash,reason))''',
@@ -137,6 +142,12 @@ class EventHistory:
             db.execute('INSERT INTO event_final_gaps VALUES(?,?,?) ON CONFLICT(key,target)DO UPDATE SET seq=min(seq,excluded.seq)',
                        (key, event['target'], row['seq']))
             proof = self.proof(db, peer, event)
+            if proof['state'] == 'conflict':
+                reason = 'Contradictory original proof during catalog: ' + proof.get('reason', 'wrong original peer')
+                if proof.get('evidence'):
+                    reason += ' proof=' + proof['evidence']
+                db.execute('UPDATE event_catalog SET conflict=? WHERE seq=?', (reason, row['seq']))
+                self.note(db, row, reason)
             if proof['binding'] is not None:
                 db.execute('INSERT OR IGNORE INTO event_original_bindings VALUES(?,?)',
                            (key, digest(proof['binding'])))
@@ -186,19 +197,32 @@ class EventHistory:
             if raw_hash(original['request']) != original['hash']:
                 raise BridgeError('Original request fingerprint differs')
             binding = digest([peer, original['hash'], original['request']])
-            thread = request.get('session')
-            if thread:
-                identifier(thread)
+            validate(request)
+            if (request.get('id') != event['task_id'] or request.get('op') not in ('followup', 'send_message') or
+                    request.get('source') != event['target'] or request.get('target') != event['source']):
+                raise BridgeError('Original actors do not establish this recipient thread')
+            candidate_thread = request.get('session')
+            if candidate_thread is not None:
+                identifier(candidate_thread)
+            thread = candidate_thread
             receipt = decode(original['result']) if original['result'] else {}
+            if not isinstance(receipt, dict):
+                raise BridgeError('Invalid original receipt shape')
             confirmed = confirm_event_turn(request, original['state'], receipt, event)
             sender = receipt.get('thread_id') if confirmed else None
-            if sender:
+            if sender is not None:
                 identifier(sender)
             return {'state': 'confirmed' if confirmed else 'deferred',
                     'binding': binding,
                     'thread': thread, 'sender': sender}
-        except (BridgeError, TypeError, AttributeError):
-            return {'state': 'conflict', 'binding': binding, 'thread': thread, 'sender': None}
+        except (BridgeError, TypeError, AttributeError) as error:
+            # Retain a non-payload fingerprint of the observed contradiction,
+            # even if a subsequent repair replaces the mutable operation row.
+            evidence = digest([peer, original['id'], original['hash'], raw_hash(original['request']),
+                               original['state'], raw_hash(original['result']) if original['result'] is not None else None])
+            return {'state': 'conflict', 'binding': binding, 'thread': thread, 'sender': None,
+                    'reason': str(error) if isinstance(error, BridgeError) else 'Malformed original proof',
+                    'evidence': evidence}
 
     @staticmethod
     def projection(peer, event, proof):
@@ -256,7 +280,7 @@ class EventHistory:
                     self.note(db, {'seq': first['seq'], 'id': first['wire_id'], 'body': first['body']}, 'Original receipt contradicts sender header')
                 else:
                     db.execute('INSERT OR IGNORE INTO event_accepted_originals VALUES(?,?)', (key, encode(proof)))
-            if state and state['sealed'] and expected == signature:
+            if state and state['sealed'] and state['signature'] == signature:
                 if effect['seed_complete']:
                     if effect['state'] == 'deferred' and proof['state'] == 'confirmed' and not (state['uncertain'] or state['delivered']):
                         try:
@@ -269,9 +293,10 @@ class EventHistory:
                         db.execute('UPDATE event_effects SET state=?,revision=revision+1 WHERE key=?', (updated, key))
                         return {'processed': 0, 'complete': True, 'state': updated}
                     return {'processed': 0, 'complete': True, 'state': effect['state']}
-            if state and expected is not None and signature is None:
-                # Temporary absence is not a replacement identity or a reset.
-                return {'processed': 0, 'complete': bool(effect['seed_complete']), 'state': 'deferred'}
+            if expected is not None and signature is None:
+                # Even before the first seed, absence cannot seal a NULL identity
+                # over a previously known catalog binding. Wait for exact proof.
+                return {'processed': 0, 'complete': bool(effect and effect['seed_complete']), 'state': 'deferred'}
             if state is None or state['signature'] in (None, digest(None)) and signature is not None:
                 registered = db.execute('SELECT thread FROM agents WHERE name=?', (event['target'],)).fetchone()
                 thread = proof['thread'] or (registered[0] if registered else None)
@@ -451,16 +476,47 @@ class EventHistory:
         body = encode(event)
         with self.store.transaction() as db:
             was_complete = self.complete(db)
+            def advance_cursor():
+                if cursor is not None:
+                    db.execute('INSERT INTO cursors VALUES(?,?) ON CONFLICT(peer)DO UPDATE SET value=max(value,excluded.value)', (peer, cursor))
+
             def refused(reason):
                 db.execute('INSERT OR IGNORE INTO event_admission_conflicts VALUES(?,?,?,?,?)',
                            (peer, event['task_id'], event['id'], raw_hash(body), reason))
-                if cursor is not None:
-                    db.execute('INSERT INTO cursors VALUES(?,?) ON CONFLICT(peer)DO UPDATE SET value=max(value,excluded.value)', (peer, cursor))
+                # Audit later proposals without replacing the first wire decision.
+                db.execute("INSERT OR IGNORE INTO event_wire_decisions VALUES(?,?,?,?,'rejected',NULL,?)",
+                           (peer, event['id'], event['task_id'], raw_hash(body), reason))
+                advance_cursor()
                 return {'state': 'rejected', 'event_id': event['id'], 'reason': reason}
-            terminal = db.execute('SELECT * FROM event_admission_conflicts WHERE peer=? AND wire_id=? ORDER BY rowid LIMIT 1', (peer, event['id'])).fetchone()
-            if terminal:
-                reason = terminal['reason'] if (terminal['raw_hash'], terminal['task']) == (raw_hash(body), event['task_id']) else 'Terminal wire refusal: changed proposal collision'
-                return refused(reason)
+
+            prior = db.execute('SELECT * FROM inbound WHERE id=?', (event['id'],)).fetchone()
+            decision = db.execute('SELECT * FROM event_wire_decisions WHERE peer=? AND wire_id=?', (peer, event['id'])).fetchone()
+            if decision is None:
+                # Prior inactive-helper databases may predate explicit decisions.
+                # Only a nonlegacy admitted catalog row establishes acceptance;
+                # merely finding historical inbound JSON is not acceptance proof.
+                accepted = db.execute('SELECT * FROM event_catalog WHERE wire_id=? AND peer=? AND legacy=0', (event['id'], peer)).fetchone()
+                terminal = db.execute('SELECT * FROM event_admission_conflicts WHERE peer=? AND wire_id=? ORDER BY rowid LIMIT 1', (peer, event['id'])).fetchone()
+                if accepted and prior and (prior['peer'], raw_hash(prior['body'])) == (peer, accepted['raw_hash']):
+                    db.execute("INSERT INTO event_wire_decisions VALUES(?,?,?,?,'persisted',?,NULL)",
+                               (peer, event['id'], accepted['task'], accepted['raw_hash'], prior['seq']))
+                elif terminal:
+                    db.execute("INSERT INTO event_wire_decisions VALUES(?,?,?,?,'rejected',NULL,?)",
+                               (peer, event['id'], terminal['task'], terminal['raw_hash'], terminal['reason']))
+                decision = db.execute('SELECT * FROM event_wire_decisions WHERE peer=? AND wire_id=?', (peer, event['id'])).fetchone()
+            if decision:
+                if decision['state'] != 'persisted':
+                    reason = decision['reason'] if (decision['raw_hash'], decision['task']) == (raw_hash(body), event['task_id']) else 'Terminal wire refusal: changed proposal collision'
+                    return refused(reason)
+                if (not prior or (prior['peer'], prior['body'], prior['seq']) != (peer, body, decision['seq']) or
+                        decision['raw_hash'] != raw_hash(body) or decision['task'] != event['task_id']):
+                    return refused('Wire ID body or peer collision')
+                saved = db.execute('SELECT route FROM event_original_routes WHERE peer=? AND task=?', (peer, event['task_id'])).fetchone()
+                if encoded_route is not None and saved and saved[0] != encoded_route:
+                    return refused('Original authenticated route changed')
+                if encoded_route is None or saved:
+                    advance_cursor()
+                    return {'state': 'persisted', 'event_id': event['id'], 'seq': prior['seq']}
             proof = self.proof(db, peer, event)
             if proof['state'] == 'conflict':
                 return refused('Contradictory original identity')
@@ -503,6 +559,8 @@ class EventHistory:
                 db.execute('INSERT INTO inbound(id,peer,body)VALUES(?,?,?)', (event['id'], peer, body))
                 prior = db.execute('SELECT * FROM inbound WHERE id=?', (event['id'],)).fetchone()
             self.index_row(db, prior, legacy=not created)
+            db.execute("INSERT OR IGNORE INTO event_wire_decisions VALUES(?,?,?,?,'persisted',?,NULL)",
+                       (peer, event['id'], event['task_id'], raw_hash(body), prior['seq']))
             if was_complete:
                 db.execute('UPDATE event_catalog_meta SET watermark=? WHERE id=1', (db.execute('SELECT max(seq) FROM inbound').fetchone()[0],))
             if cursor is not None:

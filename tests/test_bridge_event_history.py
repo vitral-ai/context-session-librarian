@@ -78,6 +78,195 @@ class EventHistoryTests(unittest.TestCase):
     def effect(self, key):
         return self.store.rows('SELECT * FROM event_effects WHERE key=?', (key,))[0]
 
+    def test_catalog_proof_contradictions_survive_repair_with_guarded_refusal(self):
+        for corruption in ('hash', 'request_json', 'request_shape', 'actors', 'receipt_json', 'receipt_shape', 'receipt_turn', 'receipt_thread'):
+            with self.subTest(corruption=corruption):
+                request, receipt, event = self.task(known_thread=True)
+                self.alias(event); self.catalog()
+                body, fingerprint, result = encode(request), raw_hash(encode(request)), encode(receipt)
+                if corruption == 'hash':
+                    fingerprint = '0' * 64
+                elif corruption == 'request_json':
+                    body = '{malformed'; fingerprint = raw_hash(body)
+                elif corruption == 'request_shape':
+                    body = '[]'; fingerprint = raw_hash(body)
+                elif corruption == 'actors':
+                    body = encode(dict(request, source='other')); fingerprint = raw_hash(body)
+                elif corruption == 'receipt_json':
+                    result = '{malformed'
+                elif corruption == 'receipt_shape':
+                    result = '[]'
+                elif corruption == 'receipt_turn':
+                    result = encode(dict(receipt, turn_id=uid()))
+                else:
+                    result = encode(dict(receipt, thread_id=''))
+                with self.store.transaction() as db:
+                    db.execute('UPDATE operations SET request=?,hash=?,result=? WHERE id=?', (body, fingerprint, result, request['id']))
+                observed, seq = self.alias(event, delivery='uncertain'); self.catalog()
+                self.assertIsNotNone(self.store.rows('SELECT conflict FROM event_catalog WHERE seq=?', (seq,))[0]['conflict'])
+                self.assertTrue(self.store.rows('SELECT * FROM event_history_conflicts WHERE seq=?', (seq,)))
+                with self.store.transaction() as db:
+                    db.execute('UPDATE operations SET request=?,hash=?,result=? WHERE id=?',
+                               (encode(request), raw_hash(encode(request)), encode(receipt), request['id']))
+                self._history = EventHistory(self.store)
+                key, result = self.seed(event)
+                self.assertEqual(result['state'], 'conflict')
+                with self.assertRaises(EventConflict):
+                    self.history.effects.claim_native(key, self.effect(key)['revision'], guard=self.history.guard)
+                self.assertEqual(self.store.rows('SELECT wire_id FROM event_legacy_attempts WHERE seq=?', (seq,)), [{'wire_id': observed['id']}])
+
+    def test_known_authority_absence_recovers_at_every_seed_boundary(self):
+        for boundary, delivery in itertools.product(('before_first', 'partial', 'sealed_deferred'), ('pending', 'uncertain', 'delivered')):
+            with self.subTest(boundary=boundary, delivery=delivery):
+                request, receipt, event = self.task(known_thread=True, confirmed=boundary != 'sealed_deferred')
+                for _ in range(65 if boundary == 'partial' else 1):
+                    self.alias(event, delivery=delivery)
+                self.catalog(); key = canonical_key('remote', event['task_id'])
+                if boundary != 'before_first':
+                    self.history.seed_step(key)
+                before = self.store.rows('SELECT * FROM event_seed_state WHERE key=?', (key,))
+                attempts = self.store.rows('SELECT * FROM event_legacy_attempts WHERE key=?', (key,))
+                with self.store.transaction() as db:
+                    db.execute('DELETE FROM operations WHERE id=?', (request['id'],))
+                self.assertEqual(self.history.seed_step(key)['state'], 'deferred')
+                self.assertEqual(self.store.rows('SELECT * FROM event_seed_state WHERE key=?', (key,)), before)
+                self.store.reserve('outbound:remote', request); self.store.operation(request['id'], 'delivered', receipt)
+                self._history = EventHistory(self.store)
+                _, result = self.seed(event)
+                self.assertEqual(result['state'], {'pending': 'pending', 'uncertain': 'uncertain', 'delivered': 'legacy_suppressed'}[delivery])
+                self.assertEqual(self.store.rows('SELECT * FROM event_legacy_attempts WHERE key=?', (key,)), attempts)
+                self.assertIsNotNone(self.store.rows('SELECT signature FROM event_seed_state WHERE key=?', (key,))[0]['signature'])
+                if delivery == 'pending':
+                    self.assertEqual(self.history.next_publication('coordinator', self.effect(key)['representative'] - 1)['key'], key)
+                    self.assertIsNotNone(self.history.effects.claim_native(key, self.effect(key)['revision'], guard=self.history.guard))
+                elif delivery == 'uncertain':
+                    with self.assertRaises(EventDeferred):
+                        self.history.effects.claim_native(key, self.effect(key)['revision'], guard=self.history.guard)
+                else:
+                    self.assertIsNone(self.history.effects.claim_native(key, self.effect(key)['revision'], guard=self.history.guard))
+
+    def test_accepted_wire_replay_survives_rejected_alternates_in_all_states(self):
+        for mode in ('unseeded', 'pending', 'uncertain', 'wait', 'native', 'legacy'):
+            with self.subTest(mode=mode):
+                _, _, event = self.task(known_thread=True)
+                first = self.history.admit('remote', event, cursor=1)
+                key = canonical_key('remote', event['task_id'])
+                if mode != 'unseeded':
+                    if mode == 'legacy':
+                        self.alias(event, delivery='delivered')
+                    self.seed(event)
+                if mode == 'wait':
+                    self.history.effects.observe_wait(key, self.effect(key)['revision'], guard=self.history.guard)
+                if mode in ('uncertain', 'native'):
+                    claim = self.history.effects.claim_native(key, self.effect(key)['revision'], guard=self.history.guard)
+                    if mode == 'native':
+                        self.history.effects.finish_native(claim, {'state': 'delivered', 'request_id': claim['client_id'], 'thread_id': claim['thread'], 'turn_id': uid()}, guard=self.history.guard)
+                before = self.store.rows('SELECT * FROM event_effects WHERE key=?', (key,))
+                attempts = self.store.rows('SELECT * FROM event_attempts WHERE key=?', (key,))
+                aliases = self.store.rows('SELECT * FROM inbound')
+                for alternate in (dict(event, text='Rejected alternate narrative'), dict(event, turn_id=uid()), dict(event, source='other')):
+                    self.assertEqual(self.history.admit('remote', alternate, cursor=2)['state'], 'rejected')
+                self._history = EventHistory(self.store)
+                self.assertEqual(self.history.admit('remote', event, cursor=3), first)
+                self.assertEqual(self.store.rows('SELECT * FROM event_effects WHERE key=?', (key,)), before)
+                self.assertEqual(self.store.rows('SELECT * FROM event_attempts WHERE key=?', (key,)), attempts)
+                self.assertEqual(self.store.rows('SELECT * FROM inbound'), aliases)
+                self.assertEqual(self.store.rows('SELECT state FROM event_wire_decisions WHERE wire_id=?', (event['id'],)), [{'state': 'persisted'}])
+
+    def test_old_helper_accepted_decision_outlives_conflict_audit_on_reopen(self):
+        _, _, event = self.task(); accepted = self.history.admit('remote', event)
+        self.assertEqual(self.history.admit('remote', dict(event, text='Changed after acceptance'))['state'], 'rejected')
+        with self.store.transaction() as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='event_wire_decisions'").fetchone():
+                db.execute('DELETE FROM event_wire_decisions')
+        self._history = EventHistory(self.store)
+        self.assertEqual(self.history.admit('remote', event), accepted)
+        self.assertEqual(self.store.rows('SELECT state FROM event_wire_decisions'), [{'state': 'persisted'}])
+
+    def test_replay_keeps_accepted_route_after_refusing_a_changed_route(self):
+        _, _, event = self.task()
+        route = {'physical_peer': 'hub', 'origin': 'remote', 'destination': 'codex-host'}
+        first = self.history.admit('remote', event, route=route)
+        self.assertEqual(self.history.admit('remote', event, route=dict(route, physical_peer='other'))['state'], 'rejected')
+        self.assertEqual(self.history.admit('remote', event, route=route), first)
+        self.assertEqual(self.history.cached_route('remote', event['task_id']), route)
+
+    def test_wire_decision_failure_rolls_back_admission_or_refusal_with_cursor(self):
+        for rejected in (False, True):
+            with self.subTest(rejected=rejected):
+                _, _, event = self.task()
+                self.history  # Explicit inactive schema initialization before trigger.
+                with self.store.transaction() as db:
+                    db.execute("CREATE TRIGGER fail_wire_decision BEFORE INSERT ON event_wire_decisions BEGIN SELECT RAISE(ABORT,'synthetic decision failure'); END")
+                proposal = dict(event, turn_id=uid()) if rejected else event
+                with self.assertRaises(sqlite3.IntegrityError):
+                    self.history.admit('remote', proposal, cursor=19)
+                for table in ('inbound', 'event_catalog', 'event_wire_decisions', 'event_admission_conflicts', 'cursors'):
+                    self.assertEqual(self.store.rows('SELECT * FROM ' + table), [])
+                with self.store.transaction() as db:
+                    db.execute('DROP TRIGGER fail_wire_decision')
+                # An aborted refusal cannot poison a subsequent valid proposal.
+                self.assertEqual(self.history.admit('remote', event, cursor=19)['state'], 'persisted')
+                with self.store.transaction() as db:
+                    for table in ('event_wire_decisions', 'inbound', 'event_catalog', 'cursors'):
+                        db.execute('DELETE FROM ' + table)
+
+    def test_concurrent_first_acceptance_or_refusal_preserves_its_wire_decision(self):
+        _, _, event = self.task()
+        self.history
+        start = threading.Barrier(2, timeout=5)
+        def admit(proposal):
+            with closing(Store(self.home)) as store:
+                history = EventHistory(store); start.wait()
+                return history.admit('remote', proposal)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(admit, (event, dict(event, turn_id=uid()))))
+        first = self.store.rows('SELECT * FROM event_wire_decisions')[0]
+        replay = self.history.admit('remote', event)
+        self.assertEqual(replay['state'], first['state'])
+        self.assertEqual(len(self.store.rows('SELECT * FROM inbound')), int(first['state'] == 'persisted'))
+        self.assertEqual(len(self.store.rows('SELECT * FROM event_wire_decisions')), 1)
+        self.assertEqual(outcomes[1]['state'], 'rejected')
+        self.assertEqual(self.store.rows('SELECT * FROM event_attempts'), [])
+
+    def test_catalog_conflict_evidence_and_watermark_commit_together(self):
+        request, _, event = self.task(); self.alias(event); self.catalog()
+        watermark = self.store.rows('SELECT watermark FROM event_catalog_meta')[0]['watermark']
+        with self.store.transaction() as db:
+            db.execute('UPDATE operations SET hash=? WHERE id=?', ('0' * 64, request['id']))
+        self.alias(event)
+        with self.store.transaction() as db:
+            db.execute("CREATE TRIGGER fail_proof_audit BEFORE INSERT ON event_history_conflicts BEGIN SELECT RAISE(ABORT,'synthetic proof audit failure'); END")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.history.catalog_step()
+        self.assertEqual(self.store.rows('SELECT watermark FROM event_catalog_meta')[0]['watermark'], watermark)
+        self.assertEqual(len(self.store.rows('SELECT * FROM event_catalog')), 1)
+        self.assertEqual(self.store.rows('SELECT * FROM event_history_conflicts'), [])
+        with self.store.transaction() as db:
+            db.execute('DROP TRIGGER fail_proof_audit')
+        self.catalog()
+        with self.store.transaction() as db:
+            db.execute('UPDATE operations SET hash=? WHERE id=?', (raw_hash(encode(request)), request['id']))
+        self.assertEqual(self.seed(event)[1]['state'], 'conflict')
+
+    def test_wrong_actor_and_invalid_session_never_supply_a_legacy_thread(self):
+        for variant in ('source', 'target', 'request_id', 'invalid_session', 'empty_session', 'numeric_session'):
+            with self.subTest(variant=variant):
+                request, _, event = self.task(known_thread=True)
+                if variant in ('source', 'target'):
+                    event = dict(event, **{variant: 'other'})
+                else:
+                    altered = dict(request, **({'id': uid()} if variant == 'request_id' else {'session': {'invalid_session': 'invalid', 'empty_session': '', 'numeric_session': 42}[variant]}))
+                    body = encode(altered)
+                    with self.store.transaction() as db:
+                        db.execute('UPDATE operations SET request=?,hash=? WHERE id=?', (body, raw_hash(body), request['id']))
+                wire, seq = self.alias(event, delivery='uncertain'); self.catalog()
+                self.assertEqual(self.store.rows('SELECT wire_id,thread FROM event_legacy_attempts WHERE seq=?', (seq,)), [{'wire_id': wire['id'], 'thread': None}])
+                key, result = self.seed(event)
+                self.assertEqual(result['state'], 'conflict')
+                with self.assertRaises(EventConflict):
+                    self.history.effects.claim_native(key, self.effect(key)['revision'], guard=self.history.guard)
+
     def test_unseeded_final_holds_later_progress_across_reopen(self):
         _, _, event = self.task()
         _, seq = self.alias(event)
