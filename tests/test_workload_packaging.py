@@ -4,6 +4,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 import re
+import runpy
 from pathlib import Path
 import shutil
 import signal
@@ -14,6 +15,7 @@ import tempfile
 import time
 import threading
 import unittest
+from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
@@ -22,6 +24,11 @@ ROOT = Path(__file__).resolve().parents[1]
 CHART = ROOT / 'packaging/workload-collector'
 HELM = os.environ.get('VITRAL_FIXTURE_HELM') or shutil.which('helm')
 DIGEST = '1' * 64
+PROFILES = {
+    'codex': 'codex-0.169.0-text-v1',
+    'claude': 'claude-2.1.308-text-v1',
+    'gemini': 'gemini-cli-0.68.0-jsonl-text-v1',
+}
 
 
 @unittest.skipUnless(HELM, 'Helm required for chart rendering')
@@ -30,6 +37,7 @@ class WorkloadChartTests(unittest.TestCase):
                string_settings=None, **settings):
         values = {'enabled': 'true', 'identity.origin': 'https://vitral.fixture.test',
                   'identity.caConfigMap': 'test-ca', 'transcripts.provider': 'codex',
+                  'transcripts.profile': PROFILES['codex'],
                   'location.cluster': 'test:cluster', 'location.label': 'Fixture',
                   'location.workload': 'local/workload', 'collector.image': f'test/csl@sha256:{DIGEST}',
                   'writer.image': f'test/writer@sha256:{DIGEST}', 'writer.command': '{python3}'}
@@ -130,6 +138,23 @@ class WorkloadChartTests(unittest.TestCase):
             values.write_text('{"enabled":true,"collector":{"flushSeconds":"20"}}')
             self.assertNotEqual(self.render(values_file=values).returncode, 0)
 
+    def test_both_modes_require_and_export_the_exact_provider_profile(self):
+        for mode in ('sidecar', 'daemonSet'):
+            options = {'daemonSet.narrowSameOwnerExport': 'true',
+                       'daemonSet.existingClaim': 'approved-transcripts'} if mode == 'daemonSet' else {}
+            for provider, profile in PROFILES.items():
+                with self.subTest(mode=mode, provider=provider):
+                    result = self.render(mode=mode, **options, **{
+                        'transcripts.provider': provider, 'transcripts.profile': profile})
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(f'name: VITRAL_COLLECTOR_PROFILE\n              value: "{profile}"',
+                                  result.stdout)
+            for wrong in ('auto', PROFILES['gemini'], 'false', '42'):
+                result = self.render(mode=mode, **options, **{'transcripts.profile': wrong})
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+            result = self.render(mode=mode, omit=('transcripts.profile',), **options)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+
     def test_daemonset_uses_only_explicit_readonly_claim_and_private_state(self):
         result = self.render(mode='daemonSet', **{'daemonSet.narrowSameOwnerExport': 'true',
                                                 'daemonSet.existingClaim': 'approved-transcripts'})
@@ -139,6 +164,45 @@ class WorkloadChartTests(unittest.TestCase):
         self.assertIn('name: collector-state\n          emptyDir:', result.stdout)
         self.assertNotIn('hostPath:', result.stdout)
         self.assertNotIn('name: writer', result.stdout)
+
+
+class ContainerAppsProfileTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        launcher = root / 'require-profile.py'
+        shutil.copyfile(ROOT / 'packaging/container-apps/require-profile.py', launcher)
+        shutil.copyfile(CHART / 'profiles.json', root / 'profiles.json')
+        self.launcher = runpy.run_path(str(launcher))['main']
+
+    def test_launcher_executes_only_reviewed_pairs_and_preserves_argv_and_environment(self):
+        argv = ['require-profile.py', '--', 'a b', '$(literal)', 'semi;colon']
+        collector = '/usr/local/bin/csl-workload-collector'
+        for provider, profile in PROFILES.items():
+            with self.subTest(provider=provider):
+                settings = {'VITRAL_COLLECTOR_PROVIDER': provider, 'VITRAL_COLLECTOR_PROFILE': profile,
+                            'VITRAL_COLLECTOR_STATE': '/collector-state',
+                            'VITRAL_COLLECTOR_TRUST_CA': '/collector-trust/ca.crt'}
+                with patch.dict(os.environ, settings, clear=True), patch.object(sys, 'argv', argv), \
+                        patch.object(os, 'execv') as execute:
+                    self.launcher()
+                    execute.assert_called_once_with(collector, [collector, *argv[1:]])
+                    self.assertEqual(dict(os.environ), settings)
+
+    def test_launcher_refuses_missing_auto_mismatch_and_unknown_provider(self):
+        for provider, profile in (('codex', None), ('codex', 'auto'), ('codex', PROFILES['claude']),
+                                  ('antigravity', PROFILES['gemini']), (None, PROFILES['codex'])):
+            with self.subTest(provider=provider, profile=profile):
+                settings = {}
+                if provider is not None:
+                    settings['VITRAL_COLLECTOR_PROVIDER'] = provider
+                if profile is not None:
+                    settings['VITRAL_COLLECTOR_PROFILE'] = profile
+                with patch.dict(os.environ, settings, clear=True), patch.object(os, 'execv') as execute:
+                    with self.assertRaisesRegex(SystemExit, 'must match'):
+                        self.launcher()
+                    execute.assert_not_called()
 
 
 @unittest.skipUnless(hasattr(time, 'CLOCK_BOOTTIME'), 'Linux writer supervisor')

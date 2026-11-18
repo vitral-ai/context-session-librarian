@@ -1,0 +1,5 @@
+{
+  "claude": "claude-2.1.308-text-v1",
+  "codex": "codex-0.169.0-text-v1",
+  "gemini": "gemini-cli-0.68.0-jsonl-text-v1"
+}

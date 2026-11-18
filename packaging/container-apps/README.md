@@ -2,8 +2,12 @@
 
 Build the collector layer with the reviewed collector image digest as
 `COLLECTOR_IMAGE`. The input image must implement the workload entrypoint and
-configuration described in [the packaging contract](../README.md). The current
-raw CSL image is not a valid input.
+configuration described in [the packaging contract](../README.md). Use `packaging/` as the collector
+image build context so the launcher can use the same profile matrix as Helm.
+Supply `VITRAL_COLLECTOR_PROVIDER` and its exact `VITRAL_COLLECTOR_PROFILE`
+from that matrix. The layer requires Python 3 and refuses absent, automatic,
+or mismatched profiles before executing the collector with literal arguments.
+The current raw CSL image is not a valid input.
 
 For an explicitly opted-in replica, mount a dedicated replica-scoped transcript
 volume read-write into the writer and read-only at `/transcripts` in the collector.

@@ -20,8 +20,10 @@
 {{- if not (regexMatch "^https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$" .Values.identity.origin) -}}
 {{- fail "identity.origin must be one exact HTTPS origin without a path, query or credentials" -}}
 {{- end -}}
-{{- if not (has .Values.transcripts.provider (list "codex" "claude" "gemini")) -}}
-{{- fail "select one qualified transcript provider: codex, claude or gemini" -}}
+{{- $profiles := .Files.Get "profiles.json" | fromJson -}}
+{{- $profile := get $profiles .Values.transcripts.provider -}}
+{{- if or (empty $profile) (ne .Values.transcripts.profile $profile) -}}
+{{- fail "transcripts.profile must match the explicitly selected qualified provider" -}}
 {{- end -}}
 {{- if not (regexMatch "^[a-z0-9][a-z0-9._:/-]{0,127}$" .Values.location.provider) -}}
 {{- fail "location provider must be a lowercase identifier" -}}
@@ -77,6 +79,8 @@ env:
     value: {{ .Values.identity.origin | quote }}
   - name: VITRAL_COLLECTOR_PROVIDER
     value: {{ .Values.transcripts.provider | quote }}
+  - name: VITRAL_COLLECTOR_PROFILE
+    value: {{ .Values.transcripts.profile | quote }}
   - name: VITRAL_COLLECTOR_TRANSCRIPT_ROOT
     value: /transcripts
   - name: VITRAL_COLLECTOR_STATE
