@@ -169,21 +169,6 @@ class Journal:
                 raise ValueError('Unknown or ambiguous agent; not queued')
             return dict(rows[0])
 
-def native_turns(client, thread):
-    cursor = None
-    while True:
-        params = {'threadId':thread,'limit':20,'itemsView':'full','sortDirection':'desc'}
-        if cursor:
-            params['cursor'] = cursor
-        page = client.call('thread/turns/list', params)
-        yield from page['data']
-        following = page.get('nextCursor')
-        if not following:
-            return
-        if following == cursor:
-            raise RuntimeError('Native pagination did not advance')
-        cursor = following
-
 
 class Native:
 
@@ -230,16 +215,16 @@ class Native:
                 response = client.call('thread/read', {'threadId': thread, 'includeTurns': False})
             except Exception:
                 response = client.call('thread/resume', {'threadId': thread, 'excludeTurns': True})
-            active = None
-            for turn in native_turns(client, thread):
-                if turn.get('status') == 'inProgress':
-                    active = turn
+            page = client.call('thread/turns/list', {'threadId':thread,'limit':20,'itemsView':'full','sortDirection':'desc'})
+            turns = page.get('data', [])
+            for turn in turns:
                 if any((item.get('type') == 'userMessage' and item.get('clientId') == request['id'] for item in turn.get('items', []))):
                     return {'state': 'delivered', 'request_id': request['id'], 'thread_id': thread, 'turn_id': turn['id'], 'reconciled': True}
             from csl_bridge_store import frame_message
             text = request.get('text') or request.get('envelope', {}).get('body', '')
             text = frame_message(request['source'], request.get('header_task_id', request['id']), session or request.get('session'), text)
             params = {'threadId': thread, 'clientUserMessageId': request['id'], 'input': [{'type': 'text', 'text': text}]}
+            active = next((turn for turn in turns if turn.get('status') == 'inProgress'), None)
             if active:
                 result = client.call('turn/steer', {**params, 'expectedTurnId': active['id']})
                 turn = result['turnId']
@@ -259,6 +244,7 @@ class Channel:
         self.state_lock = threading.Lock()
         self.outgoing = queue.Queue(maxsize=64)
         self.last_received = time.monotonic()
+        self.first_frame_deadline = None
         self.revoked = False
         self.writer_thread = threading.Thread(target=self.write_loop, daemon=True)
         self.writer_thread.start()
@@ -332,6 +318,7 @@ class Channel:
             while not STOP.is_set() and not self.closed:
                 frame = read_line(self.reader)
                 self.last_received = time.monotonic()
+                self.first_frame_deadline = None
                 kind = frame.get('type')
                 if kind == 'hello':
                     self.hello(frame)
@@ -378,7 +365,7 @@ class Channel:
         try:
             while not self.closed and not STOP.is_set():
                 now = time.monotonic()
-                if now - self.last_received > self.LIVENESS:
+                if now - self.last_received > self.LIVENESS and (self.first_frame_deadline is None or now > self.first_frame_deadline):
                     self.close()
                     return
                 if now - last_hello > 3:
@@ -623,7 +610,7 @@ class Node:
                     client = self.native.client(home)
                     if client is None:
                         continue
-                    turns = native_turns(client, self.agents()[agent])
+                    turns = client.call('thread/turns/list',{'threadId':self.agents()[agent],'limit':20,'itemsView':'full','sortDirection':'desc'})['data']
                     wanted = {r['turn']for r in pending if r['target']==agent}
                     for turn in turns:
                         if turn['id'] in wanted and turn['status'] in ('completed','failed','interrupted'):
@@ -744,6 +731,8 @@ class Node:
             try:
                 process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0, start_new_session=True)
                 channel = Channel(self, peer, process.stdout, process.stdin, lambda process=process: stop_process(process))
+                # Owner certificate/admission can wait before app-level hello exists.
+                channel.first_frame_deadline = time.monotonic() + 90
 
                 def revoke():
                     while process.poll() is None and (not STOP.is_set()):

@@ -224,6 +224,18 @@ class StreamTests(unittest.TestCase):
         self.assertFalse(t.is_alive());self.assertTrue(channel.closed)
         r.close();w.close();a.close();b.close()
 
+    def test_initial_auth_grace_ends_when_first_application_frame_arrives(self):
+        a,b=socket.socketpair();r=a.makefile('rb');w=a.makefile('wb',buffering=0)
+        channel=light.Channel(self.host,'env-a',r,w,lambda:a.shutdown(socket.SHUT_RDWR))
+        channel.LIVENESS=.1;channel.first_frame_deadline=time.monotonic()+1
+        t=threading.Thread(target=channel.run,daemon=True);t.start()
+        try:
+            time.sleep(.25);self.assertFalse(channel.closed)
+            b.sendall((light.wire({'type':'pong'})+'\n').encode())
+            t.join(2);self.assertTrue(channel.closed);self.assertIsNone(channel.first_frame_deadline)
+        finally:
+            channel.close();t.join(1);r.close();w.close();a.close();b.close()
+
     def test_relay_drains_both_directions_with_small_socket_buffers(self):
         left,relay_left=socket.socketpair();relay_right,right=socket.socketpair()
         sockets=(left,relay_left,relay_right,right)

@@ -127,20 +127,20 @@ class Tests(unittest.TestCase):
         self.assertTrue(result['reconciled'])
         self.assertEqual(accepted, [r['id']])
 
-    def test_native_reconcile_finds_duplicate_beyond_twenty_newer_turns(self):
-        request=self.req();calls=[]
+    def test_reconcile_keeps_newest_active_turn_when_older_page_has_stale_inprogress(self):
+        request=self.req();steered=[]
         class RPC:
             def call(inner,method,params):
-                calls.append((method,params))
                 if method=='thread/read':return {'thread':{'id':self.thread}}
                 if method=='thread/turns/list':
-                    if 'cursor'not in params:return {'data':[{'id':str(i),'items':[]}for i in range(20)],'nextCursor':'older'}
-                    return {'data':[{'id':'original','items':[{'type':'userMessage','clientId':request['id']}]}]}
-                raise AssertionError('Must reconcile before creating a turn')
+                    if 'cursor'not in params:return {'data':[{'id':'current','status':'inProgress','items':[]}],'nextCursor':'older'}
+                    return {'data':[{'id':'historical','status':'inProgress','items':[]}]}
+                if method=='turn/steer':
+                    steered.append(params['expectedTurnId']);return {'turnId':params['expectedTurnId']}
+                raise AssertionError(method)
         self.node.native.client=lambda home:RPC()
-        result=self.node.native.inject('worker',request,request['session'])
-        self.assertEqual(result['turn_id'],'original');self.assertTrue(result['reconciled'])
-        self.assertEqual(len([m for m,_ in calls if m=='thread/turns/list']),2)
+        self.assertEqual(self.node.native.inject('worker',request,request['session'])['turn_id'],'current')
+        self.assertEqual(steered,['current'])
 
     def test_disconnect_reconnect_replays_pending_over_real_socketpair(self):
         r = self.req()

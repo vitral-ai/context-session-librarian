@@ -32,7 +32,9 @@ csl light enroll sandbox8 --agent worker --ssh-alias owner-sandbox8 \
 One command verifies the registered first-brief thread, creates a per-env key,
 installs the guest broker/client and restricted public key, and adds one `links`
 entry to `~/.local/share/csl-light/config.json`. Existing streams stay open;
-brokers and connectors reload light additions, removals and exact rollbacks. `--thread UUID` can additionally
+brokers and connectors reload light additions, removals and exact rollbacks.
+A connection has at most 90 seconds to produce its first application frame while
+owner authentication runs; afterwards 20 seconds without a frame reconnects it. `--thread UUID` can additionally
 assert the expected thread. Enrollment audits and exact prior config/peer rows
 are kept under the light home. Guest source contains code only, never auth files.
 
@@ -56,8 +58,11 @@ csl light inbox --after 0
 Use `--from coordinator` when a home has several agents. Preserve the returned
 ID and identical content with `--id UUID` on retries. Stream IDs are unique per
 (direction, peer); native operation/mailbox checks also prevent cross-peer reuse
-in a bridge home. Native acceptance recovery paginates the existing thread history
-by client message ID, including beyond the latest 20 turns. Both endpoints commit before
+in a bridge home. Native acceptance recovery checks the latest 20 turns by client message ID.
+A crash after native acceptance but before journal commit, followed by more than
+20 newer turns, exceeds that recovery window and can produce a duplicate native
+turn. Normal committed delivery/replay remains cached; this limit concerns the
+uncertain native-acceptance crash window. Both endpoints commit before
 ACK; duplicates reuse the stored result. Progress/final CSL events are pushed over
 the same stream and appear in the inbox and existing bridge `wait` interface.
 Enrollment opts into registered sender session headers for light.
