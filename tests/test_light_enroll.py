@@ -172,7 +172,7 @@ class EnrollmentTests(unittest.TestCase):
         self.assertEqual([r['id']for r in node.journal.pending('in')],[good])
         with node.journal.db()as db:
             when=db.execute('SELECT next FROM delivery_retries WHERE id=?',(bad,)).fetchone()[0]
-        self.assertLessEqual(when-time.time(),60)
+        self.assertLessEqual(when-time.monotonic(),60)
         node.executing={('offline',str(i))for i in range(4)}
         with patch.object(node.pool,'submit')as submit:
             node.schedule('offline',bad);submit.assert_not_called()
@@ -254,25 +254,48 @@ class EnrollmentTests(unittest.TestCase):
         messages=inbox(self.home)['messages'];self.assertEqual(len(messages),3)
         self.assertTrue(all(len(m['body'])==12000 for m in messages))
 
-    def test_outbound_retry_window_excludes_acked_rows_and_reconnect_replays(self):
-        journal=light.Journal(self.home/'light.sqlite')
+    def test_outbound_retry_window_is_in_memory_and_ack_wins_without_sql(self):
+        node=light.Node(self.config);self.addCleanup(node.pool.shutdown,False)
+        journal=node.journal;channel=light.Channel(node,'env-a',None,None,lambda:None)
+        self.addCleanup(channel.close)
         first,second=str(uuid.uuid4()),str(uuid.uuid4())
-        stale=journal.put('out','env-a',first,{'synthetic':1})
-        journal.sent_out('env-a',stale);self.assertEqual(journal.ready_out('env-a'),[])
-        journal.ack_out('env-a',first)
-        journal.sent_out('env-a',stale)  # ACK won the race with producer bookkeeping.
-        self.assertEqual(journal.get('out','env-a',first)['state'],'acked')
+        journal.put('out','env-a',first,{'synthetic':1})
+        self.assertTrue(channel.reserve_send(first))
+        with patch.object(journal,'db',side_effect=AssertionError('ACK must not touch SQLite')):
+            channel.acknowledged(first)
+        self.assertFalse(channel.reserve_send(first))
         journal.put('out','env-a',second,{'synthetic':2})
-        self.assertEqual([r['id']for r in journal.ready_out('env-a')],[second])
-        journal.reconnect_out('env-a')
-        self.assertEqual({r['id']for r in journal.ready_out('env-a')},{first,second})
-        journal.finish('out','env-a',first,{'ok':True});journal.ack_out('env-a',first)
-        self.assertEqual(journal.get('out','env-a',first)['state'],'done')
-        journal.ack_out('env-a',second)
-        self.assertNotIn(second,[r['id']for r in journal.ready_out('env-a')])
+        self.assertEqual([r['id']for r in journal.ready_out('env-a',channel.retry_at)],[second])
+        fresh=light.Channel(node,'env-a',None,None,lambda:None);self.addCleanup(fresh.close)
+        self.assertEqual({r['id']for r in journal.ready_out('env-a',fresh.retry_at)},{first,second})
         with patch('csl_light.time.monotonic',return_value=time.monotonic()+61), \
              patch('csl_light.time.time',return_value=time.time()-86400):
-            self.assertIn(second,[r['id']for r in journal.ready_out('env-a')])
+            self.assertIn(first,[r['id']for r in journal.ready_out('env-a',channel.retry_at)])
+        journal.finish('out','env-a',first,{'ok':True})
+        self.assertNotIn(first,[r['id']for r in journal.ready_out('env-a',fresh.retry_at)])
+
+    def test_full_queue_drops_advisory_frames_without_closing(self):
+        import queue
+        node=light.Node(self.config);self.addCleanup(node.pool.shutdown,False)
+        channel=light.Channel(node,'env-a',None,None,lambda:None);self.addCleanup(channel.close)
+        with patch.object(channel.outgoing,'put_nowait',side_effect=queue.Full):
+            for kind in ('ack','pong','hello','ping'):
+                self.assertFalse(channel.send({'type':kind}));self.assertFalse(channel.closed)
+            self.assertFalse(channel.send({'type':'request','id':str(uuid.uuid4())}))
+            self.assertTrue(channel.closed)
+
+    def test_inbound_retry_is_monotonic_and_broker_restart_resets_old_deadlines(self):
+        journal=light.Journal(self.home/'light.sqlite');identifier=str(uuid.uuid4())
+        journal.put('in','env-a',identifier,{'synthetic':True});journal.error('in','env-a',identifier,RuntimeError())
+        with patch('csl_light.time.time',return_value=time.time()-86400):
+            self.assertFalse(journal.retry_due('env-a',identifier))
+            with patch('csl_light.time.monotonic',return_value=time.monotonic()+2):
+                self.assertTrue(journal.retry_due('env-a',identifier))
+                self.assertEqual([r['id']for r in journal.pending('in')],[identifier])
+        with journal.db()as db:db.execute('UPDATE delivery_retries SET next=?',(10**15,))
+        journal.reset_retries()
+        self.assertTrue(journal.retry_due('env-a',identifier))
+        self.assertIsNotNone(journal.get('in','env-a',identifier))
 
     def test_parked_peer_spawns_no_threads_until_marker_removed(self):
         node=light.Node(self.config);self.addCleanup(node.pool.shutdown,False)

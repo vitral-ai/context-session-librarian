@@ -77,7 +77,6 @@ class Journal:
         with self.db() as db:
             db.executescript('CREATE TABLE IF NOT EXISTS rpc(direction TEXT,peer TEXT,id TEXT,payload TEXT,hash TEXT,state TEXT,result TEXT,error TEXT,created REAL,updated REAL,PRIMARY KEY(direction,peer,id));CREATE TABLE IF NOT EXISTS routes(agent TEXT PRIMARY KEY,peer TEXT,thread TEXT);')
             db.execute('CREATE TABLE IF NOT EXISTS delivery_retries(peer TEXT,id TEXT,attempts INTEGER,next REAL,PRIMARY KEY(peer,id))')
-            db.execute('CREATE TABLE IF NOT EXISTS send_deadlines(peer TEXT,id TEXT,next_at REAL,PRIMARY KEY(peer,id))')
             db.execute('CREATE TABLE IF NOT EXISTS tombstones(direction TEXT,peer TEXT,id TEXT,hash TEXT,result TEXT,updated REAL,PRIMARY KEY(direction,peer,id))')
         self.path.chmod(0o600)
 
@@ -122,20 +121,18 @@ class Journal:
             db.execute("UPDATE rpc SET state='done',result=?,error=NULL,updated=? WHERE direction=? AND peer=? AND id=?", (wire(result), time.time(), direction, peer, identifier))
             if direction == 'in':
                 db.execute('DELETE FROM delivery_retries WHERE peer=? AND id=?',(peer,identifier))
-            else:
-                db.execute('DELETE FROM send_deadlines WHERE peer=? AND id=?',(peer,identifier))
 
     def retry_due(self, peer, identifier):
         with self.db() as db:
             row = db.execute('SELECT next FROM delivery_retries WHERE peer=? AND id=?',(peer,identifier)).fetchone()
-            return row is None or row[0] <= time.time()
+            return row is None or row[0] <= time.monotonic()
 
     def error(self, direction, peer, identifier, error):
         with self.db() as db:
             row = db.execute('SELECT attempts FROM delivery_retries WHERE peer=? AND id=?',(peer,identifier)).fetchone()
             count = row[0] if row else 0
             delay = min(60, 2 ** min(6, count))
-            db.execute('INSERT INTO delivery_retries VALUES(?,?,?,?) ON CONFLICT(peer,id)DO UPDATE SET attempts=excluded.attempts,next=excluded.next',(peer,identifier,count+1,time.time()+delay))
+            db.execute('INSERT INTO delivery_retries VALUES(?,?,?,?) ON CONFLICT(peer,id)DO UPDATE SET attempts=excluded.attempts,next=excluded.next',(peer,identifier,count+1,time.monotonic()+delay))
             db.execute('UPDATE rpc SET error=?,updated=? WHERE direction=? AND peer=? AND id=?',(type(error).__name__,time.time(),direction,peer,identifier))
 
     def pending(self, direction, peer=None):
@@ -144,45 +141,35 @@ class Journal:
             args = [direction]
             if direction == 'in':
                 sql += ' AND NOT EXISTS(SELECT 1 FROM delivery_retries r WHERE r.peer=rpc.peer AND r.id=rpc.id AND r.next>?)'
-                args.append(time.time())
+                args.append(time.monotonic())
             if peer is not None:
                 sql += ' AND peer=?'
                 args.append(peer)
             return [dict(r) for r in db.execute(sql + ' ORDER BY created LIMIT 256', args)]
 
-    def ready_out(self, peer):
-        """Apply retry eligibility before the bounded payload window."""
+    def reset_retries(self):
+        # These are scheduling hints, not delivery records; reset at broker startup.
         with self.db() as db:
+            db.execute('DELETE FROM delivery_retries')
+
+    def ready_out(self, peer, deadlines=None):
+        """Scan IDs before the window; load only eligible payloads (at most 256)."""
+        deadlines = deadlines or {}
+        now, selected = time.monotonic(), []
+        with self.db() as db:
+            cursor = db.execute("SELECT id FROM rpc WHERE direction='out' AND peer=? "
+                                "AND state!='done' ORDER BY created",(peer,))
+            for row in cursor:
+                if deadlines.get(row['id'],0) <= now:
+                    selected.append(row['id'])
+                    if len(selected) == 256:
+                        break
+            if not selected:
+                return []
+            marks = ','.join('?' for _ in selected)
             return [dict(row) for row in db.execute(
-                "SELECT rpc.* FROM rpc LEFT JOIN send_deadlines d ON "
-                "d.peer=rpc.peer AND d.id=rpc.id WHERE direction='out' AND "
-                "rpc.peer=? AND state!='done' AND (d.next_at IS NULL OR d.next_at<=?) "
-                "ORDER BY created LIMIT 256",(peer,time.monotonic()))]
-
-    def sent_out(self, peer, row):
-        # An ACK or completion can arrive before this write. Keep its newer state.
-        with self.db() as db:
-            changed = db.execute("UPDATE rpc SET state='sent',updated=? WHERE direction='out' "
-                       "AND peer=? AND id=? AND state=? AND updated=?",
-                       (time.time(),peer,row['id'],row['state'],row['updated'])).rowcount
-            if changed:
-                db.execute('INSERT INTO send_deadlines VALUES(?,?,?) ON CONFLICT(peer,id) '
-                           'DO UPDATE SET next_at=excluded.next_at',(peer,row['id'],time.monotonic()+5))
-
-    def ack_out(self, peer, identifier):
-        with self.db() as db:
-            changed = db.execute("UPDATE rpc SET state='acked',updated=? WHERE direction='out' "
-                       "AND peer=? AND id=? AND state!='done'",(time.time(),peer,identifier)).rowcount
-            if changed:
-                db.execute('INSERT INTO send_deadlines VALUES(?,?,?) ON CONFLICT(peer,id) '
-                           'DO UPDATE SET next_at=excluded.next_at',(peer,identifier,time.monotonic()+60))
-
-    def reconnect_out(self, peer):
-        # Monotonic deadlines belong to this connection and never survive a reconnect.
-        with self.db() as db:
-            db.execute("UPDATE rpc SET state='queued',updated=? WHERE direction='out' "
-                       "AND peer=? AND state!='done'",(time.time(),peer))
-            db.execute('DELETE FROM send_deadlines WHERE peer=?',(peer,))
+                "SELECT * FROM rpc WHERE direction='out' AND peer=? AND state!='done' "
+                "AND id IN (" + marks + ") ORDER BY created",[peer,*selected])]
 
     def prune(self, days=30):
         """Compact old payloads; permanent small tombstones still refuse ID reuse."""
@@ -277,6 +264,8 @@ class Channel:
         self.node, self.peer = node, peer
         self.reader, self.writer, self.close_fn = reader, writer, close
         self.closed = False
+        self.retry_at = {}
+        self.retry_lock = threading.Lock()
         self.outgoing = queue.Queue(maxsize=64)
         self.last_received = time.monotonic()
         self.first_frame_deadline = None
@@ -294,6 +283,8 @@ class Channel:
             self.outgoing.put_nowait(raw)
             return True
         except queue.Full:
+            if value.get('type') in ('ack','pong','ping','hello'):
+                return False  # Advisory; the next resend/heartbeat elicits another.
             # Durable frames replay on the next connection. Never block a reader.
             self.close()
             return False
@@ -346,7 +337,6 @@ class Channel:
             if previous:
                 previous.close()
             self.node.channels[self.peer] = self
-            self.node.journal.reconnect_out(self.peer)
         self.send({'type': 'hello', 'node': self.node.config['node'], 'agents': self.node.advertise()})
         log('connected', peer=self.peer)
         threading.Thread(target=self.pump, daemon=True).start()
@@ -375,9 +365,11 @@ class Channel:
                         self.node.schedule(self.peer, frame['id'])
                 elif kind == 'response':
                     self.node.journal.finish('out', self.peer, frame['id'], frame['result'])
+                    with self.retry_lock:
+                        self.retry_at.pop(frame['id'],None)
                 elif kind == 'ack':
                     if self.node.channels.get(self.peer) is self:
-                        self.node.journal.ack_out(self.peer,frame['id'])
+                        self.acknowledged(frame['id'])
                 elif kind == 'ping':
                     self.send({'type': 'pong'})
                 elif kind == 'revoked':
@@ -393,6 +385,19 @@ class Channel:
                 if self.node.channels.get(self.peer) is self:
                     self.node.channels.pop(self.peer, None)
 
+    def acknowledged(self, identifier):
+        with self.retry_lock:
+            if identifier in self.retry_at:
+                self.retry_at[identifier] = time.monotonic()+60
+
+    def reserve_send(self, identifier):
+        with self.retry_lock:
+            now = time.monotonic()
+            if self.retry_at.get(identifier,0) > now:
+                return False
+            self.retry_at[identifier] = now+5
+            return True
+
     def pump(self):
         last_hello = 0
         try:
@@ -405,11 +410,13 @@ class Channel:
                     self.send({'type': 'hello', 'node': self.node.config['node'], 'agents': self.node.advertise()})
                     self.send({'type': 'ping'})
                     last_hello = now
-                for row in self.node.journal.ready_out(self.peer):
+                with self.retry_lock:
+                    deadlines = dict(self.retry_at)
+                for row in self.node.journal.ready_out(self.peer,deadlines):
                     if self.outgoing.qsize() >= 32:
                         break
-                    if self.send(json.loads(row['payload'])):
-                        self.node.journal.sent_out(self.peer,row)
+                    if self.reserve_send(row['id']):
+                        self.send(json.loads(row['payload']))
                 STOP.wait(.1)
         except (OSError, ValueError):
             self.close()
@@ -867,6 +874,7 @@ class Node:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise ValueError('A light broker already owns this home') from None
+            self.journal.reset_retries()
             self.serving = True
             self._serve()
         finally:
