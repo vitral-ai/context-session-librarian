@@ -16,8 +16,11 @@ Callers must inject a real original-authority checker. `Guard` composes it with
 the unchanged same-boot bound; failure/backwards clock refuses, known revocation
 is checked before expiry. Nothing derives another deadline from progress or
 serializes native `Access`. There is no default always-allow production caller.
-The actual native inherited-FD/framed FD9/Pdeathsig template is NOT implemented
-or qualified here. That remains a prerequisite to any child/CLI wiring.
+The private [FD9 transport](EXECUTION_TRANSPORT.md) now exercises incremental
+framing, unchanged bounds and a synthetic Go/Python process fixture. It supplies
+no production native inherited-FD/Pdeathsig launcher or real Access checker.
+Production launch, identity/cwd revalidation and kill/reap integration remain
+prerequisites to any child/CLI wiring.
 
 `capture` borrows only an offset-zero read-only regular FD with a positive caller
 cap. Bounded `pread` never changes that FD's offset. It checks the original
@@ -57,7 +60,7 @@ qualification; a FIFO cannot hold a lookup hostage. Replaced/linked/insecure
 records refuse. There is no TTL or actor.
 
 Still required: reviewed identity-owned target proof and person authority;
-actual Go/Python FD launch/lifetime/EOF/revocation/backpressure qualification;
+production native FD launch/lifetime/EOF/revocation/backpressure qualification;
 keeper-backed destination publication with real SIGKILL cuts; exact result and
 provenance receipts; qualified manifest-scoped erasure; the native loading/model
 and A7/A10 tests. Existing harness state and credentials are never fixtures.
