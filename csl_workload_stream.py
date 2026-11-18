@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import stat
@@ -21,6 +22,13 @@ IDENTITIES = frozenset({'id', 'sessionId', 'projectHash', 'type', 'role',
 def encoded(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False,
                       allow_nan=False, separators=(',', ':')).encode('utf-8')
+
+
+def checked_text(value):
+    try:
+        value.encode('utf-8')
+    except UnicodeError:
+        raise SyncError('workload_record_refused') from None
 
 
 @dataclass(frozen=True)
@@ -71,6 +79,21 @@ def opened_source(root, relative):
 
 def read_complete(root, relative, bounds):
     records, digest, length, lines = [], hashlib.sha256(), 0, 0
+    remaining_values = bounds.values - 1
+    def check_structure(item, depth=1):
+        nonlocal remaining_values
+        remaining_values -= 1
+        if remaining_values < 0 or depth > bounds.depth:
+            raise SyncError('workload_structure_limit')
+        if isinstance(item, dict):
+            for key in item: checked_text(key)
+            for child in item.values(): check_structure(child, depth+1)
+        elif isinstance(item, list):
+            for child in item: check_structure(child, depth+1)
+        elif isinstance(item, float) and not math.isfinite(item):
+            raise SyncError('workload_record_refused')
+        elif isinstance(item, str):
+            checked_text(item)
     try:
         with opened_source(root, relative) as source:
             initial = os.fstat(source.fileno())
@@ -95,6 +118,7 @@ def read_complete(root, relative, bounds):
                     value = strict_json(line)
                     if not isinstance(value, dict):
                         raise SyncError('workload_record_refused')
+                    check_structure(value)
                     records.append(value)
             # A fixed complete prefix may grow, but may not be rewritten while read.
             source.seek(0)
@@ -171,6 +195,7 @@ class Redactor:
                     raise SyncError('workload_opaque_or_key_refused')
                 result = {}
                 for name, child in item.items():
+                    if isinstance(name, str): checked_text(name)
                     if (not isinstance(name, str) or self.text(name) != name or name in OPAQUE):
                         raise SyncError('workload_opaque_or_key_refused')
                     result[name] = visit(child, name, depth+1)
@@ -178,10 +203,13 @@ class Redactor:
             if isinstance(item, list):
                 return [visit(child, key, depth+1) for child in item]
             if isinstance(item, str):
+                checked_text(item)
                 cleaned = self.text(item)
                 if key in IDENTITIES and cleaned != item:
                     raise SyncError('workload_identity_refused')
                 return cleaned
+            if isinstance(item, float) and not math.isfinite(item):
+                raise SyncError('workload_record_refused')
             if item is None or type(item) in (bool, int, float):
                 return item
             raise SyncError('workload_record_refused')

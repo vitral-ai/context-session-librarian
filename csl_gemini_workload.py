@@ -2,16 +2,14 @@
 from collections import OrderedDict
 import copy
 from datetime import datetime
-import hashlib
-from pathlib import Path
 import re
 
 from csl_sync_state import SyncError
-from csl_workload_stream import Bounds, ProjectionStore, Redactor, encoded, read_complete, verify_prefix
+from csl_workload_provider import PreparedProvider
+from csl_workload_stream import encoded
 
 SOURCE_COMMIT = '5a5c7180ff3f0a02511f54b54db7f228d4982a30'
 PROFILE = 'gemini-cli-0.68.0-jsonl-text-v1'
-EMPTY = hashlib.sha256(b'').hexdigest()
 METADATA = {'sessionId', 'projectHash', 'startTime', 'lastUpdated', 'summary',
             'memoryScratchpad', 'directories', 'kind'}
 MESSAGE = {'id', 'timestamp', 'type', 'content', 'displayContent', 'toolCalls',
@@ -200,108 +198,39 @@ class Conversation:
         return result
 
 
-class WorkloadGeminiProvider:
+class WorkloadGeminiProvider(PreparedProvider):
     """Existing collector interface over explicit sources and sanitized private files.
 
     No CLI is activated here. Identity/device admission belongs to the caller.
     One exclusively locked collector owns each projection store.
     """
-    supported_providers = ('gemini',)
-    pair_view_revisions = True
+    provider = 'gemini'
+    duplicate_code = 'gemini_workload_format_refused'
 
-    def __init__(self, sources, store, *, bounds=None, extra_literals=()):
-        self.bounds = bounds or Bounds()
-        if not isinstance(sources, tuple) or not 1 <= len(sources) <= self.bounds.files:
-            raise SyncError('workload_source_limit')
-        self.sources = sources
-        store_root = Path(store).expanduser().absolute()
-        for source in sources:
-            if not isinstance(source, tuple) or len(source) != 2:
-                raise SyncError('workload_source_refused')
-            root, relative = source
-            root = Path(root).expanduser().absolute()
-            if (not isinstance(relative, str) or not relative.endswith('.jsonl')
-                    or root.resolve() != root
-                    or store_root.is_relative_to(root)
-                    or root.is_relative_to(store_root)):
-                raise SyncError('workload_source_refused')
-        self.store = ProjectionStore(store_root, self.bounds)
-        self.redactor = Redactor(self.bounds, extra_literals)
-        self.prepared = {}
-
-    def list_sessions(self, provider):
-        if provider != 'gemini':
-            raise SyncError('unsupported_provider')
-        entries = {}
-        for root, relative in self.sources:
-            records, cursor = read_complete(root, relative, self.bounds)
-            clean = self.redactor.clean(records)
-            state, output = Conversation(), bytearray()
-            for record in clean:
-                line = encoded(record) + b'\n'
-                if len(line) > self.bounds.record_bytes or len(output) + len(line) > self.bounds.output_bytes:
-                    raise SyncError('workload_output_limit')
-                state.apply(record, len(output))
-                output.extend(line)
-            sid = identifier(state.metadata.get('sessionId'))
-            identifier(state.metadata.get('projectHash'))
-            if state.metadata.get('kind', 'main') != 'main' or sid in entries:
-                refused()
-            view = state.view(self.bounds)
-            title = state.metadata.get('summary')
-            if title is not None and not isinstance(title, str):
-                refused()
-            model = next((entry['value'].get('model') for entry in reversed(list(state.messages.values()))
-                          if entry['value'].get('model')), None)
-            if model is not None and not isinstance(model, str):
-                refused()
-            verify_prefix(root, relative, cursor)
-            source_key = str(Path(root).absolute()) + '/' + relative
-            path = self.store.publish(source_key, bytes(output))
-            self.store.checkpoint(source_key, cursor, self.redactor.fingerprint, output)
-            descriptor = {'file_key': 'main', 'path': str(path), 'relative_path': 'session.jsonl',
-                'mode': 'append', 'complete_length': len(output), 'size': len(output),
-                'sha256': hashlib.sha256(output).hexdigest(), 'role': 'transcript'}
-            metadata = {'provider': 'gemini', 'native_id': sid, 'title': (title or sid)[:200],
-                'cwd': None, 'repository': None, 'created_at': timestamp(state.metadata.get('startTime')),
-                'updated_at': timestamp(state.metadata.get('lastUpdated')), 'model': model,
-                'record_count': len(clean), 'byte_count': len(output), 'parent': None,
-                'origin': 'native', 'state': 'idle'}
-            entries[sid] = {'metadata': metadata, 'file': descriptor, 'view': view,
-                'source_cursor': cursor, 'projection_version': 1, 'policy_sha256': self.redactor.fingerprint}
-        self.prepared = entries
-        return [entry['metadata'] for entry in entries.values()]
-
-    def _entry(self, provider, native_id):
-        if provider != 'gemini' or native_id not in self.prepared:
-            raise SyncError('workload_session_unprepared')
-        return self.prepared[native_id]
-
-    def raw_files(self, provider, native_id):
-        return [dict(self._entry(provider, native_id)['file'])]
-
-    def view_records(self, provider, native_id, *, position=None, limit=100):
-        entry = self._entry(provider, native_id)
-        records = entry['view']
-        target = position.get('next_seq') if isinstance(position, dict) else 1
-        if (position is not None and not isinstance(position, dict)
-                or type(target) is not int or target < 1 or type(limit) is not int or not 1 <= limit <= 1000
-                or position is not None and (position.get('version') != 1
-                    or position.get('provider') != provider or position.get('native_id') != native_id)):
-            raise SyncError('invalid_view_position')
-        def digest(rows):
-            return hashlib.sha256(b''.join(encoded(row)+b'\n' for row in rows)).hexdigest()
-        prefix = digest(records[:target-1])
-        reset = bool(position and (target > len(records)+1 or position.get('prefix_sha256') != prefix))
-        page = [] if reset else records[target-1:target-1+limit]
-        end = 1 if reset else target + len(page)
-        source = entry['file']
-        return {'records': page, 'position': {'version': 1, 'provider': provider, 'native_id': native_id,
-                'next_seq': end, 'prefix_sha256': EMPTY if reset else digest(records[:end-1])},
-            'reset_required': reset, 'complete': not reset and end > len(records),
-            'source_file': {'file_key': 'main', 'length': source['complete_length'], 'sha256': source['sha256']}}
-
-    def package_descriptor(self, provider, native_id):
-        self._entry(provider, native_id)
-        return {'available': False, 'reason': 'workload_view_only', 'descriptor_version': 1,
-                'manifest': None, 'members': []}
+    def project(self, records):
+        clean = self.redactor.clean(records)
+        state, output = Conversation(), bytearray()
+        for record in clean:
+            line = encoded(record) + b'\n'
+            if len(line) > self.bounds.record_bytes or len(output) + len(line) > self.bounds.output_bytes:
+                raise SyncError('workload_output_limit')
+            state.apply(record, len(output))
+            output.extend(line)
+        sid = identifier(state.metadata.get('sessionId'))
+        identifier(state.metadata.get('projectHash'))
+        if state.metadata.get('kind', 'main') != 'main':
+            refused()
+        view = state.view(self.bounds)
+        title = state.metadata.get('summary')
+        if title is not None and not isinstance(title, str):
+            refused()
+        model = next((entry['value'].get('model') for entry in reversed(list(state.messages.values()))
+                      if entry['value'].get('model')), None)
+        if model is not None and not isinstance(model, str):
+            refused()
+        metadata = {'provider': 'gemini', 'native_id': sid, 'title': (title or sid)[:200],
+            'cwd': None, 'repository': None, 'created_at': timestamp(state.metadata.get('startTime')),
+            'updated_at': timestamp(state.metadata.get('lastUpdated')), 'model': model,
+            'record_count': len(clean), 'byte_count': len(output), 'parent': None,
+            'origin': 'native', 'state': 'idle'}
+        return metadata, bytes(output), view
