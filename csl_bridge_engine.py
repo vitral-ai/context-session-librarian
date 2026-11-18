@@ -35,6 +35,24 @@ def validate_event(event):
         raise BridgeError('Invalid event text')
 
 
+def confirm_event_turn(request, state, receipt, event):
+    """Independent original acceptance; False is deferred, BridgeError is conflict."""
+    if (request.get('id') != event['task_id'] or
+            request.get('op') not in ('followup', 'send_message') or
+            request.get('target') != event['source'] or request.get('source') != event['target']):
+        raise BridgeError('Event actor does not match delegated task')
+    receipt = receipt or {}
+    if receipt.get('request_id', event['task_id']) != event['task_id']:
+        raise BridgeError('Receipt request does not match delegated task')
+    if state == 'rejected' or receipt.get('state') == 'rejected':
+        raise BridgeError('Delegated task was rejected')
+    if receipt.get('turn_id') and receipt['turn_id'] != event['turn_id']:
+        raise BridgeError('Event turn does not match delegated task')
+    if state != 'delivered' or receipt.get('state', 'delivered') != 'delivered' or not receipt.get('turn_id'):
+        return False
+    return True
+
+
 def publish_task_completion(store, agent, thread, turn_id, status, answer):
     """Shared native completion publisher for connectors and light receivers."""
     tasks = store.rows("SELECT * FROM tasks WHERE target=? AND turn=? AND status IN ('running','pending')", (agent, turn_id))
@@ -422,7 +440,7 @@ class Connector:
             uncertain_ops = [row for row in self.store.rows("SELECT id,peer,request FROM operations WHERE state='uncertain'")
                              if not row['peer'].startswith('outbound:') and decode(row['request']).get('op') != 'mail'
                              and decode(row['request']).get('target') == agent]
-            uncertain_events = [row for row in self.store.rows("SELECT id,body FROM inbound WHERE delivery='uncertain'")
+            uncertain_events = [row for row in self.store.rows("SELECT id,peer,body FROM inbound WHERE delivery='uncertain'")
                                 if decode(row['body'])['target'] == agent]
             # Repair only local crash windows with an already-confirmed native turn.
             # A pending, never-invoked task is not uncertain and needs no history scan.
@@ -447,9 +465,15 @@ class Connector:
                     break
             by_client = {item.get('clientId'): turn['id'] for turn in turns for item in turn.get('items', [])
                          if item.get('type') == 'userMessage' and item.get('clientId')}
-            with self.store.transaction() as db:
-                for row in uncertain_events:
-                    if decode(row['body'])['target'] == agent and row['id'] in by_client:
+            for row in uncertain_events:
+                try:
+                    confirmed = self.event_turn_confirmed(row['peer'], decode(row['body']))
+                except BridgeError:
+                    with self.store.transaction() as db:
+                        db.execute("UPDATE inbound SET delivery='rejected' WHERE id=?", (row['id'],))
+                    continue
+                if confirmed and row['id'] in by_client:
+                    with self.store.transaction() as db:
                         db.execute("UPDATE inbound SET delivery='delivered' WHERE id=?", (row['id'],))
             for row in uncertain_ops:
                 request = decode(row['request'])
@@ -552,9 +576,8 @@ class Connector:
             raise BridgeError('Invalid event cursor')
         event = row['event']
         validate_event(event)
-        receipt = self.event_task(peer, event)
-        if receipt.get('turn_id') and receipt['turn_id'] != event['turn_id']:
-            raise BridgeError('Event turn does not match delegated task')
+        if not self.event_turn_confirmed(peer, event):
+            raise BridgeError('Waiting for original native acceptance receipt')
         if not self.sends_session(peer):
             # Not rejected: one refused event would stall this peer's cursor for every later event.
             event = {key: value for key, value in event.items() if key != 'session'}
@@ -571,17 +594,14 @@ class Connector:
             rows = self.store.rows('SELECT * FROM inbound WHERE id=?', (event['id'],))
             self.deliver_event(rows[0])
 
-    def event_task(self, peer, event):
-        """Return the receipt of the task this peer's event answers. The event source
-        must be the agent that task was sent to on this same peer, and the target its sender."""
-        matches = self.store.rows('SELECT request,result FROM operations WHERE id=? AND peer=?',
-                                  (event['task_id'], 'outbound:' + peer))
-        if not matches:
+    def event_turn_confirmed(self, peer, event):
+        rows = self.store.rows('SELECT request,state,result FROM operations WHERE id=? AND peer=?',
+                               (event['task_id'], 'outbound:' + peer))
+        if not rows:
             raise BridgeError('Event has no matching delegated task')
-        request = decode(matches[0]['request'])
-        if event['source'] != request.get('target') or event['target'] != request.get('source'):
-            raise BridgeError('Event actor does not match delegated task')
-        return decode(matches[0]['result']) if matches[0]['result'] else {}
+        row = rows[0]
+        return confirm_event_turn(decode(row['request']), row['state'],
+                                  decode(row['result']) if row['result'] else {}, event)
 
     def deliver_event(self, row):
         event = decode(row['body'])
@@ -589,7 +609,8 @@ class Connector:
         if row['delivery'] != 'pending' or self.waiters[agent]:
             return
         try:
-            self.event_task(row['peer'], event)
+            if not self.event_turn_confirmed(row['peer'], event):
+                return  # Retain a legacy pending row until native acceptance is confirmed.
         except BridgeError:
             with self.store.transaction() as db:
                 db.execute("UPDATE inbound SET delivery='rejected' WHERE id=?", (event['id'],))
@@ -655,6 +676,11 @@ class Connector:
                 own = self.store.rows('SELECT id FROM operations WHERE id=? AND peer=?', (body['request_id'], 'outbound:' + peer))
                 if own:
                     self.store.operation(body['request_id'], result['state'], result['result'])
+            recorded = result.get('result') if body['op'] == 'receipt' else result
+            if (isinstance(recorded, dict) and recorded.get('turn_id') and
+                    result.get('state') == 'delivered' and recorded.get('state', 'delivered') == 'delivered'):
+                with self.changed:
+                    self.changed.notify_all()
             return result
         if op == 'agents' and set(request) == {'local_op'}:
             result = []
@@ -695,9 +721,20 @@ class Connector:
                 self.waiters[agent] += 1
                 try:
                     while True:
-                        rows = [r for r in self.store.rows("SELECT * FROM inbound WHERE seq>? AND delivery!='rejected' ORDER BY seq",
-                                                           (request['after'],))
-                                if decode(r['body'])['target'] == agent][:1]
+                        rows = []
+                        for row in self.store.rows("SELECT * FROM inbound WHERE seq>? AND delivery!='rejected' ORDER BY seq", (request['after'],)):
+                            event = decode(row['body'])
+                            if event['target'] != agent:
+                                continue
+                            try:
+                                if not self.event_turn_confirmed(row['peer'], event):
+                                    break  # Keep the tool cursor before an unverified legacy row.
+                            except BridgeError:
+                                with self.store.transaction() as db:
+                                    db.execute("UPDATE inbound SET delivery='rejected' WHERE id=?", (row['id'],))
+                                continue
+                            rows.append(row)
+                            break
                         if rows or self.stop.is_set() or time.monotonic() >= deadline:
                             # Tool return delivers these events to the waiting conversation.
                             with self.store.transaction() as db:

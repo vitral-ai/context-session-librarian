@@ -138,10 +138,14 @@ class UpstreamPreservation(unittest.TestCase):
                 db.execute('INSERT INTO agents VALUES(?,?)',('worker',thread_id))
                 db.execute('INSERT INTO config VALUES(?,?)',('identity',encode('guest')))
                 db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?)',(task_id,'hub','coordinator','worker',turn_id,'running'))
+            request = {'version':1,'op':'followup','id':task_id,'source':'coordinator','target':'worker','text':'synthetic original'}
+            receipt = {'state':'delivered','request_id':task_id,'turn_id':turn_id,'thread_id':thread_id}
+            store.reserve('hub', request)
+            store.operation(task_id, 'delivered', receipt)
             store.close()
             cfg={'node':'guest','home':str(root/'light'),'bridges':{'guest':{'home':str(home),'agents':['worker']}},'links':{}}
             node=m.Node(cfg);node.home.joinpath('config.json').write_text(encode(cfg))
-            node.journal.put('in','hub',task_id,{'id':task_id});node.journal.finish('in','hub',task_id,{'ok':True})
+            node.journal.put('in','hub',task_id,{'type':'request','id':task_id,'request':request,'origin':'hub'});node.journal.finish('in','hub',task_id,{'ok':True,'data':receipt})
             calls=[]
             class SyntheticEndpoint:
                 def call(self,method,params):
