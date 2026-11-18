@@ -80,7 +80,8 @@ class EventState:
         for table, column, allowed in checks:
             row = db.execute('SELECT ' + column + ' FROM ' + table + ' WHERE id=?', (value,)).fetchone()
             if row:
-                fingerprint = hashlib.sha256(row[0].encode()).hexdigest() if table == 'inbound' else row[0]
+                raw = row[0] if isinstance(row[0], bytes) else row[0].encode()
+                fingerprint = hashlib.sha256(raw).hexdigest() if table == 'inbound' else row[0]
                 if table == 'inbound':
                     try:
                         progress = decode(row[0]).get('kind') == 'progress'
@@ -143,7 +144,8 @@ class EventState:
                 raise EventDeferred('No fresh Native effect is permitted')
             self.recipient(db, row)
             value = row['client_id'] or str(uuid.uuid4())
-            self.reserve_id(db, value, 'final', row['projection'], row['thread'])
+            self.reserve_id(db, value, 'final',
+                            digest([key, row['peer'], row['task'], row['projection']]), row['thread'])
             number = row['attempt'] + 1
             changed = db.execute("UPDATE event_effects SET state='uncertain',client_id=?,attempt=?,revision=revision+1 WHERE key=? AND state='pending' AND revision=?",
                                  (value, number, key, revision)).rowcount

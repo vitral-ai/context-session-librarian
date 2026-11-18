@@ -301,3 +301,25 @@ class EventStateTests(unittest.TestCase):
         cursor = self.store.rows('SELECT after_seq FROM event_recovery_scans')[0]['after_seq']
         self.assertEqual(cursor, self.row(blocked[-1])['seq'])
         self.assertEqual([row['key'] for row in self.events.recovery_batch('synthetic')], [eligible])
+
+    def test_blob_historical_native_id_refuses_without_attribute_error(self):
+        value = uid()
+        with self.store.transaction() as db:
+            db.execute('INSERT INTO inbound(id,peer,body)VALUES(?,?,?)', (value, 'remote', b'\xff'))
+        key = self.seeded()
+        with patch('csl_bridge_event_state.uuid.uuid4', return_value=uuid.UUID(value)):
+            with self.assertRaises(EventConflict):
+                self.events.claim_native(key, 0)
+        self.assertEqual(self.row(key)['state'], 'pending')
+
+    def test_distinct_canonical_tasks_cannot_share_one_native_client_id(self):
+        first = self.seeded(); second = self.seeded()
+        with self.store.transaction() as db:
+            # Even an identical supplied projection cannot erase the actual key
+            # and task identity from the final Native-ID purpose binding.
+            db.execute('UPDATE event_effects SET projection=? WHERE key=?', (self.row(first)['projection'], second))
+        claim = self.events.claim_native(first, 0)
+        with patch('csl_bridge_event_state.uuid.uuid4', return_value=uuid.UUID(claim['client_id'])):
+            with self.assertRaises(EventConflict):
+                self.events.claim_native(second, 0)
+        self.assertEqual(self.row(second)['state'], 'pending')
