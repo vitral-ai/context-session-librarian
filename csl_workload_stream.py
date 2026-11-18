@@ -47,6 +47,31 @@ class Bounds:
             raise SyncError('workload_invalid_bounds')
 
 
+class StructureBudget:
+    """Validate every descendant before selection or credential replacement."""
+    def __init__(self, bounds):
+        self.bounds, self.remaining = bounds, bounds.values
+
+    def check(self, item, depth=0):
+        self.remaining -= 1
+        if self.remaining < 0 or depth > self.bounds.depth:
+            raise SyncError('workload_structure_limit')
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if not isinstance(key, str):
+                    raise SyncError('workload_record_refused')
+                checked_text(key)
+                self.check(child, depth+1)
+        elif isinstance(item, list):
+            for child in item: self.check(child, depth+1)
+        elif isinstance(item, str):
+            checked_text(item)
+        elif isinstance(item, float) and not math.isfinite(item):
+            raise SyncError('workload_record_refused')
+        elif item is not None and type(item) not in (bool, int, float):
+            raise SyncError('workload_record_refused')
+
+
 def opened_source(root, relative):
     """Open beneath an explicit root using anchored, no-symlink directory FDs."""
     if not isinstance(relative, str):
@@ -79,21 +104,8 @@ def opened_source(root, relative):
 
 def read_complete(root, relative, bounds):
     records, digest, length, lines = [], hashlib.sha256(), 0, 0
-    remaining_values = bounds.values - 1
-    def check_structure(item, depth=1):
-        nonlocal remaining_values
-        remaining_values -= 1
-        if remaining_values < 0 or depth > bounds.depth:
-            raise SyncError('workload_structure_limit')
-        if isinstance(item, dict):
-            for key in item: checked_text(key)
-            for child in item.values(): check_structure(child, depth+1)
-        elif isinstance(item, list):
-            for child in item: check_structure(child, depth+1)
-        elif isinstance(item, float) and not math.isfinite(item):
-            raise SyncError('workload_record_refused')
-        elif isinstance(item, str):
-            checked_text(item)
+    budget = StructureBudget(bounds)
+    budget.check(records)
     try:
         with opened_source(root, relative) as source:
             initial = os.fstat(source.fileno())
@@ -118,7 +130,7 @@ def read_complete(root, relative, bounds):
                     value = strict_json(line)
                     if not isinstance(value, dict):
                         raise SyncError('workload_record_refused')
-                    check_structure(value)
+                    budget.check(value, depth=1)
                     records.append(value)
             # A fixed complete prefix may grow, but may not be rewritten while read.
             source.seek(0)
@@ -182,6 +194,7 @@ class Redactor:
         return value
 
     def clean(self, value):
+        StructureBudget(self.bounds).check(value)
         remaining = [self.bounds.values]
         def visit(item, key=None, depth=0):
             remaining[0] -= 1

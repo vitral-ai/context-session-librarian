@@ -8,12 +8,15 @@ from csl_gemini_workload import identifier, timestamp
 from csl_sync_providers import _view
 from csl_sync_state import SyncError
 from csl_workload_provider import PreparedProvider
-from csl_workload_stream import encoded
+from csl_workload_stream import StructureBudget, encoded
 
 PROFILES = {'codex': 'codex-0.169.0-text-v1', 'claude': 'claude-2.1.308-text-v1'}
 VERSIONS = {'codex': '0.169.0', 'claude': '2.1.308'}
 MARKER = 'workload_omission_v1'
 PROFILE_MARKER = 'workload_profile_v1'
+PROVENANCE_FIELDS = {'csl_conversion', 'csl_source_provider', 'csl_source_session_id',
+                     'forkedFrom', 'forked_from_id', 'forked_from_ordinal_exclusive',
+                     'parent_thread_id'}
 TEXT_BLOCKS = {'text', 'input_text', 'output_text'}
 CLAUDE_META = {'custom-title', 'file-history-snapshot', 'queue-operation', 'progress',
                'system', 'summary', 'last-prompt', 'agent-name', 'bridge_status'}
@@ -75,12 +78,18 @@ class WorkloadTextProvider(PreparedProvider):
         return hashlib.sha256(encoded({'profile': self.profile,
             'redaction_sha256': self.redactor.fingerprint})).hexdigest()
 
-    def _codex(self, record):
+    def _codex(self, record, budget):
         kind, value = record.get('type'), record.get('payload', {})
         if (MARKER in record or PROFILE_MARKER in record
                 or not isinstance(kind, str) or not isinstance(value, dict)): refused()
         result = {'type': kind, 'timestamp': timestamp(record.get('timestamp')), 'payload': {}}
         if kind == 'session_meta':
+            for header in (record, value):
+                if (any(field in header for field in PROVENANCE_FIELDS)
+                        or header.get('attached_thread') is not None and header['attached_thread'] is not False
+                        or 'source' in header and (not isinstance(header['source'], str)
+                                                  or header['source'] not in ('cli', 'vscode', 'exec'))):
+                    raise SyncError('workload_text_provenance_refused')
             if value.get('history_base') is not None:
                 raise SyncError('workload_external_history_refused')
             if value.get('history_mode') not in (None, 'legacy', 'paginated'): refused()
@@ -116,6 +125,9 @@ class WorkloadTextProvider(PreparedProvider):
                     try: arguments = strict_json(value[field])
                     except (ValueError, UnicodeError, RecursionError): refused()
                     if not isinstance(arguments, dict): refused()
+                    # Charge expanded JSON to the same capture-wide budget as
+                    # source records, before any credential subtree is removed.
+                    budget.check(arguments, depth=3)
                     # Decode before scanning, so short/numeric credential fields
                     # cannot hide inside the native JSON-encoded string.
                     result['payload'][field] = arguments
@@ -168,6 +180,8 @@ class WorkloadTextProvider(PreparedProvider):
         return result
 
     def project(self, records):
+        budget = StructureBudget(self.bounds)
+        budget.check(records)
         if self.provider == 'codex' and (not records or records[0].get('type') != 'session_meta'):
             refused()
         if self.provider == 'codex':
@@ -182,11 +196,11 @@ class WorkloadTextProvider(PreparedProvider):
                     raise SyncError('workload_codex_ordinal_refused')
         for record in records:
             payload = record.get('payload', {})
-            if (any(name in record for name in ('csl_conversion', 'csl_source_provider', 'csl_source_session_id', 'forkedFrom'))
-                    or isinstance(payload, dict) and any(name in payload for name in ('csl_source_session_id', 'forked_from_id'))):
+            if (any(name in record for name in PROVENANCE_FIELDS)
+                    or isinstance(payload, dict) and any(name in payload for name in PROVENANCE_FIELDS)):
                 raise SyncError('workload_text_provenance_refused')
-        transform = self._codex if self.provider == 'codex' else self._claude
-        selected_records = [transform(record) for record in records]
+        selected_records = [self._codex(record, budget) if self.provider == 'codex'
+                            else self._claude(record) for record in records]
         clean = self.redactor.clean(selected_records)
         output, view, tools, view_bytes = bytearray(), [], {}, 0
         sid = title = created = updated = model = None

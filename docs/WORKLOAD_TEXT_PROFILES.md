@@ -17,6 +17,12 @@ never a harness home, registry, credential file or companion-file search:
   accepted only without a base and with exact contiguous integer ordinals from
   zero, matching `csl_codex_history._node`'s no-base boundary. Multiple headers,
   gaps, boolean ordinals and external bases refuse; no ancestor is resolved.
+  Before selection, both header and payload refuse attached threads, parent/fork
+  links and CSL import/conversion markers. An explicit source must be `cli`,
+  `vscode` or `exec`; structured subagent/internal/custom and unknown sources
+  refuse in legacy and fresh paginated streams. An absent source is compatible
+  with existing main-stream fixtures, not evidence of independently verified
+  native provenance.
 - `claude-2.1.308-text-v1`: main-stream user/assistant records declaring
   `version: 2.1.308`, stable session identity and an unambiguous linear UUID
   chain. Parent links may cross known auxiliary records; branches, duplicate
@@ -72,7 +78,13 @@ projected bytes stay unchanged. Its append/patch/replacement regressions remain.
 Codex/Claude policy fingerprints additionally bind the selected profile.
 
 Raw source depth/value limits are checked before selecting fields, including
-unselected auxiliary data. Non-finite numeric values refuse. Record/source,
+unselected auxiliary data. Decoded Codex argument trees are additionally charged
+to that same capture-wide value budget across every call, at their nested depth,
+before credential replacement. The original encoded strings remain charged;
+there is no per-call reset or credit for removed credential subtrees. Every
+decoded key/value, even under an escaped or nested credential key, must have
+valid UTF-8 text and finite numbers. The shared redactor also validates its whole
+input before replacing any subtree. Record/source,
 serialized output/view and total spool limits retain the merged bounds; view
 construction is incremental rather than building an unbounded rendered list.
 Unknown formats fail before session upload; no source path/Git discovery occurs.

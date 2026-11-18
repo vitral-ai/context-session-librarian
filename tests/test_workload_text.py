@@ -11,7 +11,7 @@ from csl_sync_engine import Collector, PROVIDERS
 from csl_sync_http import HTTP, Registry
 from csl_sync_state import State, SyncError
 from csl_text_workload import WorkloadTextProvider, PROFILE_MARKER, MARKER
-from csl_workload_stream import Bounds
+from csl_workload_stream import Bounds, Redactor
 from sync_support import Peer, FakeTokens
 
 SID = '11111111-2222-4333-8444-555555555555'
@@ -225,6 +225,85 @@ class WorkloadTextTests(unittest.TestCase):
             adapter,_=self.provider(provider,rows)
             with self.assertRaisesRegex(SyncError,'^workload_text_provenance_refused$'):
                 adapter.list_sessions(provider)
+
+    def assert_no_upload(self, adapter):
+        prior_spool = {path.name: path.read_bytes() for path in adapter.store.root.iterdir()}
+        peer = Peer()
+        state = State(self.root/'refusal-state')
+        try:
+            result = Collector(state, Registry(peer.url, FakeTokens(), http=HTTP(attempts=1)), adapter).run(
+                providers=['codex'], days=None)
+            self.assertEqual(result['synced'], 0)
+            self.assertEqual(result['pending'], 1)
+            self.assertEqual(peer.sessions, {})
+            self.assertEqual(peer.files, {})
+            self.assertEqual(peer.views, {})
+            self.assertEqual({path.name: path.read_bytes() for path in adapter.store.root.iterdir()}, prior_spool)
+        finally:
+            peer.close(); state.close()
+
+    def test_codex_main_provenance_is_checked_before_selection_and_upload(self):
+        variants = [
+            {'attached_thread': True}, {'parent_thread_id': SID},
+            {'source': {'subagent': {'thread_spawn': {'parent_thread_id': SID, 'depth': 1}}}},
+            {'source': {'subagent': 'review'}}, {'source': {'subagent': 'compact'}},
+            {'source': {'internal': 'guardian'}}, {'source': {'custom': 'import'}},
+            {'source': 'unknown'}, {'forked_from_id': SID},
+            {'forked_from_ordinal_exclusive': 0}, {'csl_conversion': {}},
+            {'csl_source_provider': 'claude'}, {'csl_source_session_id': SID}, {'forkedFrom': SID},
+        ]
+        for paginated in (False, True):
+            for variant in variants:
+                for location in ('payload', 'record'):
+                    with self.subTest(paginated=paginated, variant=variant, location=location):
+                        rows = native('codex')
+                        if paginated:
+                            rows[0]['payload']['history_mode'] = 'paginated'
+                            for ordinal, row in enumerate(rows): row['ordinal'] = ordinal
+                        target = rows[0]['payload'] if location == 'payload' else rows[0]
+                        target.update(variant)
+                        adapter, _ = self.provider('codex', rows)
+                        self.assert_no_upload(adapter)
+        for source in (None, 'cli', 'vscode', 'exec'):
+            rows = native('codex')
+            if source is not None: rows[0]['payload']['source'] = source
+            rows[0]['payload']['attached_thread'] = False
+            adapter, _ = self.provider('codex', rows)
+            self.assertEqual(adapter.list_sessions('codex')[0]['native_id'], SID)
+
+    def test_decoded_argument_descendants_are_validated_before_redaction(self):
+        invalid = ('1e999', '"\\ud800"', '['*40+'0'+']'*40,
+                   '['+','.join(['0']*300)+']')
+        for key in ('password', 'ordinary', 'pass\\u0077ord'):
+            for value in invalid:
+                for nested in (False, True):
+                    arguments = '{"'+key+'":'+value+'}'
+                    if nested: arguments = '{"outer":'+arguments+'}'
+                    with self.subTest(key=key, value=value[:30], nested=nested):
+                        rows = native('codex'); rows[3]['payload']['arguments'] = arguments
+                        adapter, _ = self.provider('codex', rows, bounds=Bounds(values=250))
+                        self.assert_no_upload(adapter)
+
+    def test_argument_budget_is_cumulative_across_calls_and_captured_source(self):
+        for key in ('password', 'ordinary'):
+            rows = [native('codex')[0], {'type': 'response_item', 'payload': {
+                'type': 'function_call', 'call_id': 'call-1', 'name': 'read',
+                'arguments': json.dumps({key: [None]*140})}}]
+            adapter, _ = self.provider('codex', rows, bounds=Bounds(values=250))
+            self.assertEqual(adapter.list_sessions('codex')[0]['native_id'], SID)
+            another = copy.deepcopy(rows[-1]); another['payload']['call_id'] = 'call-2'
+            adapter, _ = self.provider('codex', rows+[another], bounds=Bounds(values=250))
+            with self.subTest(key=key): self.assert_no_upload(adapter)
+            rows[0]['discarded_metadata'] = [None]*140
+            adapter, _ = self.provider('codex', rows, bounds=Bounds(values=250))
+            with self.subTest(key=key, discarded=True): self.assert_no_upload(adapter)
+
+    def test_redactor_validates_masked_subtrees_even_when_called_directly(self):
+        deep = 0
+        for _ in range(40): deep = [deep]
+        for value in (float('inf'), '\ud800', deep, [None]*300, {'\ud800': 0}):
+            with self.subTest(value_type=type(value).__name__), self.assertRaises(SyncError):
+                Redactor(Bounds(values=250)).clean({'password': value})
 
     def test_view_cursor_and_policy_change_do_not_use_native_offsets(self):
         for provider in ('codex','claude'):
