@@ -225,10 +225,11 @@ class EventHistory:
                 self.effects.barrier(db, first['seq'], None, first['wire_id'], first['body'], 'Raw body changed during seed')
                 return {'processed': 0, 'complete': False, 'state': 'conflict'}
             event = decode(first['body'])
-            proof = self.proof(db, first['peer'], event)
-            signature = digest(proof['binding']) if proof['binding'] is not None else None
             state = db.execute('SELECT * FROM event_seed_state WHERE key=?', (key,)).fetchone()
             effect = db.execute('SELECT * FROM event_effects WHERE key=?', (key,)).fetchone()
+            retained = db.execute('SELECT proof FROM event_accepted_originals WHERE key=?', (key,)).fetchone() if effect and effect['state'] in SETTLED else None
+            proof = decode(retained[0]) if retained else self.proof(db, first['peer'], event)
+            signature = digest(proof['binding']) if proof['binding'] is not None else None
             known = db.execute('SELECT signature FROM event_original_bindings WHERE key=?', (key,)).fetchone()
             # Unknown is NULL, never digest(None). Once known, authority cannot be
             # replaced, including before first seed and across partial batches.
@@ -249,7 +250,12 @@ class EventHistory:
             if signature is not None:
                 db.execute('INSERT OR IGNORE INTO event_original_bindings VALUES(?,?)', (key, signature))
             if proof['state'] == 'confirmed':
-                db.execute('INSERT OR IGNORE INTO event_accepted_originals VALUES(?,?)', (key, encode(proof)))
+                try:
+                    self.projection(first['peer'], event, proof)
+                except EventConflict:
+                    self.note(db, {'seq': first['seq'], 'id': first['wire_id'], 'body': first['body']}, 'Original receipt contradicts sender header')
+                else:
+                    db.execute('INSERT OR IGNORE INTO event_accepted_originals VALUES(?,?)', (key, encode(proof)))
             if state and state['sealed'] and expected == signature:
                 if effect['seed_complete']:
                     if effect['state'] == 'deferred' and proof['state'] == 'confirmed' and not (state['uncertain'] or state['delivered']):
@@ -288,7 +294,7 @@ class EventHistory:
                     cursor = row['seq']
                     continue
                 alias = decode(row['body'])
-                current = self.proof(db, row['peer'], alias)
+                current = proof if retained else self.proof(db, row['peer'], alias)
                 current = {**current, 'sender': state['sender']}
                 if state['sealed']:
                     try:

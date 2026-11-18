@@ -213,6 +213,35 @@ class EventHistoryTests(unittest.TestCase):
                 with self.assertRaises(EventConflict):
                     self.history.next_publication('coordinator', before['representative'] - 1)
 
+    def test_settled_alias_reseed_needs_no_original_and_preserves_outcome(self):
+        request, _, event = self.task(known_thread=True); self.alias(event)
+        key, _ = self.seed(event)
+        self.history.effects.observe_wait(key, self.effect(key)['revision'], guard=self.history.guard)
+        outcome = self.effect(key)['outcome']
+        attempts = self.store.rows('SELECT * FROM event_attempts WHERE key=?', (key,))
+        with self.store.transaction() as db:
+            db.execute('DELETE FROM operations WHERE id=?', (request['id'],))
+        self.alias(event)
+        self.alias(dict(event, text='Conflicting late legacy narrative'))
+        self.catalog()
+        from unittest.mock import patch
+        with patch.object(self.history, 'proof', side_effect=AssertionError('Settled aliases use retained authority')):
+            self.assertEqual(self.history.seed_step(key)['state'], 'wait_delivered')
+            self.assertEqual(self.history.next_publication('coordinator', 0)['key'], key)
+        self.assertEqual(self.effect(key)['outcome'], outcome)
+        self.assertEqual(self.store.rows('SELECT * FROM event_attempts WHERE key=?', (key,)), attempts)
+        self.assertTrue(self.store.rows('SELECT * FROM event_history_conflicts'))
+
+    def test_late_receipt_cannot_validate_a_wrong_historical_sender_header(self):
+        request, receipt, event = self.task(confirmed=False)
+        self.alias(dict(event, session=uid()), delivery='delivered')
+        key, _ = self.seed(event)
+        self.store.operation(request['id'], 'delivered', receipt)
+        self.history.seed_step(key)
+        self.assertEqual(self.store.rows('SELECT * FROM event_accepted_originals WHERE key=?', (key,)), [])
+        with self.assertRaises(EventConflict):
+            self.history.next_publication('coordinator', 0)
+
     def test_settled_outcome_survives_contradictory_new_proposal(self):
         _, _, event = self.task(); self.alias(event)
         key, _ = self.seed(event)
