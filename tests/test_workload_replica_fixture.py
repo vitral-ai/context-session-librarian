@@ -77,6 +77,62 @@ class AdapterUnitTests(unittest.TestCase):
         self.assertEqual(row['phase'], 'pending')
         self.assertEqual(len(self.issuer.effects), 1)
 
+    def test_clock_jump_during_final_callback_refuses_success_without_reset(self):
+        def late(record, deadline):
+            self.events.append(record)
+            if record.get('state') == 'ready': self.clock.advance(100)
+        with self.assertRaises(adapter.FixtureRefused): self.enroll(late)
+        journal = self.config.state_root/'auth/workload-auth.json'
+        before = journal.read_bytes()
+        self.assertEqual(json.loads(before)['phase'], 'ready')
+        calls = list(self.issuer.calls)
+        with self.assertRaises(SyncError): self.enroll()
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertEqual(self.issuer.calls, calls)
+
+    def test_real_pipe_write_rechecks_acceptance_for_consent_and_results(self):
+        events = ({'v': 1, 'kind': 'consent'}, {'v': 1, 'kind': 'result', 'state': 'ready'},
+                  {'v': 1, 'kind': 'result', 'state': 'pending'})
+        original = os.write
+        for event in events:
+            with self.subTest(kind=event['kind'], state=event.get('state')):
+                read, write = os.pipe()
+                writer = adapter.pipe_writer(write)
+                clock = [0]
+                def late(fd, data):
+                    count = original(fd, data)
+                    clock[0] = 2
+                    return count
+                try:
+                    with patch.object(adapter.os, 'write', side_effect=late), self.assertRaises(adapter.FixtureRefused):
+                        adapter.write_public(writer, event, 1, lambda: clock[0],
+                                             best_effort=event.get('state') == 'pending')
+                    # Bytes cannot be undone; refusal, not a late exit0, is the proof.
+                    self.assertEqual(json.loads(os.read(read, 2048)), event)
+                finally:
+                    os.close(writer); os.close(write); os.close(read)
+
+    def test_main_rechecks_deadline_after_enrollment_and_cleanup(self):
+        original_close = os.close
+        for stage in ('enroll', 'cleanup'):
+            with self.subTest(stage=stage):
+                read, write = os.pipe()
+                clock = [0]
+                def enrolled(*args, **kwargs):
+                    if stage == 'enroll': clock[0] = 100
+                def closed(fd):
+                    original_close(fd)
+                    if stage == 'cleanup': clock[0] = 100
+                try:
+                    with patch.object(adapter, 'boottime', side_effect=lambda: clock[0]), \
+                            patch.object(adapter, 'enroll', side_effect=enrolled), \
+                            patch.object(adapter.os, 'close', side_effect=closed):
+                        result = adapter.main(['--runtime', str(ROOT), '--consent-fd', str(write),
+                                               '--budget-seconds', '5'])
+                    self.assertEqual(result, 2)
+                finally:
+                    original_close(write); original_close(read)
+
     def test_two_invocations_share_existing_gate_and_create_one_authorization(self):
         admitted, release = threading.Event(), threading.Event()
         def pause(path, form):
@@ -139,6 +195,9 @@ class AdapterUnitTests(unittest.TestCase):
                     try: os.write(writer, b'x'*4096)
                     except BlockingIOError: break
                 start = adapter.boottime()
+                self.assertFalse(adapter.write_public(writer, {'v': 1}, start+10, best_effort=True))
+                self.assertLess(adapter.boottime()-start, .5)
+                start = adapter.boottime()
                 with self.assertRaises(adapter.FixtureRefused):
                     adapter.write_public(writer, {'v': 1}, start+0.05)
                 self.assertLess(adapter.boottime()-start, .5)
@@ -152,6 +211,9 @@ class Peer:
     def __init__(self, root):
         self.root, self.records, self.approved = root, {}, set()
         self.calls, self.credentials, self.verified = [], [], 0
+        self.authorization_seen = threading.Event()
+        self.discovery_seen = threading.Event()
+        self.discovery_error = False
         self.deny = self.lose = False
         self.cert, key = root/'ca.crt', root/'tls-key.pem'
         subprocess.run(['/usr/bin/openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
@@ -169,6 +231,9 @@ class Peer:
                 except (BrokenPipeError, ConnectionResetError): pass
             def do_GET(self):
                 peer.calls.append(('GET', self.path))
+                peer.discovery_seen.set()
+                if peer.discovery_error:
+                    self.reply(503, {'error': 'temporarily_unavailable'}); return
                 if self.path != '/native-auth/v1/.well-known/oauth-authorization-server':
                     self.reply(404, {}); return
                 self.reply(200, discovery(peer.origin))
@@ -185,6 +250,7 @@ class Peer:
                     row = dict(device_code=code, user_code='ABCD-EFG'+'23456789ABCDEFGHJKLMNPQRSTUVWXYZ'[index],
                                location=location, thumb=form['key_thumbprint'])
                     peer.records[code] = row
+                    peer.authorization_seen.set()
                     self.reply(200, {'device_code': code, 'user_code': row['user_code'], 'expires_in': 60,
                         'interval': .05, 'verification_uri': peer.origin+'/native-auth/v1/device',
                         'exchange_nonce': b64(b'n'*32), 'workload_metadata': location,
@@ -243,13 +309,13 @@ class AdapterProcessTests(unittest.TestCase):
         self.config = replace(config_at(self.root), origin=self.peer.origin, ca_file=str(self.peer.cert))
         self.config.state_root.chmod(0o770)
 
-    def start(self, config=None, budget=5):
+    def start(self, config=None, budget=5, stdout=subprocess.PIPE):
         config = config or self.config
         env = {'PATH': os.defpath, 'HOME': str(self.root), 'LANG': 'C', 'PYTHONDONTWRITEBYTECODE': '1',
                'UNUSED_CANARY': CANARY, **environment(config)}
         process = subprocess.Popen([sys.executable, '-E', '-s', '-S', str(ADAPTER), '--runtime', str(RUNTIME),
             '--consent-fd', '1', '--budget-seconds', str(budget)], env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+            stdout=stdout, stderr=subprocess.PIPE, bufsize=0)
         def cleanup():
             if process.poll() is None: process.kill()
             process.communicate(timeout=3)
@@ -374,6 +440,76 @@ class AdapterProcessTests(unittest.TestCase):
         # Creating private empty children is not a credential import or grant.
         self.assertFalse((self.config.state_root/'auth/workload-auth.json').exists())
         self.assertFalse((self.config.state_root/'identity/workload-ed25519.pem').exists())
+
+    def filled_rendezvous(self):
+        read, write = os.pipe()
+        self.addCleanup(os.close, read)
+        self.addCleanup(os.close, write)
+        os.set_blocking(write, False)
+        size = 0
+        while True:
+            try: size += os.write(write, b'x'*4096)
+            except BlockingIOError: break
+        return read, write, size
+
+    def full_pipe(self, config, budget):
+        read, write, size = self.filled_rendezvous()
+        self.peer.authorization_seen.clear()
+        process = self.start(config, budget=budget, stdout=write)
+        self.assertTrue(self.peer.authorization_seen.wait(3))
+        journal = config.state_root/'auth/workload-auth.json'
+        end = time.monotonic()+3
+        while time.monotonic() < end:
+            if journal.exists() and json.loads(journal.read_bytes())['phase'] == 'pending':
+                break
+            self.assertIsNone(process.poll())
+            time.sleep(.01)
+        else: self.fail('device authorization did not reach durable pending')
+        return process, journal, read, size
+
+    def test_term_and_int_with_full_pipe_abort_without_a_second_wait(self):
+        for number, name in ((signal.SIGTERM, 'term-full'), (signal.SIGINT, 'int-full')):
+            with self.subTest(signal=name):
+                state = self.root/name; state.mkdir()
+                config = replace(self.config, state_root=state, location={**self.config.location, 'replica': name})
+                before_count = len(self.peer.records)
+                process, journal, read, size = self.full_pipe(config, budget=8)
+                before = journal.read_bytes()
+                key = (state/'identity/workload-ed25519.pem').read_bytes()
+                started = time.monotonic()
+                process.send_signal(number)
+                _, errors = process.communicate(timeout=1)
+                self.assertLess(time.monotonic()-started, 1)
+                self.assertEqual(process.returncode, 2)
+                self.assertEqual(errors, b'')
+                self.assertEqual(journal.read_bytes(), before)
+                self.assertEqual((state/'identity/workload-ed25519.pem').read_bytes(), key)
+                self.assertEqual(len(self.peer.records), before_count+1)
+                self.assertEqual(os.read(read, size+1), b'x'*size)
+                self.assertFalse(any(path.endswith('/token') for _, path in self.peer.calls))
+
+    def test_full_pipe_without_cancel_obeys_original_backpressure_deadline(self):
+        started = time.monotonic()
+        process, journal, read, size = self.full_pipe(self.config, budget=1)
+        _, errors = process.communicate(timeout=2)
+        self.assertLess(time.monotonic()-started, 3)
+        self.assertEqual(process.returncode, 2)
+        self.assertEqual(errors, b'')
+        self.assertEqual(json.loads(journal.read_bytes())['phase'], 'pending')
+        self.assertEqual(len(self.peer.records), 1)
+        self.assertEqual(os.read(read, size+1), b'x'*size)
+
+    def test_failure_reporting_never_waits_for_space_on_a_full_pipe(self):
+        self.peer.discovery_error = True
+        read, write, size = self.filled_rendezvous()
+        process = self.start(budget=8, stdout=write)
+        self.assertTrue(self.peer.discovery_seen.wait(3))
+        _, errors = process.communicate(timeout=1)
+        self.assertEqual(process.returncode, 2)
+        self.assertEqual(errors, b'')
+        self.assertEqual(len(self.peer.records), 0)
+        self.assertEqual(os.read(read, size+1), b'x'*size)
+        self.assertFalse((self.config.state_root/'auth/workload-auth.json').exists())
 
 
 if __name__ == '__main__': unittest.main()

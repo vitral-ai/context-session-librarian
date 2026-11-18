@@ -35,6 +35,15 @@ the same immutable deadline is enforced after TLS and at HTTPS write/acceptance
 boundaries by the existing transport. TERM/INT aborts, with no state cleanup or
 new deadline. The controller also bounds/reaps its exec process.
 
+Cancellation is sticky: it never starts another pipe wait for a failure notice.
+A failed rendezvous is not retried. Other failures make at most one immediate
+nonblocking reporting attempt within the original cap; a full pipe or elapsed
+cap can therefore mean no final record. Both consent/result writes, callbacks
+and exit0 acceptance recheck the original deadline after their work. Bytes
+already copied to a pipe cannot be undone: a late ready record without bounded
+exit0 is incomplete, not success. An already approved/uncertain private journal
+is retained unchanged; a pipe failure never deletes or reissues credentials.
+
 The script creates only collector-owned `0700` STATE/identity and STATE/auth
 children, with existing private key/token journal modes. It does not chmod the
 mount root, read transcripts, import host state, or touch other replicas. The

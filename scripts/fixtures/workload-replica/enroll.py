@@ -44,19 +44,25 @@ def pipe_writer(descriptor):
     return duplicate
 
 
-def write_public(descriptor, event, deadline, clock=boottime):
+def write_public(descriptor, event, deadline, clock=boottime, *, best_effort=False):
     data = json.dumps(event, allow_nan=False, separators=(',', ':')).encode()+b'\n'
     if len(data) > min(2048, os.fpathconf(descriptor, 'PC_PIPE_BUF')):
         raise FixtureRefused()
     while True:
         remaining = boundary(deadline, clock)
-        _, ready, _ = select.select([], [descriptor], [], min(0.1, remaining))
-        if not ready: continue
+        _, ready, _ = select.select([], [descriptor], [], 0 if best_effort else min(0.1, remaining))
+        if not ready:
+            if best_effort: return False
+            continue
         boundary(deadline, clock)
         try:
-            if os.write(descriptor, data) != len(data): raise FixtureRefused()
-            return
+            count = os.write(descriptor, data)
+            boundary(deadline, clock)
+            if count != len(data): raise FixtureRefused()
+            return True
         except BlockingIOError:
+            boundary(deadline, clock)
+            if best_effort: return False
             continue
 
 
@@ -98,12 +104,14 @@ def enroll(environment, emit, *, deadline, clock=boottime, sleep=time.sleep):
     public = tokens.begin(timeout=boundary(deadline, clock))
     boundary(deadline, clock)
     emit(consent_record(config, public), deadline)
+    boundary(deadline, clock)
     while True:
         boundary(deadline, clock)
         result = tokens.poll()
         boundary(deadline, clock)
         if result == {'state': 'ready'}:
             emit({'v': 1, 'kind': 'result', 'state': 'ready'}, deadline)
+            boundary(deadline, clock)
             return
         if result != {'state': 'pending'}: raise FixtureRefused()
         sleep(min(0.1, boundary(deadline, clock)))
@@ -125,6 +133,8 @@ class Arguments(argparse.ArgumentParser):
 def main(argv=None):
     writer = deadline = None
     previous = {}
+    cancelled = rendezvous_failed = False
+    active, status = True, 2
     try:
         parser = Arguments(description=__doc__)
         parser.add_argument('--runtime', required=True, type=Path)
@@ -138,19 +148,41 @@ def main(argv=None):
         if not runtime.is_absolute() or runtime.resolve() != runtime or not runtime.is_dir():
             raise FixtureRefused()
         sys.path.insert(0, str(runtime))
-        def stopped(*unused): raise FixtureRefused()
+        def stopped(*unused):
+            nonlocal cancelled
+            cancelled = True
+            if active: raise FixtureRefused()
         for name in (signal.SIGTERM, signal.SIGINT):
             previous[name] = signal.signal(name, stopped)
-        enroll(os.environ, lambda event, end: write_public(writer, event, end), deadline=deadline)
-        return 0
+        def emit(event, end):
+            nonlocal rendezvous_failed
+            try:
+                if cancelled: raise FixtureRefused()
+                write_public(writer, event, end, clock=boottime)
+            except BaseException:
+                rendezvous_failed = True
+                raise
+        enroll(os.environ, emit, deadline=deadline, clock=boottime)
+        boundary(deadline, boottime)
+        if cancelled: raise FixtureRefused()
+        status = 0
     except (Exception, KeyboardInterrupt) as error:
-        if writer is not None:
-            try: write_public(writer, failure_record(error), deadline)
+        if isinstance(error, KeyboardInterrupt): cancelled = True
+        # A failed rendezvous is not repaired with another blocking write.
+        # Cancellation is sticky, including while unwinding/closing the exec.
+        if writer is not None and not cancelled and not rendezvous_failed:
+            try: write_public(writer, failure_record(error), deadline, clock=boottime, best_effort=True)
             except (Exception, KeyboardInterrupt): pass
-        return 2
     finally:
+        active = False
         for name, handler in previous.items(): signal.signal(name, handler)
         if writer is not None: os.close(writer)
+    if status == 0:
+        try:
+            boundary(deadline, boottime)
+            if cancelled: raise FixtureRefused()
+        except (Exception, KeyboardInterrupt): status = 2
+    return status
 
 
 if __name__ == '__main__': raise SystemExit(main())
