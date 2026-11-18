@@ -1,0 +1,5 @@
+# COLLECTOR_IMAGE is the reviewed, digest-pinned workload collector image.
+ARG COLLECTOR_IMAGE
+FROM ${COLLECTOR_IMAGE}
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/csl-workload-collector"]
