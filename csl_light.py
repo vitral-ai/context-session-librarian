@@ -239,6 +239,10 @@ class Native:
                 response = client.call('thread/read', {'threadId': thread, 'includeTurns': False})
             except Exception:
                 response = client.call('thread/resume', {'threadId': thread, 'excludeTurns': True})
+            else:
+                status = response.get('thread', {}).get('status')
+                if isinstance(status, dict) and status.get('type') == 'notLoaded':
+                    response = client.call('thread/resume', {'threadId': thread, 'excludeTurns': True})
             page = client.call('thread/turns/list', {'threadId':thread,'limit':20,'itemsView':'full','sortDirection':'desc'})
             turns = page.get('data', [])
             for turn in turns:
