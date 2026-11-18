@@ -110,7 +110,10 @@ class Collector:
 
     def run(self, *, days=30, providers=PROVIDERS):
         providers = tuple(providers)
-        if any(provider not in PROVIDERS for provider in providers):
+        supported = getattr(self.providers, 'supported_providers', PROVIDERS)
+        if type(supported) is not tuple or any(not isinstance(name, str) for name in supported):
+            supported = PROVIDERS
+        if any(provider not in supported for provider in providers):
             raise SyncError('unsupported_provider')
         # Called under the collector lock; only our private orphaned snapshots are removed.
         for path in self.spool.iterdir():
