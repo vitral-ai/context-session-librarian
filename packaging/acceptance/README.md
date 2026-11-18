@@ -49,18 +49,27 @@ values or transcripts in the evidence.
    `cea101c3f0674cb223660e48b5a50c83355dae2c`. Supply exact collector/writer
    image references, single fixture HTTPS origin and test CA ConfigMap,
    explicitly selected provider/profile, stable workload fields, and literal
-   writer argv. Use a namespace and volumes belonging to this run. Convert the
-   Helm YAML documents to a JSON array with a YAML parser such as PyYAML
+   writer argv. Use a namespace and volumes belonging to this run. Set both fixture pull policies to `Never`. Convert the
+   final Helm YAML documents to a JSON array with a YAML parser such as PyYAML
    `safe_load_all`. Supply a separate trusted pins JSON object containing
-   `collector_image`, `writer_image`, `origin`, `provider`, `ca_configmap` and,
-   for nondefault budgets, `flush_seconds` and `spool_limit_bytes`.
+   `collector_image`, `writer_image`, `origin`, `provider`, `ca_configmap`,
+   `writer_argv` (the exact literal array including the writer shutdown budget and
+   `--`), `supervisor_name`, `supervisor_sha256`, `grace_seconds`, and
+   `location` (label, provider, cluster, workload). For nondefault collector
+   budgets, supply `flush_seconds` and `spool_limit_bytes`. Hash the script bytes
+   from the reviewed source checkout. Compute the name from the reviewed Helm
+   naming rule and intended release/namespace, independently of the input being
+   checked. This preflight expects the image UID, default volume limits, and
+   chart collector resource bounds.
 
    ```sh
    python3 packaging/acceptance/check_rendered_abi.py rendered.json reviewed-pins.json
    ```
 
-   Record any operator fixture-only pod changes independently and verify actual
-   digest, mounts, process boundary and CA in the final Pod spec before start.
+   Submit the checked objects. Independently compare the admission result and
+   actual Pod against the checked execution boundary, accounting for API default
+   fields. Reject mutation of the checked inputs and any injected execution path.
+   Record actual digest, mounts, process boundary and CA.
    Do not substitute a tag or the source preflight for an image result.
 
 ## Run and capture observations
@@ -91,8 +100,13 @@ The reviewed runner must witness its producer group stopped. Observe EOF after
 stop for the same source generation, then verify fresh exact content and view
 ACKs for that capture within the original 20-second BOOTTIME budget. The
 `check_producer_stop.py` predicate exercises those correlations with synthetic
-typed observations. Construct its stop witness only inside the owned fixture
-supervisor. The summary JSON flags do not grant authority.
+typed observations. Construct the runtime stop witness only inside the owned
+fixture supervisor. Serialize the original BOOTTIME drain start and deadline,
+the observed stop and EOF, and typed content and view receipts with their
+capture identifiers and timestamps. The summary revalidates the timeline with
+the same predicate and cross-checks its elapsed time. Serialized observations
+are review evidence, so collect them from the trusted observer rather than the
+writer or transcript.
 
 Default native sidecar, DaemonSet and ACA external-watch remain pending on
 shutdown. Kubelet's delayed sidecar SIGTERM does not communicate which writer
@@ -107,10 +121,12 @@ account, RBAC, or shared PID namespace is used.
 Use the shape in `test_check_fixture.py` for the sanitized observation summary.
 Populate it from the actual observers and retain the separate stop/EOF/ACK
 evidence, Pod metadata, negative-case observations and hashes. The sample data
-only tests validator behavior.
+only tests validator behavior. Supply an independent JSON array of marker IDs
+from the producer scenario, covering every expected marker. Preserve this
+inventory separately from telemetry collected by the browser and registry.
 
 ```sh
-python3 packaging/acceptance/check_fixture.py < observations.json
+python3 packaging/acceptance/check_fixture.py expected-markers.json < observations.json
 ```
 
 Report source checker results separately from OCI, actual kind, UI and ACA

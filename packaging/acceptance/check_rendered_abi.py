@@ -1,4 +1,6 @@
 """Check rendered fixture inputs against review pins, without starting a pod."""
+import hashlib
+import json
 import re
 
 
@@ -19,12 +21,21 @@ def by_name(rows):
 
 
 def check(manifests, *, collector_image, writer_image, origin, provider, ca_configmap,
+          writer_argv, supervisor_name, supervisor_sha256, location, grace_seconds,
           flush_seconds=20, spool_limit_bytes=134217728):
     """Return bounded assertion labels. Pins are trusted inputs from review."""
+    if (type(flush_seconds) is not int or not 1 <= flush_seconds <= 20
+            or type(spool_limit_bytes) is not int or not 1 <= spool_limit_bytes <= 512 * 1024**2
+            or type(grace_seconds) is not int or not 30 <= grace_seconds <= 300):
+        return ['invalid_reviewed_budgets']
     kinds = {row['kind']: row for row in manifests}
     if len(kinds) != len(manifests) or set(kinds) != {'ConfigMap', 'Deployment'}:
         return ['unexpected_fixture_resources']
     pod = kinds['Deployment']['spec']['template']['spec']
+    pod_fields = {'automountServiceAccountToken', 'securityContext',
+                  'terminationGracePeriodSeconds', 'initContainers', 'containers', 'volumes'}
+    if set(pod) - pod_fields - {'hostPID', 'hostIPC', 'hostNetwork', 'shareProcessNamespace'}:
+        return ['unreviewed_pod_fields']
     init = by_name(pod['initContainers'])
     writers = by_name(pod['containers'])
     if set(init) != {'collector'} or set(writers) != {'writer'}:
@@ -37,10 +48,48 @@ def check(manifests, *, collector_image, writer_image, origin, provider, ca_conf
             failures.add(name + '_image_pin')
     if (collector['command'] != [COLLECTOR] or collector['restartPolicy'] != 'Always'
             or pod.get('automountServiceAccountToken') is not False
-            or pod.get('shareProcessNamespace', False) is not False):
+            or any(pod.get(field, False) is not False for field in
+                   ('hostPID', 'hostIPC', 'hostNetwork', 'shareProcessNamespace'))):
         failures.add('collector_process_boundary')
-    if not writer.get('args') or writer.get('command') != ['python3', '/vitral-writer/supervisor.py']:
+    security = {'allowPrivilegeEscalation': False, 'runAsNonRoot': True,
+                'capabilities': {'drop': ['ALL']}}
+    pod_security = {'runAsUser': 10001, 'runAsGroup': 10001, 'fsGroup': 10001,
+                    'seccompProfile': {'type': 'RuntimeDefault'}}
+    container_fields = {'name', 'image', 'command', 'securityContext', 'volumeMounts',
+                        'imagePullPolicy'}
+    collector_security = security | {'readOnlyRootFilesystem': True}
+    if (set(collector) - container_fields - {'restartPolicy', 'env', 'resources'}
+            or set(writer) - container_fields - {'args'}
+            or any(json.dumps(item.get('securityContext'), sort_keys=True) !=
+                   json.dumps(expected_security, sort_keys=True)
+                   for item, expected_security in ((collector, collector_security),
+                                                   (writer, security)))
+            or pod.get('securityContext') != pod_security
+            or any(item.get('imagePullPolicy') != 'Never' for item in (collector, writer))):
+        failures.add('container_execution_boundary')
+    if (not isinstance(writer_argv, list) or len(writer_argv) < 3
+            or any(type(arg) is not str for arg in writer_argv)
+            or not re.fullmatch(r'0|[1-9][0-9]?|1[01][0-9]|120', writer_argv[0])
+            or writer_argv[1] != '--' or not writer_argv[2]
+            or writer.get('args') != writer_argv
+            or writer.get('command') != ['python3', '/vitral-writer/supervisor.py']):
         failures.add('writer_supervisor')
+    else:
+        grace = pod.get('terminationGracePeriodSeconds')
+        if (type(grace) is not int or grace < max(30, int(writer_argv[0]) + flush_seconds + 5)
+                or grace != grace_seconds):
+            failures.add('drain_grace')
+    if collector.get('resources') != {'requests': {'cpu': '50m', 'memory': '64Mi'},
+                                      'limits': {'memory': '256Mi'}}:
+        failures.add('collector_resources')
+    config = kinds['ConfigMap']
+    script = config.get('data', {}).get('supervisor.py')
+    if (config.get('metadata', {}).get('name') != supervisor_name
+            or config.get('immutable') is not True or 'binaryData' in config
+            or set(config.get('data', {})) != {'supervisor.py'}
+            or type(script) is not str
+            or hashlib.sha256(script.encode()).hexdigest() != supervisor_sha256):
+        failures.add('supervisor_configmap')
     mounts = by_name(collector['volumeMounts'])
     writer_mounts = by_name(writer['volumeMounts'])
     if (set(mounts) != {'transcript', 'collector-state', 'collector-trust'}
@@ -48,13 +97,23 @@ def check(manifests, *, collector_image, writer_image, origin, provider, ca_conf
                                              'readOnly': True}
             or mounts.get('collector-state') != {'name': 'collector-state',
                                                   'mountPath': '/collector-state'}
-            or set(writer_mounts) != {'transcript', 'writer-supervisor'}):
+            or writer_mounts != {'transcript': {'name': 'transcript', 'mountPath': '/transcripts'},
+                                 'writer-supervisor': {'name': 'writer-supervisor',
+                                                       'mountPath': '/vitral-writer',
+                                                       'readOnly': True}}):
         failures.add('fixture_mount_boundaries')
     volumes = by_name(pod['volumes'])
     if (set(volumes) != {'transcript', 'collector-state', 'collector-trust', 'writer-supervisor'}
-            or not all(set(volumes.get(name, {})) == {'name', 'emptyDir'}
-                       for name in ('transcript', 'collector-state'))):
+            or volumes.get('collector-state') != {'name': 'collector-state',
+                                                  'emptyDir': {'sizeLimit': '256Mi'}}
+            or volumes.get('transcript') != {'name': 'transcript',
+                                             'emptyDir': {'sizeLimit': '512Mi'}}):
         failures.add('fixture_volume_boundaries')
+    if volumes.get('writer-supervisor') != {
+        'name': 'writer-supervisor', 'configMap': {
+            'name': supervisor_name, 'items': [{'key': 'supervisor.py', 'path': 'supervisor.py'}]}
+    }:
+        failures.add('supervisor_volume')
     trust = volumes.get('collector-trust', {}).get('configMap', {})
     if (trust != {'name': ca_configmap, 'items': [{'key': 'ca.crt', 'path': 'ca.crt'}]}
             or mounts.get('collector-trust') != {'name': 'collector-trust',
@@ -71,20 +130,26 @@ def check(manifests, *, collector_image, writer_image, origin, provider, ca_conf
         'VITRAL_COLLECTOR_CLIENT_ID': 'vitral-workload-collector',
         'VITRAL_COLLECTOR_TRUST_CA': '/collector-trust/ca.crt',
     }
-    if any(value is None or env.get(name, {}).get('value') != value for name, value in expected.items()):
-        failures.add('collector_abi')
-    for name, budget in (('VITRAL_COLLECTOR_FLUSH_SECONDS', flush_seconds),
-                         ('VITRAL_COLLECTOR_SPOOL_LIMIT_BYTES', spool_limit_bytes)):
-        if env.get(name, {}).get('value') != str(budget):
+    expected.update({'VITRAL_LOCATION_' + name.upper(): location[name]
+                     for name in ('label', 'provider', 'cluster', 'workload')})
+    budgets = {'VITRAL_COLLECTOR_FLUSH_SECONDS': flush_seconds,
+               'VITRAL_COLLECTOR_SPOOL_LIMIT_BYTES': spool_limit_bytes}
+    for name, budget in budgets.items():
+        if env.get(name) != {'name': name, 'value': str(budget)}:
             failures.add('collector_budget_abi')
-    if env.get('VITRAL_LOCATION_REPLICA', {}).get('valueFrom') != {
-            'fieldRef': {'fieldPath': 'metadata.uid'}}:
+    fields = {'VITRAL_LOCATION_REPLICA': 'metadata.uid',
+              'VITRAL_LOCATION_NAMESPACE': 'metadata.namespace'}
+    if (set(env) != set(expected) | set(budgets) | set(fields)
+            or any(type(value) is not str or env.get(name) != {'name': name, 'value': value}
+                   for name, value in expected.items())):
+        failures.add('collector_abi')
+    if any(env.get(name) != {'name': name, 'valueFrom': {'fieldRef': {'fieldPath': path}}}
+           for name, path in fields.items()):
         failures.add('replica_provenance')
     return sorted(failures)
 
 
 if __name__ == '__main__':
-    import json
     from pathlib import Path
     import sys
 

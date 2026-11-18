@@ -2,13 +2,14 @@
 import json
 import sys
 
+from check_producer_stop import DRAIN_BUDGET_NS, healthy_observation
+
 
 ACK_BUDGET_NS = 3_000_000_000
 UI_BUDGET_NS = 2_000_000_000
-DRAIN_BUDGET_NS = 20_000_000_000
 
 
-def check(document):
+def check(document, expected_markers):
     """Return assertion names only, without transcript data or identity values."""
     failures = set()
     groups = {}
@@ -41,6 +42,11 @@ def check(document):
         native_sessions.setdefault(pair, {}).setdefault(replica, set()).add(row['opaque_session_id'])
         if row['view_only'] is not True:
             failures.add('view_only')
+    if (type(expected_markers) is not list or not expected_markers
+            or any(type(marker) is not str or not marker for marker in expected_markers)
+            or len(set(expected_markers)) != len(expected_markers)
+            or seen != set(expected_markers)):
+        failures.add('expected_marker_inventory')
     if len(groups) != 1 or not any(len(replicas) >= 2 for replicas in groups.values()):
         failures.add('replica_grouping')
     if not any(len(replicas) >= 2 for replicas in native_sessions.values()):
@@ -63,8 +69,7 @@ def check(document):
         if type(elapsed) is not int or not 0 <= elapsed <= DRAIN_BUDGET_NS:
             failures.add(case + '_drain_budget')
         if case == 'healthy':
-            if (row['outcome'] != 'complete' or row['all_final_bytes_acked'] is not True
-                    or row['all_final_view_acked'] is not True):
+            if not healthy_observation(row):
                 failures.add('healthy_drain_unconfirmed')
         else:
             byte_ack, view_ack = row['all_final_bytes_acked'], row['all_final_view_acked']
@@ -89,8 +94,9 @@ def check(document):
 
 if __name__ == '__main__':
     try:
-        failures = check(json.load(sys.stdin))
-    except (KeyError, TypeError, ValueError):
+        with open(sys.argv[1], encoding='utf-8') as inventory:
+            failures = check(json.load(sys.stdin), json.load(inventory))
+    except (IndexError, KeyError, OSError, TypeError, ValueError):
         failures = ['invalid_fixture_observations']
     print(json.dumps({'classification': 'fixture-observations', 'failures': failures}))
     raise SystemExit(bool(failures))
