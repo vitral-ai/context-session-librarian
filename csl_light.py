@@ -644,7 +644,7 @@ class Node:
                         hashlib.sha256(wire(payload).encode()).hexdigest() != rpc['hash'] or
                         payload.get('destination', peer) != origin):
                     raise ValueError('Original RPC binding differs from event path')
-            elif not self.is_router and origin != peer:
+            elif not self.is_router and self.config['links'][peer].get('trusted_router'):
                 raise RuntimeError('Waiting for original routed RPC provenance')
             if not confirmed:
                 reply = json.loads(rpc['result']) if rpc and rpc['state'] == 'done' and rpc['result'] else {}

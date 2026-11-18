@@ -197,6 +197,15 @@ class StreamTests(unittest.TestCase):
         self.assertEqual(result[0]['events'][0]['event']['id'], event['id'])
         self.assertEqual(json.loads(store.rows('SELECT result FROM operations')[0]['result'])['turn_id'], self.turn)
 
+    def test_missing_routed_provenance_defers_even_with_confirmed_operation(self):
+        store, request, event, _ = self.event_fixture(
+            node=self.guest, peer='hub', source='worker', target='coordinator')
+        store.operation(request['id'], 'delivered', {'turn_id': self.turn})
+        with patch.object(self.guest.native, 'inject') as inject:
+            with self.assertRaisesRegex(RuntimeError, 'routed RPC provenance'):
+                self.guest.dispatch_event('hub', {'type': 'event', 'event': event, 'origin': 'hub'})
+            inject.assert_not_called()
+
     def test_routed_origin_is_distinct_from_authenticated_hub(self):
         store, request, event, payload = self.event_fixture(
             node=self.guest, peer='hub', source='worker', target='coordinator')
