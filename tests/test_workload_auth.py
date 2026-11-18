@@ -72,7 +72,7 @@ class Issuer(WorkloadHTTP):
         form = dict(urllib.parse.parse_qsl(data.decode())) if data else {}
         path = urllib.parse.urlsplit(url).path
         self.calls.append((path, form))
-        if path.endswith('/.well-known/openid-configuration'): return discovery(self.origin.value)
+        if path == '/native-auth/v1/.well-known/oauth-authorization-server': return discovery(self.origin.value)
         if self.hook: self.hook(path, form)
         if path.endswith('/device_authorization'):
             self.effects.append(('authorization', copy.deepcopy(form)))
@@ -123,6 +123,23 @@ class WorkloadAuthTests(unittest.TestCase):
         client = self.client(); client.begin(); self.clock.advance(5)
         self.assertEqual(client.poll(), {'state': 'ready'})
         return client
+
+    def test_discovery_uses_existing_oauth_route_without_oidc_fallback(self):
+        self.client().begin()
+        self.assertEqual([path for path, _ in self.issuer.calls], [
+            '/native-auth/v1/.well-known/oauth-authorization-server',
+            '/native-auth/v1/device_authorization'])
+
+    def test_discovery_failure_does_not_retry_another_path_or_initialize_key(self):
+        def unavailable(url, *args, **kwargs):
+            self.assertEqual(url, ORIGIN+'/native-auth/v1/.well-known/oauth-authorization-server')
+            raise SyncError('registry_unavailable', status=404)
+        with patch.object(self.issuer, 'request', side_effect=unavailable) as request, \
+                patch.object(self.key, 'ensure') as initialize:
+            with self.assertRaises(SyncError): self.client().begin()
+        request.assert_called_once()
+        initialize.assert_not_called()
+        self.assertFalse((self.root/'auth/workload-auth.json').exists())
 
     def test_approval_waits_poll_interval_and_resumes_own_persisted_binding(self):
         client = self.client()

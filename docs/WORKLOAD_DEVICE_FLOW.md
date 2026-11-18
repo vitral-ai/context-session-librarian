@@ -38,7 +38,9 @@ There is no automatic state reset, key repair, reapproval or credential fallback
 
 ## Device Approval
 
-`begin(timeout=600)` checks fixed discovery, initializes only its own key and
+`begin(timeout=600)` checks the existing issuer's
+`/native-auth/v1/.well-known/oauth-authorization-server` discovery route
+(not an OIDC `openid-configuration` alias), initializes only its own key and
 persists `authorization_inflight` BEFORE the authorization POST. It requests
 only the frozen six-field workload metadata, fixed client and registry scopes.
 The response must echo identical metadata/digest, canonical device code/nonce,
@@ -106,6 +108,21 @@ failure, cancellation, concurrent initialization, suspend/reboot, revocation,
 private modes and special/hard-linked journal refusal. An owned loopback TLS
 fixture exercises the real transport and OpenSSL helper, including OAuth error
 parsing. It models the frozen server, not a real W7/Mongo approval or registry.
+
+For the separately installed backend test dependencies, the narrow counterpart
+probe imports the actual FastAPI router from an explicit checkout:
+
+```sh
+python scripts/check_workload_discovery_interop.py --backend /path/to/vitralai
+```
+
+At backend `5813078e12ae6d300827c3733a8561797a1f9684`, it proves the old OIDC
+path returns 404, the existing OAuth route's real metadata passes the client
+policy, and the client's authorization fields pass the server's metadata,
+scope, client and thumbprint codecs. Only signing-readiness is synthetic; the
+router and discovery payload are unchanged. It stops before sending device
+authorization. This ASGI probe is not TLS/ingress, real DB/device approval,
+refresh or end-to-end qualification, and is not part of CSL's stdlib CI suite.
 
 No real credential, Google login, provider invocation, native harness, live
 device approval/refresh, UI, image, cluster, cloud or spend is used. Actual
