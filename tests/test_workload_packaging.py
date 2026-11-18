@@ -3,6 +3,7 @@ import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
@@ -25,13 +26,14 @@ DIGEST = '1' * 64
 
 @unittest.skipUnless(HELM, 'Helm required for chart rendering')
 class WorkloadChartTests(unittest.TestCase):
-    def render(self, *, values_file=None, omit=(), string_settings=None, **settings):
+    def render(self, *, release='fixture', chart=CHART, values_file=None, omit=(),
+               string_settings=None, **settings):
         values = {'enabled': 'true', 'identity.origin': 'https://vitral.fixture.test',
                   'identity.caConfigMap': 'test-ca', 'transcripts.provider': 'codex',
                   'location.cluster': 'test:cluster', 'location.label': 'Fixture',
                   'location.workload': 'local/workload', 'collector.image': f'test/csl@sha256:{DIGEST}',
                   'writer.image': f'test/writer@sha256:{DIGEST}', 'writer.command': '{python3}'}
-        command = [HELM, 'template', 'fixture', str(CHART), '--kube-version', '1.35.0']
+        command = [HELM, 'template', release, str(chart), '--kube-version', '1.35.0']
         if values_file is not None:
             command.extend(('--values', str(values_file)))
         for name, value in (values | settings).items():
@@ -81,6 +83,29 @@ class WorkloadChartTests(unittest.TestCase):
         default = self.render()
         self.assertIn('args: ["15","--","python3"]', default.stdout)
         self.assertIn('terminationGracePeriodSeconds: 40', result.stdout)
+
+    def test_supervisor_name_is_release_scoped_and_content_versioned(self):
+        def supervisor_name(result):
+            self.assertEqual(result.returncode, 0, result.stderr)
+            match = re.search(r'^kind: ConfigMap\nmetadata:\n  name: ([^\n]+)$',
+                              result.stdout, re.MULTILINE)
+            self.assertIsNotNone(match)
+            name = match.group(1)
+            self.assertLessEqual(len(name), 63)
+            self.assertIn(f'configMap:\n            name: {name}\n', result.stdout)
+            return name
+
+        prefix = 'a' * 43
+        alpha = supervisor_name(self.render(release=prefix + '-alpha'))
+        self.assertEqual(supervisor_name(self.render(release=prefix + '-alpha')), alpha)
+        self.assertNotEqual(supervisor_name(self.render(release=prefix + '-beta')), alpha)
+        with tempfile.TemporaryDirectory() as scratch:
+            chart = Path(scratch) / 'chart'
+            shutil.copytree(CHART, chart)
+            with (chart / 'writer-supervisor.py').open('a') as stream:
+                stream.write('\n# different supervisor content\n')
+            self.assertNotEqual(supervisor_name(self.render(release=prefix + '-alpha', chart=chart)),
+                                alpha)
 
     def test_opt_in_gates_refuse_non_boolean_values_files_and_set_string(self):
         with tempfile.TemporaryDirectory() as scratch:

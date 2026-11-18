@@ -1,5 +1,6 @@
 {{- define "workload.supervisorName" -}}
-{{- printf "%s-writer-%s" ((include "workload.name" .) | trunc 43 | trimSuffix "-") (.Files.Get "writer-supervisor.py" | sha256sum | trunc 12) -}}
+{{- $identity := printf "%s:%s:%s" .Release.Namespace .Release.Name (.Files.Get "writer-supervisor.py") -}}
+{{- printf "%s-writer-%s" ((include "workload.name" .) | trunc 43 | trimSuffix "-") ($identity | sha256sum | trunc 12) -}}
 {{- end -}}
 
 {{- define "workload.name" -}}{{ printf "%s-collector" .Release.Name | trunc 63 | trimSuffix "-" }}{{- end -}}
