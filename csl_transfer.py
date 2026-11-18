@@ -507,7 +507,7 @@ def export_bundle(args, csl, *, quiet=False, scan_secrets=True, extra_metadata=N
     return destination.resolve()
 
 
-def inspect_bundle(archive):
+def inspect_bundle(archive, *, check=None):
     infos = archive.infolist()
     names = [i.filename for i in infos]
     if len(names) != len(set(names)):
@@ -517,7 +517,7 @@ def inspect_bundle(archive):
     manifest = json.loads(archive.read("manifest.json"))
     if isinstance(manifest, dict) and manifest.get('version') == 3:
         from csl_provider_bundle import validate
-        return validate(archive)
+        return validate(archive, check=check)
     if (not isinstance(manifest, dict) or manifest.get("format") != FORMAT
             or manifest.get("version") not in (VERSION, 2) or manifest.get("mode") not in ("raw", "portable")):
         raise TransferError("Unsupported CSL bundle format/version/mode")
@@ -564,6 +564,9 @@ def inspect_bundle(archive):
         raise TransferError("Unexpected ZIP members; only manifest and session JSONL are allowed")
     if any(stat.S_ISLNK(i.external_attr >> 16) or i.flag_bits & 1 for i in infos):
         raise TransferError("Symlink or encrypted ZIP members are not supported")
+    if check is not None:
+        from csl_provider_bundle import verify_members
+        verify_members(archive, entries, check=check)
     return manifest
 
 
