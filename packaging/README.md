@@ -7,6 +7,10 @@ callback are outside this packaging interface.
 
 ## Collector image interface
 
+The separate [image source recipe](collector-image/README.md) assembles the
+reviewed runner, helper and exact runtime inventory. Building it is distinct
+from publishing a digest, activating packaging or qualifying end-to-end use.
+
 The image provides `/usr/local/bin/csl-workload-collector` and runs as a
 non-root user. Kubernetes supplies the documented input environment in the
 chart. The executable validates the exact configured HTTPS origin throughout
