@@ -83,8 +83,11 @@ class UpstreamPreservation(unittest.TestCase):
             def run():
                 try:node.retry_loop()
                 except BaseException as error:errors.append(repr(error))
-            thread=threading.Thread(target=run,daemon=True);thread.start()
-            time.sleep(1.25);m.STOP.set();thread.join(2)
+            real_monotonic = time.monotonic
+            clock_start = real_monotonic()
+            with patch.object(m.time, 'monotonic', side_effect=lambda: 4000 + real_monotonic() - clock_start):
+                thread=threading.Thread(target=run,daemon=True);thread.start()
+                time.sleep(1.25);m.STOP.set();thread.join(2)
             try:
                 with node.journal.db() as db:
                     old_rows=db.execute('SELECT count(*) FROM rpc WHERE id=?',(old_id,)).fetchone()[0]
@@ -93,6 +96,38 @@ class UpstreamPreservation(unittest.TestCase):
                 print('UPSTREAM_PRESERVATION',json.dumps(observed),flush=True)
                 self.assertEqual(observed,{'local_out_state':'done','old_payload_rows':0,'old_tombstones':1,'link_started':True,'errors':[]})
             finally:node.pool.shutdown(wait=True);m.STOP.clear()
+
+    def test_actual_retry_loop_at_low_uptime_waits_for_original_prune_threshold(self):
+        with tempfile.TemporaryDirectory(prefix='csl-low-uptime-') as directory:
+            root = Path(directory)
+            cfg = {'node': 'hub', 'home': str(root / 'light'), 'bridges': {},
+                   'links': {}, 'retention_days': 1}
+            node = m.Node(cfg)
+            node.home.joinpath('config.json').write_text(encode(cfg))
+            self.addCleanup(node.pool.shutdown, True)
+            identifier = str(uuid.uuid4())
+            node.journal.put('out', 'remote', identifier, {'id': identifier})
+            node.journal.finish('out', 'remote', identifier, {'ok': True})
+            with node.journal.db() as db:
+                db.execute('UPDATE rpc SET updated=? WHERE id=?',
+                           (time.time() - 2 * 86400, identifier))
+            ticks = [100, 3600, 3601, 3602]
+            observations = []
+            def wait(seconds):
+                self.assertEqual(seconds, 1)
+                with node.journal.db() as db:
+                    rows = db.execute('SELECT count(*) FROM rpc WHERE id=?', (identifier,)).fetchone()[0]
+                    tombstones = db.execute('SELECT count(*) FROM tombstones WHERE id=?',
+                                            (identifier,)).fetchone()[0]
+                observations.append((ticks[len(observations)], rows, tombstones))
+            stop = SimpleNamespace(is_set=lambda: len(observations) == len(ticks), wait=wait)
+            with patch.object(m, 'STOP', stop), \
+                 patch.object(m.time, 'monotonic', side_effect=lambda: ticks[len(observations)]), \
+                 patch.object(node.journal, 'prune', wraps=node.journal.prune) as prune:
+                node.retry_loop()
+            self.assertEqual(observations, [(100, 1, 0), (3600, 1, 0),
+                                            (3601, 0, 1), (3602, 0, 1)])
+            prune.assert_called_once_with(1)
 
     def test_actual_retry_loop_collects_and_queues_synthetic_completion(self):
         m.STOP.clear()
