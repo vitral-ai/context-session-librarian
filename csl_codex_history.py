@@ -331,16 +331,26 @@ def validate_graph(entry):
     return graph
 
 
-def unpack(archive,entry,stage):
+def unpack(archive,entry,stage,*,check=None):
     graph=validate_graph(entry);root=Path(stage)/'source'
     files={f['file_key']:f for f in entry['files']};primary=None
     for row in graph['nodes']:
+        if check:check()
         path=root/'sessions'/row['file_name'];path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
         item=files[row['file_key']];digest=hashlib.sha256()
-        with archive.open(item['file']) as source,path.open('xb') as dest:
-            os.chmod(path,0o600)
-            for data in iter(lambda:source.read(1024*1024),b''):
-                digest.update(data);dest.write(data)
+        with archive.open(item['file']) as source:
+            if check:check()
+            with path.open('xb', buffering=0 if check else -1) as dest:
+                if check:check()
+                os.chmod(path,0o600)
+                for data in iter(lambda:source.read(1024*1024),b''):
+                    digest.update(data)
+                    view=memoryview(data)
+                    while view:
+                        if check:check()
+                        count=dest.write(view)
+                        if not count:raise HistoryError('history_base_short_write')
+                        view=view[count:]
         if digest.hexdigest()!=item['sha256']:raise HistoryError('native_checksum_mismatch')
         if row['file_key']=='main':primary=path
     nodes=lineage(root,primary)
@@ -348,13 +358,46 @@ def unpack(archive,entry,stage):
     return nodes
 
 
-def restore(nodes,cwd,new_thread_id,stage,target_home):
+def reserve_mapping(nodes):
+    """Pure complete mapping, persisted by an unwired caller before publication."""
+    root = str(uuid.uuid4())
+    rollouts = {nodes[-1].rollout_id: root}
+    owners = {nodes[-1].owner: root}
+    for node in nodes[:-1]:
+        rollouts[node.rollout_id] = str(uuid.uuid4())
+        owners.setdefault(node.owner, rollouts[node.rollout_id])
+    return {'rollouts': rollouts, 'owners': owners}
+
+
+def _mapping(nodes, value, new_thread_id):
+    if not isinstance(value, dict) or set(value) != {'rollouts', 'owners'}:
+        raise HistoryError('invalid_reserved_mapping')
+    rollouts, owners = value['rollouts'], value['owners']
+    if not isinstance(rollouts, dict) or not isinstance(owners, dict) or set(rollouts) != {n.rollout_id for n in nodes} or set(owners) != {n.owner for n in nodes}:
+        raise HistoryError('incomplete_reserved_mapping')
+    if any(not isinstance(v, str) or _uuid(v) != v for v in (*rollouts.values(), *owners.values())) or len(set(rollouts.values())) != len(rollouts):
+        raise HistoryError('invalid_reserved_mapping')
+    if (set(rollouts.values()) | set(owners.values())) & ({n.owner for n in nodes} | {n.rollout_id for n in nodes}):
+        raise HistoryError('reserved_mapping_reuses_source')
+    if len(set(owners.values())) != len(owners) or rollouts[nodes[-1].rollout_id] != new_thread_id or owners[nodes[-1].owner] != new_thread_id or any(v not in rollouts.values() for v in owners.values()):
+        raise HistoryError('invalid_reserved_mapping_root')
+    for owner in owners:
+        expected = new_thread_id if owner == nodes[-1].owner else next(rollouts[n.rollout_id] for n in nodes if n.owner == owner)
+        if owners[owner] != expected:
+            raise HistoryError('reserved_mapping_owner_mismatch')
+    return dict(rollouts), dict(owners)
+
+
+def restore(nodes,cwd,new_thread_id,stage,target_home,*,mapping=None):
     """Rewrite identity/coordinates, never remove the native lineage reference."""
-    owners={nodes[-1].owner:new_thread_id}
-    rollouts={nodes[-1].rollout_id:new_thread_id}
-    for n in nodes[:-1]:
-        rollouts[n.rollout_id]=str(uuid.uuid4())
-        owners.setdefault(n.owner,rollouts[n.rollout_id])
+    if mapping is None:
+        owners={nodes[-1].owner:new_thread_id}
+        rollouts={nodes[-1].rollout_id:new_thread_id}
+        for n in nodes[:-1]:
+            rollouts[n.rollout_id]=str(uuid.uuid4())
+            owners.setdefault(n.owner,rollouts[n.rollout_id])
+    else:
+        rollouts, owners = _mapping(nodes, mapping, new_thread_id)
     lengths={};plans=[]
     for n in nodes:
         base=reference(n.meta.get('history_base'))

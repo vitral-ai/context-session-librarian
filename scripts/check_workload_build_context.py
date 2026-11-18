@@ -6,6 +6,7 @@ probes export one sentinel locally, not an OCI image. Build caches are not prune
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
@@ -38,10 +39,15 @@ def verify_result(result, candidate, allowed, output, expected):
             raise RuntimeError('allowed context control failed: '+candidate)
     else:
         diagnostic = result.stdout.decode('utf-8', errors='replace')
-        # An unavailable daemon, timeout or unrelated build failure is not a
-        # policy refusal. Positive controls must also have succeeded first.
-        if (not result.returncode or output.exists() or candidate not in diagnostic
-                or not any(text in diagnostic for text in ('not found', 'excluded by .dockerignore'))):
+        terminal = diagnostic.splitlines()[-1] if diagnostic.splitlines() else ''
+        # Plain BuildKit output echoes COPY arguments too. Their presence and an
+        # unrelated "not found" are not source exclusion. Unknown diagnostics
+        # fail closed; this probe deliberately does not recognize legacy output.
+        missing_source = re.fullmatch(
+            r'ERROR: (?:failed to build: )?failed to solve: failed to compute cache key: '
+            r'failed to calculate checksum of ref [^\r\n]+: '
+            +re.escape(json.dumps('/'+candidate))+r': not found', terminal)
+        if (result.returncode != 1 or output.exists() or output.is_symlink() or not missing_source):
             raise RuntimeError('missing context exclusion: '+candidate)
 
 

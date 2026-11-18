@@ -29,6 +29,9 @@ An internal [sanitized workload provider foundation](WORKLOAD_PROVIDERS.md)
 adds pinned Gemini and separate [Codex/Claude text profiles](WORKLOAD_TEXT_PROFILES.md)
 for integration tests only. It activates no public command and does not change
 the desktop matrix below.
+An unwired [execution-import foundation](EXECUTION_IMPORT_FOUNDATION.md) provides
+closed metadata, sealed input capture and reserved-ID lookup for source tests.
+It adds no command, import publication, native caller or model/recall capability.
 Codex 0.169.0 external `history_base` chains are included in raw v3 snapshots and
 single-session `export --raw`. Portable/batch export of referenced histories
 rejects rather than omitting ancestors. Native `thread/read` requires rebuilt
