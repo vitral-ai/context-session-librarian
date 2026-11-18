@@ -724,14 +724,23 @@ class Node:
                 cursor = db.execute('SELECT seq FROM event_cursors WHERE home=?',(home,)).fetchone()
             after = cursor[0] if cursor else 0
             with sql(Path(home)/'bridge.sqlite') as db:
-                rows = db.execute('SELECT seq,body FROM outbound WHERE seq>? ORDER BY seq LIMIT 100',(after,)).fetchall()
-            for seq,body in rows:
+                rows = db.execute('SELECT seq,peer,body FROM outbound WHERE seq>? ORDER BY seq LIMIT 100',(after,)).fetchall()
+            blocked = False
+            for seq,event_peer,body in rows:
                 event = json.loads(body)
                 with self.journal.db() as db:
                     candidates = db.execute("SELECT * FROM rpc WHERE direction='in' AND id=? AND state='done'", (event['task_id'],)).fetchall()
+                    light_seen = db.execute("SELECT 1 FROM rpc WHERE direction='in' AND id=? UNION ALL SELECT 1 FROM tombstones WHERE direction='in' AND id=? LIMIT 1", (event['task_id'], event['task_id'])).fetchone()
                 with sql(Path(home)/'bridge.sqlite') as db:
                     db.row_factory = sqlite3.Row
                     operation = db.execute('SELECT * FROM operations WHERE id=?', (event['task_id'],)).fetchone()
+                    configured = db.execute('SELECT config FROM peers WHERE name=?', (event_peer,)).fetchone()
+                try:
+                    transport = json.loads(configured[0]) if configured else {}
+                except (ValueError, TypeError):
+                    transport = {}
+                fallback = (not light_seen and operation and operation['peer'] == event_peer and
+                            isinstance(transport, dict) and transport.get('transport') in ('ssh', 'operator', 'lab'))
                 originals = []
                 for candidate in candidates:
                     payload = json.loads(candidate['payload'])
@@ -751,14 +760,19 @@ class Node:
                                 originals.append(candidate)
                         except __import__('csl_bridge_store').BridgeError:
                             continue
-                if len(originals) != 1:
-                    break  # Publication waits for exact independent original provenance.
-                peer = originals[0]['peer']
-                existing = self.journal.get('out',peer,event['id'])
-                frame = json.loads(existing['payload'])if existing else {'type':'event','id':event['id'],'event':event,'origin':self.config['node'],'source_session':self.agents().get(event['source'])}
-                self.journal.put('out',peer,event['id'],frame)
-                with self.journal.db() as db:
-                    db.execute('INSERT INTO event_cursors VALUES(?,?) ON CONFLICT(home)DO UPDATE SET seq=excluded.seq',(home,seq))
+                if len(originals) == 1:
+                    peer = originals[0]['peer']
+                    existing = self.journal.get('out',peer,event['id'])
+                    frame = json.loads(existing['payload'])if existing else {'type':'event','id':event['id'],'event':event,'origin':self.config['node'],'source_session':self.agents().get(event['source'])}
+                    self.journal.put('out',peer,event['id'],frame)
+                elif not fallback:
+                    # Keep the contiguous cursor before a genuine light/unknown gap.
+                    # Later confirmed rows can still enter the idempotent journal
+                    # in this bounded batch without consuming that missing event.
+                    blocked = True
+                if not blocked:
+                    with self.journal.db() as db:
+                        db.execute('INSERT INTO event_cursors VALUES(?,?) ON CONFLICT(home)DO UPDATE SET seq=excluded.seq',(home,seq))
 
     def deliver(self, peer, identifier):
         try:

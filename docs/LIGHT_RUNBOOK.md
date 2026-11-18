@@ -109,3 +109,9 @@ same recipient's `wait` cursor until proof arrives; the bounded wait can return
 empty. Recording a valid original receipt wakes blocked waiters. Repeating an old
 `wait --after` deliberately rereads existing confirmed events. This correlation
 check does not implement canonical-final deduplication or exactly-once effects.
+
+Mixed transport homes: established fallback rows are left to their configured
+fallback transport. A missing light RPC alone never proves a row is fallback;
+unknown paths and retained light traces keep the light publication cursor before
+the gap. Confirmed later rows in the existing 100-row batch may still queue through
+the idempotent light journal, without consuming that deferred row.

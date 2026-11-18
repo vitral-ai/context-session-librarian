@@ -248,6 +248,95 @@ class StreamTests(unittest.TestCase):
         self.assertIsNotNone(self.guest.journal.get('out', 'hub', eventid))
         self.assertEqual(json.loads(self.guest.journal.get('out', 'hub', eventid)['payload'])['origin'], 'env-a')
 
+    def queue_fixture(self, store, peer, kind, *, incoming=False, accepted=True):
+        from csl_bridge_engine import publish_task_completion
+        thread = self.guest.agents()['worker']
+        request = {'version': 1, 'op': 'followup', 'id': str(uuid.uuid4()),
+                   'source': 'coordinator', 'target': 'worker', 'text': 'Synthetic ' + peer}
+        turn = str(uuid.uuid4())
+        receipt = {'state': 'delivered', 'request_id': request['id'], 'turn_id': turn, 'thread_id': thread}
+        store.reserve(peer, request)
+        store.operation(request['id'], 'delivered' if accepted else 'uncertain', receipt if accepted else {})
+        if incoming:
+            self.guest.journal.put('in', 'hub', request['id'], {'type': 'request',
+                'id': request['id'], 'request': request, 'origin': peer})
+            self.guest.journal.finish('in', 'hub', request['id'], {'ok': True, 'data': receipt} if accepted else {'ok': True, 'data': {'state': 'queued'}})
+        if kind == 'final':
+            with store.transaction() as db:
+                db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?)',
+                           (request['id'], peer, 'coordinator', 'worker', turn, 'running'))
+            publish_task_completion(store, 'worker', thread, turn, 'completed', 'Synthetic final')
+        else:
+            store.publish(peer, {'task_id': request['id'], 'source': 'worker', 'target': 'coordinator',
+                'turn_id': turn, 'kind': 'progress', 'status': 'progress', 'text': 'Synthetic progress'}, str(uuid.uuid4()))
+        row = store.rows('SELECT seq,id FROM outbound WHERE peer=? ORDER BY seq DESC LIMIT 1', (peer,))[0]
+        return request, receipt, row
+
+    def test_retained_fallback_progress_and_final_do_not_hold_later_light(self):
+        for transport in ('ssh', 'operator', 'lab'):
+            for kind in ('progress', 'final'):
+                with self.subTest(transport=transport, kind=kind):
+                    home, _ = self.guest.agent('worker')
+                    with contextlib.closing(Store(home)) as store:
+                        peer = 'legacy-' + transport + '-' + kind
+                        with store.transaction() as db:
+                            db.execute('INSERT INTO peers VALUES(?,?)', (peer, encode({'transport': transport})))
+                        _, _, fallback = self.queue_fixture(store, peer, kind)
+                        _, _, later = self.queue_fixture(store, 'hub', kind, incoming=True)
+                        self.guest.queue_events()
+                        self.assertIsNone(self.guest.journal.get('out', 'hub', fallback['id']))
+                        self.assertIsNotNone(self.guest.journal.get('out', 'hub', later['id']))
+                        with self.guest.journal.db() as db:
+                            self.assertEqual(db.execute('SELECT seq FROM event_cursors WHERE home=?',
+                                (home,)).fetchone()[0], later['seq'])
+
+    def test_missing_light_proof_keeps_cursor_but_other_confirmed_peer_can_queue(self):
+        home, _ = self.guest.agent('worker')
+        with contextlib.closing(Store(home)) as store:
+            for kind in ('progress', 'final'):
+                peer = 'deferred-' + kind
+                with store.transaction() as db:
+                    db.execute('INSERT INTO peers VALUES(?,?)', (peer, encode({'transport': 'light'})))
+                request, receipt, early = self.queue_fixture(store, peer, kind, accepted=False)
+                _, _, later = self.queue_fixture(store, 'hub', kind, incoming=True)
+                self.guest.queue_events()
+                self.assertIsNone(self.guest.journal.get('out', 'hub', early['id']))
+                self.assertIsNotNone(self.guest.journal.get('out', 'hub', later['id']))
+                with self.guest.journal.db() as db:
+                    cursor = db.execute('SELECT seq FROM event_cursors WHERE home=?', (home,)).fetchone()
+                    self.assertLess(cursor[0] if cursor else 0, early['seq'])
+                # Same row/ID becomes publishable when independent original proof
+                # arrives; no deletion, original-work resend or skipped gap.
+                store.operation(request['id'], 'delivered', receipt)
+                self.guest.journal.put('in', 'hub', request['id'], {'type': 'request',
+                    'id': request['id'], 'request': request, 'origin': peer})
+                self.guest.journal.finish('in', 'hub', request['id'], {'ok': True, 'data': receipt})
+                self.guest.queue_events()
+                self.assertIsNotNone(self.guest.journal.get('out', 'hub', early['id']))
+                with self.guest.journal.db() as db:
+                    self.assertEqual(db.execute('SELECT seq FROM event_cursors WHERE home=?',
+                        (home,)).fetchone()[0], later['seq'])
+
+    def test_unknown_history_or_retained_light_trace_is_not_assumed_fallback(self):
+        home, _ = self.guest.agent('worker')
+        with contextlib.closing(Store(home)) as store:
+            with store.transaction() as db:
+                db.execute('INSERT INTO peers VALUES(?,?)', ('former-light', encode({'transport': 'ssh'})))
+            _, _, unknown = self.queue_fixture(store, 'unconfigured-old-peer', 'final')
+            request, _, old_light = self.queue_fixture(store, 'former-light', 'progress', incoming=True, accepted=False)
+            # Even a compacted transport trace prevents fallback classification.
+            self.guest.journal.finish('in', 'hub', request['id'], {'ok': False})
+            with self.guest.journal.db() as db:
+                db.execute('UPDATE rpc SET updated=0 WHERE id=?', (request['id'],))
+            self.guest.journal.prune()
+            _, _, later = self.queue_fixture(store, 'hub', 'final', incoming=True)
+            self.guest.queue_events()
+            self.assertIsNone(self.guest.journal.get('out', 'hub', unknown['id']))
+            self.assertIsNone(self.guest.journal.get('out', 'hub', old_light['id']))
+            self.assertIsNotNone(self.guest.journal.get('out', 'hub', later['id']))
+            with self.guest.journal.db() as db:
+                self.assertEqual(db.execute('SELECT * FROM event_cursors').fetchall(), [])
+
     def test_native_completion_is_recovered_after_receiver_restart(self):
         self.connect()
         identifier = str(uuid.uuid4())
