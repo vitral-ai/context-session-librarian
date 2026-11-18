@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "enabled": {"type": "boolean"},
+    "mode": {"enum": ["sidecar", "daemonSet"]},
+    "collector": {
+      "type": "object",
+      "properties": {
+        "image": {"type": "string"},
+        "uid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+        "stateLimit": {"type": "string", "minLength": 1},
+        "spoolLimitBytes": {"type": "integer", "minimum": 1, "maximum": 536870912},
+        "flushSeconds": {"type": "integer", "minimum": 1, "maximum": 20}
+      }
+    },
+    "transcripts": {
+      "type": "object",
+      "properties": {
+        "provider": {"type": "string"},
+        "sizeLimit": {"type": "string", "minLength": 1}
+      }
+    },
+    "identity": {
+      "type": "object",
+      "properties": {
+        "origin": {"type": "string"},
+        "caConfigMap": {"type": "string"}
+      }
+    },
+    "location": {
+      "type": "object",
+      "properties": {
+        "provider": {"type": "string"},
+        "label": {"type": "string"},
+        "cluster": {"type": "string"},
+        "workload": {"type": "string"}
+      }
+    },
+    "writer": {
+      "type": "object",
+      "properties": {
+        "image": {"type": "string"},
+        "command": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "args": {"type": "array", "items": {"type": "string"}},
+        "shutdownSeconds": {"type": "integer", "minimum": 0, "maximum": 120}
+      }
+    },
+    "terminationGracePeriodSeconds": {"type": "integer", "minimum": 30, "maximum": 300},
+    "daemonSet": {
+      "type": "object",
+      "properties": {
+        "narrowSameOwnerExport": {"type": "boolean"},
+        "existingClaim": {"type": "string"}
+      }
+    }
+  }
+}

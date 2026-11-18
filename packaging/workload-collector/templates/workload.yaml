@@ -1,3 +1,9 @@
+{{- if not (kindIs "bool" .Values.enabled) }}
+{{- fail "enabled must be a boolean" }}
+{{- end }}
+{{- if not (kindIs "bool" .Values.daemonSet.narrowSameOwnerExport) }}
+{{- fail "daemonSet.narrowSameOwnerExport must be a boolean" }}
+{{- end }}
 {{- if .Values.enabled }}
 {{- include "workload.validate" . }}
 {{- if and (eq .Values.mode "daemonSet") (not (and .Values.daemonSet.narrowSameOwnerExport .Values.daemonSet.existingClaim)) }}
@@ -30,8 +36,9 @@ spec:
       containers:
         - name: writer
           image: {{ include "workload.image" .Values.writer.image }}
-          command: {{ required "an explicit writer command is required" .Values.writer.command | toJson }}
-          args: {{ .Values.writer.args | toJson }}
+          command: ["python3", "/vitral-writer/supervisor.py"]
+          {{- $writer := required "an explicit writer command is required" .Values.writer.command }}
+          args: {{ concat (list (.Values.writer.shutdownSeconds | toString) "--") $writer .Values.writer.args | toJson }}
           securityContext:
             allowPrivilegeEscalation: false
             runAsNonRoot: true
@@ -40,11 +47,22 @@ spec:
           volumeMounts:
             - name: transcript
               mountPath: /transcripts
+            - name: writer-supervisor
+              mountPath: /vitral-writer
+              readOnly: true
 {{- else }}
       containers:
         - {{ include "workload.collector" . | nindent 10 | trim }}
 {{- end }}
       volumes:
+{{- if eq .Values.mode "sidecar" }}
+        - name: writer-supervisor
+          configMap:
+            name: {{ include "workload.supervisorName" . }}
+            items:
+              - key: supervisor.py
+                path: supervisor.py
+{{- end }}
         - name: collector-state
           emptyDir:
             sizeLimit: {{ .Values.collector.stateLimit | quote }}

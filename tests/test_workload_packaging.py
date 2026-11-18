@@ -5,9 +5,12 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import ssl
 import subprocess
+import sys
 import tempfile
+import time
 import threading
 import unittest
 from urllib.error import HTTPError, URLError
@@ -22,15 +25,20 @@ DIGEST = '1' * 64
 
 @unittest.skipUnless(HELM, 'Helm required for chart rendering')
 class WorkloadChartTests(unittest.TestCase):
-    def render(self, **settings):
+    def render(self, *, values_file=None, omit=(), string_settings=None, **settings):
         values = {'enabled': 'true', 'identity.origin': 'https://vitral.fixture.test',
                   'identity.caConfigMap': 'test-ca', 'transcripts.provider': 'codex',
                   'location.cluster': 'test:cluster', 'location.label': 'Fixture',
                   'location.workload': 'local/workload', 'collector.image': f'test/csl@sha256:{DIGEST}',
                   'writer.image': f'test/writer@sha256:{DIGEST}', 'writer.command': '{python3}'}
         command = [HELM, 'template', 'fixture', str(CHART), '--kube-version', '1.35.0']
+        if values_file is not None:
+            command.extend(('--values', str(values_file)))
         for name, value in (values | settings).items():
-            command.extend(('--set', f'{name}={value}'))
+            if name not in omit:
+                command.extend(('--set', f'{name}={value}'))
+        for name, value in (string_settings or {}).items():
+            command.extend(('--set-string', f'{name}={value}'))
         return subprocess.run(command, capture_output=True, text=True, timeout=10)
 
     def test_default_opt_out_renders_nothing(self):
@@ -64,6 +72,39 @@ class WorkloadChartTests(unittest.TestCase):
             with self.subTest(values=values):
                 self.assertNotEqual(self.render(**values).returncode, 0)
 
+    def test_writer_budget_is_passed_to_mounted_supervisor(self):
+        result = self.render(**{'writer.shutdownSeconds': '0'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('command: ["python3", "/vitral-writer/supervisor.py"]', result.stdout)
+        self.assertIn('args: ["0","--","python3"]', result.stdout)
+        self.assertIn('mountPath: /vitral-writer\n              readOnly: true', result.stdout)
+        default = self.render()
+        self.assertIn('args: ["15","--","python3"]', default.stdout)
+        self.assertIn('terminationGracePeriodSeconds: 40', result.stdout)
+
+    def test_opt_in_gates_refuse_non_boolean_values_files_and_set_string(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            values = Path(scratch) / 'values.json'
+            for wrong in ('false', 'true', '0', 0, 1, [], {}):
+                for gate in ('enabled', 'daemonSet'):
+                    with self.subTest(gate=gate, wrong=wrong):
+                        entry = ({'enabled': wrong} if gate == 'enabled' else
+                                 {'daemonSet': {'narrowSameOwnerExport': wrong,
+                                                'existingClaim': 'unattested'}})
+                        values.write_text(json.dumps(entry))
+                        mode = 'sidecar' if gate == 'enabled' else 'daemonSet'
+                        output = self.render(values_file=values, omit=('enabled',) if gate == 'enabled' else (),
+                                             mode=mode)
+                        self.assertNotEqual(output.returncode, 0, output.stdout)
+            for wrong in ('false', 'true', '0'):
+                with self.subTest(wrong=wrong):
+                    self.assertNotEqual(self.render(string_settings={'enabled': wrong}).returncode, 0)
+                    self.assertNotEqual(self.render(mode='daemonSet', string_settings={
+                        'daemonSet.narrowSameOwnerExport': wrong,
+                        'daemonSet.existingClaim': 'unattested'}).returncode, 0)
+            values.write_text('{"enabled":true,"collector":{"flushSeconds":"20"}}')
+            self.assertNotEqual(self.render(values_file=values).returncode, 0)
+
     def test_daemonset_uses_only_explicit_readonly_claim_and_private_state(self):
         result = self.render(mode='daemonSet', **{'daemonSet.narrowSameOwnerExport': 'true',
                                                 'daemonSet.existingClaim': 'approved-transcripts'})
@@ -73,6 +114,53 @@ class WorkloadChartTests(unittest.TestCase):
         self.assertIn('name: collector-state\n          emptyDir:', result.stdout)
         self.assertNotIn('hostPath:', result.stdout)
         self.assertNotIn('name: writer', result.stdout)
+
+
+@unittest.skipUnless(hasattr(time, 'CLOCK_BOOTTIME'), 'Linux writer supervisor')
+class WriterSupervisorTests(unittest.TestCase):
+    supervisor = CHART / 'writer-supervisor.py'
+
+    def test_writer_exit_status_is_preserved(self):
+        result = subprocess.run([sys.executable, self.supervisor, '1', '--',
+                                 sys.executable, '-c', 'raise SystemExit(7)'], timeout=5)
+        self.assertEqual(result.returncode, 7)
+
+    def test_term_ignoring_writer_leaves_drain_window_and_unacked_fixture_is_pending(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            completed = Path(scratch) / 'completed.jsonl'
+            writer = (
+                'import os, signal, sys, time; from pathlib import Path; '
+                'signal.signal(signal.SIGTERM, signal.SIG_IGN); '
+                'Path(sys.argv[1]).write_text(str(os.getpid()) + "\\n"); time.sleep(60)'
+            )
+            process = subprocess.Popen([sys.executable, self.supervisor, '1', '--',
+                                        sys.executable, '-c', writer, str(completed)])
+            try:
+                ready_deadline = time.monotonic() + 5
+                while not completed.exists() and time.monotonic() < ready_deadline:
+                    time.sleep(0.02)
+                self.assertTrue(completed.exists())
+                started = time.clock_gettime(time.CLOCK_BOOTTIME)
+                process.send_signal(signal.SIGTERM)
+                self.assertEqual(process.wait(timeout=4), 137)
+                remaining = 30 - (time.clock_gettime(time.CLOCK_BOOTTIME) - started)
+                self.assertGreaterEqual(remaining, 20)
+
+                # Stand-in for the sidecar receipt gate. No ACK arrives
+                # within the fixture deadline, so it cannot claim completion.
+                ack = threading.Event()
+                outcome = 'complete' if ack.wait(timeout=0.05) else 'pending'
+                self.assertEqual(outcome, 'pending')
+                self.assertTrue(completed.read_bytes().endswith(b'\n'))
+            finally:
+                if process.poll() is None:
+                    if completed.exists():
+                        try:
+                            os.killpg(int(completed.read_text()), signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    process.kill()
+                    process.wait(timeout=5)
 
 
 class NoRedirect(HTTPRedirectHandler):

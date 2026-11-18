@@ -32,10 +32,13 @@ unsupported formats or endpoint changes instead of falling back to raw sync.
 
 The opt-in chart provides a native restartable init sidecar and a writer that
 shares a transcript-only pod volume. The sidecar has a read-only mount and the
-writer has no collector-state mount. The sidecar stays up while the writer
-stops. Its own flush is at most 20 seconds. Pod grace is at least 30 seconds and
-includes the writer's configured shutdown budget and overhead. The chart
-defaults are fixture budgets pending runtime measurements.
+writer has no collector-state mount. The digest-pinned Linux writer image supplies Python 3 with CLOCK_BOOTTIME.
+The mounted supervisor runs the writer in its own process group and forwards
+TERM. It terminates a group that exceeds `writer.shutdownSeconds` so the
+kubelet can stop the sidecar within the remaining pod grace. The sidecar's
+own flush is at most 20 seconds. Pod grace is at least 30 seconds and includes
+the writer's shutdown budget and overhead. Kubernetes termination ordering
+and the end-to-end ACK result still require an in-pod run.
 
 The DaemonSet is disabled by default. An operator must supply an existing
 same-owner transcript-only PVC and explicitly attest the narrow export scope.

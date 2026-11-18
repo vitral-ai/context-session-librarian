@@ -1,3 +1,7 @@
+{{- define "workload.supervisorName" -}}
+{{- printf "%s-writer-%s" ((include "workload.name" .) | trunc 43 | trimSuffix "-") (.Files.Get "writer-supervisor.py" | sha256sum | trunc 12) -}}
+{{- end -}}
+
 {{- define "workload.name" -}}{{ printf "%s-collector" .Release.Name | trunc 63 | trimSuffix "-" }}{{- end -}}
 
 {{- define "workload.image" -}}
