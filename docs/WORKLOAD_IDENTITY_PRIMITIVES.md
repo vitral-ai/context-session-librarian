@@ -107,3 +107,7 @@ Subsequent work supplies person-approved device polling, echoed-metadata checks,
 immutable account/device binding, refresh rotation/uncertainty journal, revocation
 handling and the opt-in workload runner. This PR makes no 20-second final-flush,
 five-second visibility, workload-image or live account qualification claim.
+
+The separate internal [device/refresh journal](WORKLOAD_DEVICE_FLOW.md) now
+implements those client state transitions with synthetic fixtures. It still
+does not activate enrollment, a runtime image, uploading or final drain.

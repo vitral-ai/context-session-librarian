@@ -5,7 +5,7 @@ import ssl
 import urllib.parse
 import urllib.request
 
-from csl_sync_http import HTTP, NoRedirect
+from csl_sync_http import ERROR_CODES, HTTP, NoRedirect
 from csl_sync_state import SyncError
 
 
@@ -79,6 +79,9 @@ class Origin:
 
 
 class WorkloadHTTP(HTTP):
+    error_codes = ERROR_CODES | {'authorization_pending', 'slow_down', 'expired_token',
+        'access_denied', 'temporarily_unavailable', 'invalid_request', 'invalid_client', 'unauthorized_client'}
+
     def __init__(self, origin, *, ca_file=None, **options):
         self.origin = Origin(origin)
         super().__init__(**options)
