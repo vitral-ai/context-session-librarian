@@ -84,9 +84,160 @@ class StreamTests(unittest.TestCase):
     def test_event_with_wrong_turn_is_refused_without_stalling_next_event(self):
         self.connect();i=str(uuid.uuid4());r={'version':1,'op':'followup','id':i,'source':'coordinator','target':'worker','text':'synthetic'};self.host.exchange('env-a',r,'hub',timeout=3)
         event={'id':str(uuid.uuid4()),'task_id':i,'source':'worker','target':'coordinator','kind':'final','text':'wrong turn','turn_id':str(uuid.uuid4()),'status':'completed'}
-        with self.assertRaisesRegex(ValueError,'turn differs'):self.host.dispatch_event('env-a',{'type':'event','id':event['id'],'event':event})
+        with self.assertRaisesRegex(ValueError,'turn does not match'):self.host.dispatch_event('env-a',{'type':'event','id':event['id'],'event':event})
         event.update(id=str(uuid.uuid4()),turn_id=self.turn,text='right turn')
         self.assertEqual(self.host.dispatch_event('env-a',{'type':'event','id':event['id'],'event':event})['state'],'delivered')
+
+    def test_event_waits_without_turn_then_uses_original_journal_receipt(self):
+        identifier = str(uuid.uuid4())
+        request = {'version': 1, 'op': 'followup', 'id': identifier,
+                   'source': 'coordinator', 'target': 'worker', 'text': 'Synthetic original task'}
+        home = self.host.config['bridges']['hub']['home']
+        store = Store(home)
+        self.addCleanup(store.close)
+        store.reserve('outbound:env-a', request)
+        store.operation(identifier, 'uncertain', {'state': 'uncertain'})
+        injections = []
+        self.host.native.inject = lambda *args: injections.append(args) or {'state': 'delivered'}
+        event = {'id': str(uuid.uuid4()), 'task_id': identifier, 'source': 'worker',
+                 'target': 'coordinator', 'kind': 'final', 'text': 'Synthetic final',
+                 'turn_id': self.turn, 'status': 'completed'}
+        frame = {'type': 'event', 'id': event['id'], 'event': event}
+        with self.assertRaisesRegex(RuntimeError, 'native acceptance receipt'):
+            self.host.dispatch_event('env-a', frame)
+        self.assertEqual(injections, [])
+        self.assertEqual(store.rows('SELECT * FROM inbound'), [])
+        self.host.journal.put('out', 'env-a', identifier,
+                              {'id': identifier, 'type': 'request', 'request': request})
+        self.host.journal.finish('out', 'env-a', identifier, {'ok': True, 'data': {
+            'state': 'delivered', 'request_id': identifier, 'turn_id': self.turn}})
+        result = self.host.dispatch_event('env-a', frame)
+        self.assertEqual(result['state'], 'delivered')
+        self.assertEqual(len(injections), 1)
+        self.assertEqual(store.rows('SELECT delivery FROM inbound')[0]['delivery'], 'delivered')
+
+    def event_fixture(self, node=None, peer='env-a', source='coordinator', target='worker'):
+        node = node or self.host
+        home, _ = node.agent(source)
+        store = Store(home)
+        self.addCleanup(store.close)
+        request = {'version': 1, 'op': 'followup', 'id': str(uuid.uuid4()),
+                   'source': source, 'target': target, 'text': 'Synthetic original'}
+        store.reserve('outbound:' + peer, request)
+        event = {'id': str(uuid.uuid4()), 'task_id': request['id'], 'source': target,
+                 'target': source, 'kind': 'final', 'text': 'Synthetic final',
+                 'turn_id': self.turn, 'status': 'completed'}
+        payload = {'id': request['id'], 'type': 'request', 'request': request,
+                   'destination': peer, 'origin': node.config['node']}
+        return store, request, event, payload
+
+    def test_exact_rpc_recovery_refuses_wrong_peer_body_and_unaccepted_results(self):
+        for fault in ('peer', 'body', 'failed', 'client-only', 'request-id', 'hash', 'destination'):
+            with self.subTest(fault=fault):
+                store, request, event, payload = self.event_fixture()
+                rpc_peer = 'env-b' if fault == 'peer' else 'env-a'
+                if fault == 'body':
+                    payload['request'] = dict(request, text='different original')
+                if fault == 'destination':
+                    payload['destination'] = 'env-b'
+                self.host.journal.put('out', rpc_peer, request['id'], payload)
+                data = {'state': 'delivered', 'request_id': request['id'], 'turn_id': self.turn}
+                if fault == 'client-only':
+                    data['state'] = 'mail_ready_for_client'
+                if fault == 'request-id':
+                    data['request_id'] = str(uuid.uuid4())
+                self.host.journal.finish('out', rpc_peer, request['id'], {'ok': fault != 'failed', 'data': data})
+                if fault == 'hash':
+                    with self.host.journal.db() as db:
+                        db.execute("UPDATE rpc SET hash='bad' WHERE id=?", (request['id'],))
+                with patch.object(self.host.native, 'inject') as inject:
+                    with self.assertRaises((ValueError, RuntimeError)):
+                        self.host.dispatch_event('env-a', {'type': 'event', 'id': event['id'], 'event': event})
+                    inject.assert_not_called()
+                self.assertEqual(store.rows('SELECT * FROM inbound WHERE id=?', (event['id'],)), [])
+
+    def test_authenticated_peer_cannot_answer_other_peer_operation(self):
+        store, request, event, _ = self.event_fixture(peer='env-b')
+        store.operation(request['id'], 'delivered', {'turn_id': self.turn})
+        with patch.object(self.host.native, 'inject') as inject:
+            with self.assertRaisesRegex(ValueError, 'peer differs'):
+                self.host.dispatch_event('env-a', {'type': 'event', 'event': event})
+            inject.assert_not_called()
+
+    def test_trusted_hub_path_preserves_logical_bridge_alias_and_recovers_for_wait(self):
+        store, request, event, payload = self.event_fixture(
+            node=self.guest, peer='host-alias', source='worker', target='coordinator')
+        with store.transaction() as db:
+            db.execute('INSERT INTO peers VALUES(?,?)', ('host-alias', encode({
+                'transport': 'light', 'peer': 'hub', 'home': str(self.guest.home)})))
+        payload['destination'] = 'hub'
+        self.guest.journal.put('out', 'hub', request['id'], payload)
+        self.guest.journal.finish('out', 'hub', request['id'], {'ok': True, 'data': {
+            'state': 'delivered', 'request_id': request['id'], 'turn_id': self.turn}})
+        from csl_bridge_engine import Connector
+        connector = Connector(store.home)
+        self.addCleanup(connector.close)
+        with store.transaction() as db:
+            db.execute('INSERT INTO inbound(id,peer,body)VALUES(?,?,?)',
+                       (event['id'], 'host-alias', encode(event)))
+        result = []
+        waiter = threading.Thread(target=lambda: result.append(connector.local({
+            'local_op': 'wait', 'agent': 'worker', 'after': 0, 'timeout': 3})))
+        waiter.start()
+        deadline = time.monotonic() + 1
+        while not connector.waiters['worker'] and time.monotonic() < deadline:
+            time.sleep(.005)
+        self.assertTrue(connector.waiters['worker'])
+        def notify(*args, **kwargs):
+            return connector.local({'local_op': '_light_events_changed'})
+        with patch('csl_bridge_transport.local_call', side_effect=notify):
+            self.guest.dispatch_event('hub', {'type': 'event', 'event': event, 'origin': 'hub'})
+        waiter.join(1)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(result[0]['events'][0]['event']['id'], event['id'])
+        self.assertEqual(json.loads(store.rows('SELECT result FROM operations')[0]['result'])['turn_id'], self.turn)
+
+    def test_routed_origin_is_distinct_from_authenticated_hub(self):
+        store, request, event, payload = self.event_fixture(
+            node=self.guest, peer='hub', source='worker', target='coordinator')
+        payload['destination'] = 'env-b'
+        self.guest.journal.put('out', 'hub', request['id'], payload)
+        self.guest.journal.finish('out', 'hub', request['id'], {'ok': True, 'data': {
+            'state': 'delivered', 'request_id': request['id'], 'turn_id': self.turn}})
+        with patch('csl_bridge_transport.local_call', return_value={}):
+            self.assertEqual(self.guest.dispatch_event('hub', {
+                'type': 'event', 'event': event, 'origin': 'env-b'})['state'], 'delivered')
+        event = dict(event, id=str(uuid.uuid4()))
+        with self.assertRaisesRegex(ValueError, 'RPC binding'):
+            self.guest.dispatch_event('hub', {'type': 'event', 'event': event, 'origin': 'env-c'})
+        self.guest.config['links']['hub']['trusted_router'] = False
+        with self.assertRaisesRegex(ValueError, 'Untrusted event origin'):
+            self.guest.dispatch_event('hub', {'type': 'event', 'event': event, 'origin': 'env-b'})
+
+    def test_publication_keeps_cursor_before_unconfirmed_original_then_recovers(self):
+        home, thread = self.guest.agent('worker')
+        store = Store(home)
+        self.addCleanup(store.close)
+        request = {'version': 1, 'op': 'followup', 'id': str(uuid.uuid4()),
+                   'source': 'coordinator', 'target': 'worker', 'text': 'Synthetic original'}
+        store.reserve('hub', request)
+        final = {'task_id': request['id'], 'source': 'worker', 'target': 'coordinator',
+                 'kind': 'final', 'text': 'Synthetic final', 'turn_id': self.turn, 'status': 'completed'}
+        eventid = str(uuid.uuid4())
+        store.publish('hub', final, eventid)
+        self.guest.journal.put('in', 'hub', request['id'], {'type': 'request',
+            'id': request['id'], 'request': request, 'origin': 'hub'})
+        self.guest.journal.finish('in', 'hub', request['id'], {'ok': True, 'data': {'state': 'queued'}})
+        self.guest.queue_events()
+        self.assertIsNone(self.guest.journal.get('out', 'hub', eventid))
+        with self.guest.journal.db() as db:
+            self.assertEqual(db.execute('SELECT * FROM event_cursors').fetchall(), [])
+        receipt = {'state': 'delivered', 'request_id': request['id'], 'turn_id': self.turn, 'thread_id': thread}
+        store.operation(request['id'], 'delivered', receipt)
+        self.guest.journal.finish('in', 'hub', request['id'], {'ok': True, 'data': receipt})
+        self.guest.queue_events()
+        self.assertIsNotNone(self.guest.journal.get('out', 'hub', eventid))
+        self.assertEqual(json.loads(self.guest.journal.get('out', 'hub', eventid)['payload'])['origin'], 'env-a')
 
     def test_native_completion_is_recovered_after_receiver_restart(self):
         self.connect()

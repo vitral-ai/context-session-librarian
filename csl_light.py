@@ -606,27 +606,80 @@ class Node:
             self.journal.put('out', destination, frame['id'], frame)
             return {'state': 'forwarded'}
         home, _ = self.agent(event['target'])
-        with sql(Path(home)/'bridge.sqlite') as db:
-            row = db.execute("SELECT peer,request,result FROM operations WHERE id=? AND peer LIKE 'outbound:%'",(event['task_id'],)).fetchone()
-            if not row:
+        from csl_bridge_engine import confirm_event_turn
+        from csl_bridge_store import Store, BridgeError
+        store = Store(home)
+        try:
+            matches = store.rows("SELECT * FROM operations WHERE id=? AND peer LIKE 'outbound:%'", (event['task_id'],))
+            if not matches:
                 raise ValueError('Event has no delegated task')
-            request = json.loads(row[1])
-            if request.get('source') != event['target'] or request.get('target') != event['source']:
-                raise ValueError('Event actors differ from delegated task')
-            receipt = json.loads(row[2]) if row[2] else {}
-            if not receipt.get('turn_id'):
-                with self.journal.db() as outbox:
-                    reply = outbox.execute("SELECT result FROM rpc WHERE direction='out' AND id=? AND state='done'",(event['task_id'],)).fetchone()
-                if reply:
-                    receipt = json.loads(reply[0]).get('data',{})
-            if not receipt.get('turn_id'):
-                raise RuntimeError('Waiting for original native acceptance receipt')
-            if receipt['turn_id'] != event['turn_id']:
-                raise ValueError('Event turn differs from delegated turn')
+            original = matches[0]
+            logical = original['peer'].removeprefix('outbound:')
+            config = store.peers().get(logical, {})
+            path = config.get('peer', logical) if config.get('transport') == 'light' else logical
+            # The immediate authenticated link is not necessarily the routed origin.
+            if self.is_router:
+                route = self.journal.resolve(event['source'])
+                origin = peer
+                if route['peer'] != peer or path != peer:
+                    raise ValueError('Event peer differs from delegated path')
+            else:
+                if path != peer:
+                    raise ValueError('Event peer differs from delegated path')
+                origin = frame.get('origin', peer)
+                if origin != peer and not self.config['links'][peer].get('trusted_router'):
+                    raise ValueError('Untrusted event origin')
+            request = json.loads(original['request'])
+            receipt = json.loads(original['result']) if original['result'] else {}
+            try:
+                confirmed = confirm_event_turn(request, original['state'], receipt, event)
+            except BridgeError as error:
+                raise ValueError(str(error)) from error
+            rpc = self.journal.get('out', peer, event['task_id'])
+            payload = json.loads(rpc['payload']) if rpc else None
+            # No original work is resent. Compacted/missing provenance stays deferred.
+            if payload is not None:
+                if (payload.get('type') != 'request' or payload.get('id') != event['task_id'] or
+                        payload.get('request') != request or
+                        hashlib.sha256(wire(payload).encode()).hexdigest() != rpc['hash'] or
+                        payload.get('destination', peer) != origin):
+                    raise ValueError('Original RPC binding differs from event path')
+            elif not self.is_router and origin != peer:
+                raise RuntimeError('Waiting for original routed RPC provenance')
+            if not confirmed:
+                reply = json.loads(rpc['result']) if rpc and rpc['state'] == 'done' and rpc['result'] else {}
+                recovered = reply.get('data', {})
+                if (not payload or reply.get('ok') is not True or
+                        recovered.get('state') != 'delivered' or
+                        recovered.get('request_id') != event['task_id']):
+                    raise RuntimeError('Waiting for original native acceptance receipt')
+                try:
+                    if not confirm_event_turn(request, 'delivered', recovered, event):
+                        raise RuntimeError('Waiting for original native acceptance receipt')
+                    # Separate databases are never locked together. Recheck immutable
+                    # identity and current outcome before publishing recovered proof.
+                    with store.transaction() as db:
+                        current = db.execute('SELECT * FROM operations WHERE id=?', (event['task_id'],)).fetchone()
+                        if (current['peer'] != original['peer'] or current['hash'] != original['hash'] or
+                                current['request'] != original['request']):
+                            raise ValueError('Original operation changed during recovery')
+                        latest = json.loads(current['result']) if current['result'] else {}
+                        if not confirm_event_turn(request, current['state'], latest, event):
+                            db.execute("UPDATE operations SET state='delivered',result=? WHERE id=?",
+                                       (encode(recovered), event['task_id']))
+                except BridgeError as error:
+                    raise ValueError(str(error)) from error
+                try:
+                    local_call(home, {'local_op': '_light_events_changed'}, timeout=1)
+                except (ValueError, OSError):
+                    pass
+        finally:
+            store.close()
+        with sql(Path(home)/'bridge.sqlite') as db:
             prior = db.execute('SELECT body FROM inbound WHERE id=?',(event['id'],)).fetchone()
             if prior and prior[0] != encode(event):
                 raise ValueError('Event id collision')
-            db.execute("INSERT OR IGNORE INTO inbound(id,peer,body,delivery)VALUES(?,?,?,'uncertain')",(event['id'],row[0].removeprefix('outbound:'),encode(event)))
+            db.execute("INSERT OR IGNORE INTO inbound(id,peer,body,delivery)VALUES(?,?,?,'uncertain')",(event['id'],logical,encode(event)))
         if event['text']:
             self.native.inject(event['target'], {'id':event['id'],'source':event['source'],
                 'text':event['text'],'header_task_id':event['task_id']}, frame.get('source_session') or event.get('session'))
@@ -662,6 +715,7 @@ class Node:
 
     def queue_events(self):
         """Push existing CSL progress/final envelopes through the durable stream."""
+        from csl_bridge_store import encode
         with self.journal.db() as db:
             db.execute('CREATE TABLE IF NOT EXISTS event_cursors(home TEXT PRIMARY KEY,seq INTEGER)')
         for bridge in self.config['bridges'].values():
@@ -674,12 +728,35 @@ class Node:
             for seq,body in rows:
                 event = json.loads(body)
                 with self.journal.db() as db:
-                    original = db.execute("SELECT peer FROM rpc WHERE direction='in' AND id=?",(event['task_id'],)).fetchone()
-                if original:
-                    peer = original[0]
-                    existing = self.journal.get('out',peer,event['id'])
-                    frame = json.loads(existing['payload'])if existing else {'type':'event','id':event['id'],'event':event,'source_session':self.agents().get(event['source'])}
-                    self.journal.put('out',peer,event['id'],frame)
+                    candidates = db.execute("SELECT * FROM rpc WHERE direction='in' AND id=? AND state='done'", (event['task_id'],)).fetchall()
+                with sql(Path(home)/'bridge.sqlite') as db:
+                    db.row_factory = sqlite3.Row
+                    operation = db.execute('SELECT * FROM operations WHERE id=?', (event['task_id'],)).fetchone()
+                originals = []
+                for candidate in candidates:
+                    payload = json.loads(candidate['payload'])
+                    reply = json.loads(candidate['result'])
+                    request = payload.get('request', {})
+                    if (operation and payload.get('type') == 'request' and
+                            encode(request) == operation['request'] and
+                            operation['peer'] == payload.get('origin', candidate['peer']) and
+                            hashlib.sha256(wire(payload).encode()).hexdigest() == candidate['hash'] and
+                            reply.get('ok') is True and
+                            reply.get('data', {}).get('request_id') == event['task_id']):
+                        from csl_bridge_engine import confirm_event_turn
+                        try:
+                            if (confirm_event_turn(request, operation['state'],
+                                                   json.loads(operation['result']) if operation['result'] else {}, event)
+                                    and confirm_event_turn(request, operation['state'], reply.get('data'), event)):
+                                originals.append(candidate)
+                        except __import__('csl_bridge_store').BridgeError:
+                            continue
+                if len(originals) != 1:
+                    break  # Publication waits for exact independent original provenance.
+                peer = originals[0]['peer']
+                existing = self.journal.get('out',peer,event['id'])
+                frame = json.loads(existing['payload'])if existing else {'type':'event','id':event['id'],'event':event,'origin':self.config['node'],'source_session':self.agents().get(event['source'])}
+                self.journal.put('out',peer,event['id'],frame)
                 with self.journal.db() as db:
                     db.execute('INSERT INTO event_cursors VALUES(?,?) ON CONFLICT(home)DO UPDATE SET seq=excluded.seq',(home,seq))
 
@@ -751,6 +828,11 @@ class Node:
                 if source in self.agents() and request['op'] in ('followup','send_message') and result.get('ok'):
                     with sql(Path(source_home)/'bridge.sqlite') as db:
                         db.execute('UPDATE operations SET state=?,result=? WHERE id=?', (result['data'].get('state','delivered'), wire(result['data']),request['id']))
+                    try:
+                        from csl_bridge_transport import local_call
+                        local_call(source_home, {'local_op': '_light_events_changed'}, timeout=1)
+                    except (OSError, ValueError):
+                        pass
                 return result
             if time.monotonic() >= end:
                 break

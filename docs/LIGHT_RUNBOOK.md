@@ -94,3 +94,18 @@ ID cannot create another native delivery. Existing
 bridge operation/mail records and enrollment rollback snapshots remain intact;
 enrollment audits store source hashes instead of full source copies. Environment
 lifecycle, holds and keep-alive publisher remain separate.
+
+Event receipt correlation: a final/progress event is exposed only after the exact
+original delegated request has a confirmed native acceptance turn. Light may
+recover that original receipt locally from the exact peer/path and immutable RPC
+payload; it does not resend the original work. Routed paths retain the logical
+origin separately from the authenticated hub hop. Compacted or missing routed
+provenance stays deferred rather than supplying authority from event text.
+
+For deprecated watch transports, an event waiting for its original acceptance
+keeps that peer's remote cursor unchanged under the existing paced retry. Other
+peer workers continue. A legacy inbound gap similarly holds later events for the
+same recipient's `wait` cursor until proof arrives; the bounded wait can return
+empty. Recording a valid original receipt wakes blocked waiters. Repeating an old
+`wait --after` deliberately rereads existing confirmed events. This correlation
+check does not implement canonical-final deduplication or exactly-once effects.
