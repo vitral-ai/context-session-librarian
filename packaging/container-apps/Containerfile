@@ -1,5 +1,7 @@
 # COLLECTOR_IMAGE is the reviewed, digest-pinned workload collector image.
 ARG COLLECTOR_IMAGE
 FROM ${COLLECTOR_IMAGE}
+COPY --chmod=0444 workload-collector/profiles.json /usr/local/libexec/vitral-workload/profiles.json
+COPY --chmod=0444 container-apps/require-profile.py /usr/local/libexec/vitral-workload/require-profile.py
 USER 10001:10001
-ENTRYPOINT ["/usr/local/bin/csl-workload-collector"]
+ENTRYPOINT ["python3", "-I", "/usr/local/libexec/vitral-workload/require-profile.py"]

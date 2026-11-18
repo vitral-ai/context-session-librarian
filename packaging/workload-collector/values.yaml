@@ -8,6 +8,7 @@ collector:
   flushSeconds: 20
 transcripts:
   provider: ""
+  profile: ""
   sizeLimit: 512Mi
 identity:
   origin: ""

@@ -19,7 +19,16 @@ The workload client is `vitral-workload-collector`. Use W7 person approval
 and independent credentials per replica. Only a restart with the same
 replica's private state can reuse approval. A replaced replica enrolls again.
 The collector owns its key, refresh state, sanitized spool and durable ACKs
-under `/collector-state`. Nothing mounts a harness home or a credential store.
+under `/collector-state`. The wrapper creates its own `0700` identity child
+under that mount without changing the mount root's permissions. Nothing mounts
+a harness home or a credential store.
+
+Set `transcripts.provider` and `transcripts.profile` explicitly. Kubernetes
+passes them as `VITRAL_COLLECTOR_PROVIDER` and `VITRAL_COLLECTOR_PROFILE`.
+The [reviewed profile matrix](workload-collector/profiles.json) defines the
+only accepted pairs. Enabled workloads reject absent, automatic, or mismatched
+profiles before launch. The packaging does not execute the harness or inspect
+its home to infer a version or transcript layout.
 The transcript mount `/transcripts` contains only the selected provider's
 declared source layout. For Gemini CLI, export only the approved chats
 subtree for the qualified native format. Do not mount its home or project
