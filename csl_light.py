@@ -402,22 +402,29 @@ class Channel:
         last_hello = 0
         try:
             while not self.closed and not STOP.is_set():
-                now = time.monotonic()
-                if now - self.last_received > self.LIVENESS and (self.first_frame_deadline is None or now > self.first_frame_deadline):
-                    self.close()
-                    return
-                if now - last_hello > 3:
-                    self.send({'type': 'hello', 'node': self.node.config['node'], 'agents': self.node.advertise()})
-                    self.send({'type': 'ping'})
-                    last_hello = now
-                with self.retry_lock:
-                    deadlines = dict(self.retry_at)
-                for row in self.node.journal.ready_out(self.peer,deadlines):
-                    if self.outgoing.qsize() >= 32:
-                        break
-                    if self.reserve_send(row['id']):
-                        self.send(json.loads(row['payload']))
-                STOP.wait(.1)
+                try:
+                    now = time.monotonic()
+                    if now - self.last_received > self.LIVENESS and (self.first_frame_deadline is None or now > self.first_frame_deadline):
+                        self.close()
+                        return
+                    if now - last_hello > 3:
+                        self.send({'type': 'hello', 'node': self.node.config['node'], 'agents': self.node.advertise()})
+                        self.send({'type': 'ping'})
+                        last_hello = now
+                    with self.retry_lock:
+                        deadlines = dict(self.retry_at)
+                    for row in self.node.journal.ready_out(self.peer,deadlines):
+                        if self.outgoing.qsize() >= 32:
+                            break
+                        if self.reserve_send(row['id']):
+                            self.send(json.loads(row['payload']))
+                    STOP.wait(.1)
+                except sqlite3.OperationalError as error:
+                    if (getattr(error, 'sqlite_errorcode', 0) & 255) not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                        raise
+                    log('journal_busy', loop='pump', peer=self.peer)
+                    STOP.wait(.25)
+
         except (OSError, ValueError):
             self.close()
 
@@ -820,24 +827,29 @@ class Node:
     def retry_loop(self):
         last_prune = 0
         while not STOP.is_set():
-            if time.monotonic() - last_prune > 3600:
-                if self.config.get('retention_days', 0) > 0:
-                    self.journal.prune(self.config['retention_days'])
-                last_prune = time.monotonic()
             try:
-                self.sync_links()
-                self.pump_local()
-            except (OSError, ValueError, KeyError) as error:
-                log('config_reload_deferred', error=type(error).__name__)
-            for row in self.journal.pending('in'):
-                self.schedule(row['peer'], row['id'])
-            for step in (self.finish_pending, self.queue_events):
+                if time.monotonic() - last_prune > 3600:
+                    if self.config.get('retention_days', 0) > 0:
+                        self.journal.prune(self.config['retention_days'])
+                    last_prune = time.monotonic()
                 try:
-                    step()
-                except Exception as error:
-                    log('event_delivery_deferred',step=step.__name__,error=type(error).__name__)
-            for agent, thread in self.agents().items():
-                self.journal.route(agent, self.config['node'], thread)
+                    self.sync_links()
+                    self.pump_local()
+                except (OSError, ValueError, KeyError) as error:
+                    log('config_reload_deferred', error=type(error).__name__)
+                for row in self.journal.pending('in'):
+                    self.schedule(row['peer'], row['id'])
+                for step in (self.finish_pending, self.queue_events):
+                    try:
+                        step()
+                    except Exception as error:
+                        log('event_delivery_deferred',step=step.__name__,error=type(error).__name__)
+                for agent, thread in self.agents().items():
+                    self.journal.route(agent, self.config['node'], thread)
+            except sqlite3.OperationalError as error:
+                if (getattr(error, 'sqlite_errorcode', 0) & 255) not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                    raise
+                log('journal_busy', loop='retry')
             STOP.wait(1)
 
     def handle(self, conn):
