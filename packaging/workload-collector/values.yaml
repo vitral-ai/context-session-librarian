@@ -1,0 +1,28 @@
+enabled: false
+mode: sidecar
+collector:
+  image: ""
+  uid: 10001
+  stateLimit: 256Mi
+  spoolLimitBytes: 134217728
+  flushSeconds: 20
+transcripts:
+  provider: ""
+  sizeLimit: 512Mi
+identity:
+  origin: ""
+  caConfigMap: ""
+location:
+  provider: kubernetes
+  label: ""
+  cluster: ""
+  workload: ""
+writer:
+  image: ""
+  command: []
+  args: []
+  shutdownSeconds: 15
+terminationGracePeriodSeconds: 40
+daemonSet:
+  narrowSameOwnerExport: false
+  existingClaim: ""

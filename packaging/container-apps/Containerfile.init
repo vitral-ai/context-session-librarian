@@ -1,0 +1,6 @@
+# BASE_IMAGE is a reviewed, digest-pinned image with a POSIX shell.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY --chmod=0555 init-volumes.sh /usr/local/bin/init-volumes
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/init-volumes"]
