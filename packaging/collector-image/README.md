@@ -43,6 +43,26 @@ SHA-256 for the assembled source/data files; it is evidence, not a server trust
 or approval substitute. The external entry-point/check scripts and helper/base
 pins remain visible build inputs in the same reviewed commit.
 
+Directory exceptions require an immediate recursive descendant exclusion before
+the individual file exceptions: opening a parent alone can admit unlisted
+children under Docker's actual matching rules. The hosted image lane executes
+the filter, not just its spelling:
+
+```sh
+python3 -S scripts/check_workload_build_context.py
+```
+
+This uses unchanged filter bytes with temporary synthetic public files and real
+BuildKit scratch COPY/local-export probes. Three positive controls must succeed;
+ten unlisted root, nested, hidden and filename-suffix siblings must refuse with
+an actual missing/excluded-source diagnostic, not an infrastructure error. Four
+old-filter controls reproduce the historical directory-reopening bug. No real
+state/secret is used, no checkout file is mutated, and no probe image is pushed
+or tagged. Temporary exports are removed; ordinary BuildKit caches remain.
+The earlier filter admitted those paths to COPY probes, but the real recipe's
+explicit COPY operands did not put unexpected files in its final image. That
+does not establish that actual secrets were transferred by the unchanged build.
+
 Shared modules include dormant desktop/media/Antigravity parsing helpers needed
 by existing imports; their CLI launchers and optional media worker/dependencies
 are absent. No extra provider/profile or raw fallback is enabled.

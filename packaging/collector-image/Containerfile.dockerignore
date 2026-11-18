@@ -28,6 +28,7 @@
 !packaging
 packaging/**
 !packaging/collector-image
+packaging/collector-image/**
 !packaging/collector-image/Containerfile
 !packaging/collector-image/Containerfile.dockerignore
 !packaging/collector-image/runtime.json
@@ -36,4 +37,5 @@ packaging/**
 !packaging/collector-image/check-runtime.py
 !packaging/collector-image/csl-workload-collector
 !packaging/workload-collector
+packaging/workload-collector/**
 !packaging/workload-collector/profiles.json

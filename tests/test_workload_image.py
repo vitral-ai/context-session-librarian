@@ -6,11 +6,14 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
+
+import test_workload_packaging as chart_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = ROOT/'packaging/collector-image'
@@ -79,6 +82,74 @@ class WorkloadImageTests(unittest.TestCase):
             'fetch-openssl.py', 'check-runtime.py', 'csl-workload-collector'))
         self.assertEqual(includes, allowed)
         self.assertFalse(any('*' in name for name in includes))
+        for directory in ('packaging/collector-image', 'packaging/workload-collector'):
+            index = ignores.index('!'+directory)
+            self.assertEqual(ignores[index+1], directory+'/**')
+
+    @unittest.skipUnless(chart_fixture.HELM, 'Helm required for real rendered image configuration')
+    def test_rendered_both_modes_and_profiles_reach_assembled_image_parser(self):
+        with tempfile.TemporaryDirectory(prefix='image-rendered-abi-') as temporary:
+            root = Path(temporary)
+            output = root/'runtime'
+            module('assemble').assemble(ROOT, output)
+            for name in ('transcripts', 'state'): (root/name).mkdir()
+            (root/'ca.crt').touch()
+            for mode in ('sidecar', 'daemonSet'):
+                options = ({'daemonSet.narrowSameOwnerExport': 'true',
+                            'daemonSet.existingClaim': 'approved-transcripts'} if mode == 'daemonSet' else {})
+                for provider, profile in chart_fixture.PROFILES.items():
+                    for spool, flush in ((None, None), ('536870912', '1')):
+                        with self.subTest(mode=mode, provider=provider, spool=spool):
+                            values = {'transcripts.provider': provider, 'transcripts.profile': profile}
+                            if spool is not None:
+                                values.update({'collector.spoolLimitBytes': spool, 'collector.flushSeconds': flush})
+                            rendered = chart_fixture.WorkloadChartTests().render(mode=mode, **options, **values)
+                            self.assertEqual(rendered.returncode, 0, rendered.stderr)
+                            # The existing stdlib chart fixture's bounded env-row
+                            # projection; mounted/downward-API values become owned
+                            # synthetic paths/IDs, never real workload credentials.
+                            rows = re.findall(r'^ +?- name: (VITRAL_[A-Z_]+)\n +value: (.+)$',
+                                              rendered.stdout, re.MULTILINE)
+                            env = {key: json.loads(value) if value.startswith('"') else value
+                                   for key, value in rows}
+                            env.update(VITRAL_LOCATION_NAMESPACE='test', VITRAL_LOCATION_REPLICA='fixture',
+                                       VITRAL_COLLECTOR_TRANSCRIPT_ROOT=str(root/'transcripts'),
+                                       VITRAL_COLLECTOR_STATE=str(root/'state'),
+                                       VITRAL_COLLECTOR_TRUST_CA=str(root/'ca.crt'))
+                            code = ('import sys,json; sys.path.insert(0,sys.argv[1]); '
+                                    'from csl_workload_config import Configuration; '
+                                    'c=Configuration.from_environment(json.load(sys.stdin)); '
+                                    'print(json.dumps([c.provider,c.profile,c.spool_bytes,c.flush_seconds,c.ca_file]))')
+                            result = subprocess.run([sys.executable, '-E', '-s', '-S', '-c', code, str(output)],
+                                input=json.dumps(env), text=True, capture_output=True, cwd=temporary, timeout=10)
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            self.assertEqual(json.loads(result.stdout),
+                                [provider, profile, int(spool or '134217728'), int(flush or '20'), str(root/'ca.crt')])
+
+    def test_context_probe_covers_old_admissions_and_distinguishes_infrastructure_failure(self):
+        probe = runpy.run_path(str(ROOT/'scripts/check_workload_build_context.py'))
+        current = (IMAGE/'Containerfile.dockerignore').read_text()
+        previous = probe['old_filter'](current)
+        self.assertEqual(previous.splitlines(), [line for line in current.splitlines()
+                         if line not in probe['EXCLUSIONS']])
+        self.assertEqual(len(probe['REGRESSION']), 4)
+        self.assertEqual(len(set(probe['ALLOWED']+probe['REGRESSION']+probe['SIBLINGS'])), 13)
+        with self.assertRaises(ValueError): probe['old_filter'](previous)
+        candidate = probe['REGRESSION'][0]
+        with tempfile.TemporaryDirectory(prefix='context-verdict-') as temporary:
+            target = Path(temporary)/'sentinel'
+            accepted = subprocess.CompletedProcess([], 0, stdout=b'')
+            missing = subprocess.CompletedProcess([], 1, stdout=(candidate+': not found').encode())
+            infra = subprocess.CompletedProcess([], 1, stdout=b'cannot connect to Docker daemon')
+            verify = probe['verify_result']
+            verify(missing, candidate, False, target, b'public control')
+            for result, allowed in ((infra, False), (accepted, False), (accepted, True)):
+                with self.subTest(allowed=allowed, code=result.returncode), self.assertRaises(RuntimeError):
+                    verify(result, candidate, allowed, target, b'public control')
+            target.write_bytes(b'public control')
+            verify(accepted, candidate, True, target, b'public control')
+            with self.assertRaises(RuntimeError): verify(missing, candidate, False, target, b'public control')
+            with self.assertRaises(RuntimeError): verify(accepted, candidate, True, target, b'wrong bytes')
 
     def test_fixed_exec_nonroot_pins_and_no_inherited_default_command(self):
         launcher = (IMAGE/'csl-workload-collector').read_text()

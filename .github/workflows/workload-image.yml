@@ -8,6 +8,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Real BuildKit context exclusion and historical regression (synthetic only)
+        run: python3 -S scripts/check_workload_build_context.py
       - name: Build pinned collector image (no push)
         run: docker build --file packaging/collector-image/Containerfile --tag csl-workload:fixture .
       - name: No-network read-only helper and import smoke
