@@ -55,6 +55,54 @@ class Tests(unittest.TestCase):
         with light.sql(self.home / 'bridge.sqlite') as db:
             self.assertEqual(db.execute('SELECT count(*) FROM mail_messages').fetchone()[0], 1)
 
+    def test_mail_flush_reconciles_lost_send_response_without_resending(self):
+        from csl_bridge_engine import Connector
+        from csl_bridge_store import BridgeError
+        from unittest.mock import Mock
+        sender_home = self.root / 'sender'
+        store = Store(sender_home, create=True)
+        with store.transaction() as db:
+            db.executemany('INSERT INTO config VALUES(?,?)',
+                           [('identity', encode('coordinator')), ('runtime_socket', encode(None))])
+            db.execute('INSERT INTO agents VALUES(?,?)', ('coordinator', str(uuid.uuid4())))
+            db.execute('INSERT INTO peers VALUES(?,?)', ('env-a', encode({
+                'transport': 'lab', 'home': str(self.home), 'allow_agents': ['coordinator'],
+                'allow_sources': ['worker'], 'allow_ops': ['mail']})))
+        store.close()
+        runtime = Mock(side_effect=AssertionError('Mail must not invoke native tasks'))
+        sender = Connector(sender_home, runtime_factory=runtime)
+        self.addCleanup(sender.close)
+        message_id = str(uuid.uuid4())
+        sender.local({'local_op': 'mail_send', 'agent': 'coordinator', 'peer': 'env-a',
+                      'target': 'worker', 'id': message_id, 'body': 'Synthetic lost-response test'})
+        actions = []
+
+        def exchange(config, origin, request):
+            actions.append(request['action'])
+            result = self.node.mirror(str(self.home), origin, request)
+            if request['action'] == 'send':
+                raise BridgeError('Synthetic lost response after durable receiver commit')
+            return result
+
+        with patch('csl_bridge_transport.exchange', side_effect=exchange):
+            sender.mailbox.flush('env-a')
+            self.assertEqual(sender.store.rows('SELECT state FROM operations WHERE id=?',
+                                              (message_id,))[0]['state'], 'uncertain')
+            sender.mailbox.flush('env-a')
+            sender.mailbox.flush('env-a')
+        operation = sender.store.rows('SELECT state,result FROM operations WHERE id=?', (message_id,))[0]
+        self.assertEqual(operation['state'], 'delivered')
+        self.assertEqual(json.loads(operation['result'])['message_id'], message_id)
+        self.assertEqual(actions, ['send', 'receipt'])
+        self.assertIsNotNone(sender.store.rows('SELECT persisted_at FROM mail_messages WHERE id=?',
+                                               (message_id,))[0]['persisted_at'])
+        with light.sql(self.home / 'bridge.sqlite') as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM mail_messages WHERE id=?',
+                                        (message_id,)).fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT count(*) FROM tasks').fetchone()[0], 0)
+        self.assertEqual(sender.store.rows('SELECT count(*) AS n FROM tasks')[0]['n'], 0)
+        runtime.assert_not_called()
+
     def test_authenticated_env_cannot_claim_coordinator(self):
         self.node.config['node'] = 'hub'
         self.node.is_router = True

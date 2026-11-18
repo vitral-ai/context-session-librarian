@@ -512,7 +512,7 @@ class Node:
         schema(store)
         try:
             if request['action'] == 'receipt':
-                row = store.rows('SELECT persisted_at,acknowledged_at FROM mail_messages WHERE id=?', (request['message_id'],))
+                row = store.rows('SELECT id AS message_id,persisted_at,acknowledged_at FROM mail_messages WHERE id=?', (request['message_id'],))
                 return {'state': 'persisted', **dict(row[0])} if row else {'state': 'not_found'}
             if request['action'] == 'ack':
                 with store.transaction() as db:
