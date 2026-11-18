@@ -31,6 +31,8 @@ for integration tests only. It activates no public command and does not change
 the desktop matrix below.
 An unwired [execution-import foundation](EXECUTION_IMPORT_FOUNDATION.md) provides
 closed metadata, sealed input capture and reserved-ID lookup for source tests.
+Its private [FD9 transport fixture](EXECUTION_TRANSPORT.md) exercises bounded
+Go/Python framing and parent lifetime with synthetic checks only.
 It adds no command, import publication, native caller or model/recall capability.
 Codex 0.169.0 external `history_base` chains are included in raw v3 snapshots and
 single-session `export --raw`. Portable/batch export of referenced histories
