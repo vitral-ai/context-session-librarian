@@ -8,6 +8,7 @@
     "csl_sync_state.py", "csl_text_workload.py", "csl_version.py",
     "csl_workload_auth.py", "csl_workload_config.py", "csl_workload_http.py",
     "csl_workload_identity.py", "csl_workload_observation.py", "csl_workload_observation_driver.py",
+    "csl_workload_observation_agent.py",
     "csl_workload_observation_durable.py", "csl_workload_observation_journal.py",
     "csl_workload_producer.py", "csl_workload_provider.py",
     "csl_workload_runner.py", "csl_workload_state.py", "csl_workload_stream.py"

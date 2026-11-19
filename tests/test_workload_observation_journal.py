@@ -174,5 +174,11 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaises(SyncError): Evidence(self.root, {**self.context, 'run': uid()}, create=True)
         self.assertEqual(len(list(self.e.root.iterdir())), count)
 
+    def test_prepared_intent_is_not_observation_or_product_ack(self):
+        attempt = self.e.begin(self.worker, 'snapshot', self.body, observed=False)
+        self.assertFalse(self.e.load()['pending']['observed'])
+        with self.assertRaises(SyncError): self.e.acknowledged(attempt, self.plan['snapshot'])
+        self.assertIsNone(self.e.load()['snapshot_worker'])
+
 
 if __name__ == '__main__': unittest.main()

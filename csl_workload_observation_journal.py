@@ -20,7 +20,7 @@ CONTEXT = {'run', 'scope', 'binding', 'source', 'session'}
 PLAN = {'snapshot', 'revision', 'generation', 'file_key', 'length', 'sha256', 'last_seq', 'body_sha256'}
 FIELDS = {'version', 'context', 'plan', 'worker', 'worker_seal', 'offset', 'prefix', 'tail', 'seq', 'content_seen',
           'view_seen', 'snapshot_worker', 'attempts', 'total', 'present', 'pending', 'final', 'poisoned'}
-PENDING = {'attempt', 'worker', 'kind', 'body_sha256', 'next_tail', 'start', 'end', 'first', 'last'}
+PENDING = {'attempt', 'worker', 'kind', 'body_sha256', 'next_tail', 'start', 'end', 'first', 'last', 'observed'}
 
 
 def refused(): raise SyncError('workload_observation_unqualified')
@@ -97,6 +97,7 @@ class Evidence:
         if pending is not None:
             if type(pending) is not dict or set(pending) != PENDING or pending['kind'] not in KINDS: refused()
             identity(pending['attempt']); identity(pending['worker']); sha(pending['body_sha256'])
+            if type(pending['observed']) is not bool: refused()
             number(pending['next_tail'], len(CANARY)-1)
             for key in ('start', 'end', 'first', 'last'):
                 if pending[key] is not None: number(pending[key])
@@ -144,11 +145,11 @@ class Evidence:
             v.update(plan=dict(plan), snapshot_worker=None, final=None)
         self.change(update)
 
-    def begin(self, worker, kind, body, *, start=None, end=None, prefix=None, first=None, last=None):
+    def begin(self, worker, kind, body, *, start=None, end=None, prefix=None, first=None, last=None, observed=True):
         def update(v):
             identity(worker)
             if (worker != v['worker'] or v['pending'] is not None or v['plan'] is None or kind not in KINDS
-                    or type(body) is not bytes or len(body) > MAX_BODY or v['attempts'] >= MAX_ATTEMPTS
+                    or type(observed) is not bool or type(body) is not bytes or len(body) > MAX_BODY or v['attempts'] >= MAX_ATTEMPTS
                     or v['total']+len(body) > MAX_TOTAL): refused()
             plan = v['plan']; digest = hashlib.sha256(body).hexdigest()
             if kind == 'snapshot':
@@ -165,15 +166,24 @@ class Evidence:
             attempt = str(uuid.uuid4())
             v.update(pending={'worker': worker, 'attempt': attempt, 'kind': kind, 'body_sha256': digest,
                               'next_tail': tail if kind == 'content' else 0, 'start': start, 'end': end,
-                              'first': first, 'last': last}, final=None, attempts=v['attempts']+1, total=v['total']+len(body))
+                              'first': first, 'last': last, 'observed': observed}, final=None,
+                     attempts=v['attempts']+1, total=v['total']+len(body))
             return attempt
         return self.change(update)
+
+    def observed(self, attempt, worker, digest):
+        def update(v):
+            p = v['pending']
+            if (p is None or p['attempt'] != attempt or p['worker'] != worker
+                    or p['body_sha256'] != digest or p['observed']): refused()
+            p['observed'] = True
+        self.change(update)
 
     def acknowledged(self, attempt, matched, *, end=None, sha256=None, last=None):
         def update(v):
             identity(attempt); identity(matched)
             p, plan = v['pending'], v['plan']
-            if p is None or p['attempt'] != attempt or p['worker'] != v['worker']: refused()
+            if p is None or p['attempt'] != attempt or p['worker'] != v['worker'] or not p['observed']: refused()
             kind = p['kind']
             if kind == 'snapshot':
                 if matched != plan['snapshot'] or any(x is not None for x in (end, sha256, last)): refused()

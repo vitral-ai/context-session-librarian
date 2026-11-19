@@ -29,8 +29,8 @@ from csl_workload_stream import Bounds, opened_source, verify_prefix
 from csl_workload_state import child, read_record
 from csl_workload_producer import Producer, recover as recover_producer
 from csl_workload_observation import Observation, receipt_valid
-from csl_workload_observation_driver import AcceptanceDriver, runtime_fingerprint
-from csl_workload_observation_durable import DurableObservation
+from csl_workload_observation_driver import AcceptanceDriver
+from csl_workload_observation_agent import RemoteObservation
 
 POLL_SECONDS = 0.1
 PASS_SECONDS = 60
@@ -286,7 +286,7 @@ def run_pass(config, deadline, composition=None, expected_worker=None):
             http.observation = Observation(config.origin, config.provider, config.observe_session)
             if composition is not None:
                 try:
-                    http.observation = DurableObservation(config, composition, binding, runtime_fingerprint(), deadline, expected_worker)
+                    http.observation = RemoteObservation(config, composition, binding, expected_worker)
                 except Exception:
                     # Bad/lost instrumentation is never a product admission error.
                     http.observation = None
@@ -315,7 +315,17 @@ def run_pass(config, deadline, composition=None, expected_worker=None):
             registry.prove(state, config.provider)
             manifest = source_manifest(config, adapter)
             result = {'ok': True, 'synced': result['synced'], 'pending': 0, 'manifest': manifest}
-            if isinstance(http.observation, DurableObservation): result.update(http.observation.finalize())
+            if config.observe_session is not None:
+                # Existing checked/persisted proof, NOT an observer assertion.
+                # No extra state read, request or ACK/proof acceptance occurs.
+                try:
+                    plan = registry.plans['/sessions/'+config.provider+'/'+config.observe_session]
+                    file, = plan['files']
+                    result['delivery_plan'] = {'snapshot': plan['snapshot_id'], 'revision': file['revision'],
+                        'generation': plan['view']['generation'], 'file_key': file['file_key'],
+                        'length': file['length'], 'sha256': file['sha256'], 'last_seq': plan['view']['last_seq']}
+                except Exception: pass
+            if isinstance(http.observation, RemoteObservation): result.update(http.observation.finalize())
             elif http.observation is not None: result['observation'] = http.observation.receipt()
             return result
         finally:
@@ -337,14 +347,18 @@ class PassProcess:
         home = child(config.state_root, 'worker-home')
         if boot_clock() >= deadline: raise SyncError('workload_flush_deadline')
         read_fd = write_fd = None
+        observer_fd = None
         try:
             if composition is not None:
                 try:
+                    observer_fd = composition['observer_fd']
+                    if type(observer_fd) is not int or not stat.S_ISSOCK(os.fstat(observer_fd).st_mode): raise ValueError()
                     data = canonical(composition)
                     if len(data) > 4096: raise ValueError()
                     read_fd, write_fd = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
                     if os.write(write_fd, data) != len(data): raise ValueError()
                 except Exception:
+                    observer_fd = None
                     if read_fd is not None:
                         try: os.close(read_fd)
                         except OSError: pass
@@ -357,7 +371,8 @@ class PassProcess:
                     str(self.path), str(os.getpid()), str(deadline)]
             if read_fd is not None: argv.append(str(read_fd))
             if boot_clock() >= deadline: raise SyncError('workload_flush_deadline')
-            self.process = subprocess.Popen(argv, pass_fds=() if read_fd is None else (read_fd,),
+            descriptors = () if read_fd is None else (read_fd, observer_fd)
+            self.process = subprocess.Popen(argv, pass_fds=descriptors,
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
                 env={'PATH': os.defpath, 'LANG': 'C.UTF-8', 'HOME': str(home), 'PYTHONDONTWRITEBYTECODE': '1'})
         finally:
@@ -423,7 +438,15 @@ class Runner:
     def stop(self): self.stopping = True
 
     def run(self, command=None):
-        if self.observation_driver is not None: self.observation_driver.invalidate()
+        if self.observation_driver is not None: self.observation_driver.clear_result()
+        try: return self._claimed_run(command)
+        except BaseException:
+            if self.observation_driver is not None: self.observation_driver.invalidate()
+            raise
+        finally:
+            if self.observation_driver is not None: self.observation_driver.close()
+
+    def _claimed_run(self, command):
         runtime = child(self.config.state_root, 'runtime')
         with exclusive(runtime, 'runner.lock'), stop_signals(self.stop):
             owner = {'version': 2, 'scope': scope(self.config)}
@@ -440,10 +463,7 @@ class Runner:
             clean_receipts(runtime)
             private_json(runtime/'configuration.json', environment(self.config))
             if self.observation_driver is not None: self.observation_driver.start(self.config, scope(self.config))
-            try: return self._run(command)
-            except BaseException:
-                if self.observation_driver is not None: self.observation_driver.invalidate()
-                raise
+            return self._run(command)
 
     def _run(self, command):
         writer = None

@@ -1,5 +1,6 @@
 """Private cross-worker evidence; all delivery authority stays with Collector."""
 import hashlib
+import json
 
 from csl_workload_auth import boot_clock
 from csl_workload_identity import canonical
@@ -34,24 +35,32 @@ class DurableObservation(Observation):
 
     def _begin(self, method, path, body, binary, key):
         super()._begin(method, path, body, binary, key)
-        if self.call is None or self.call['kind'] != 'snapshot': return
-        snapshot, revision, generation, file_key, length, sha, seq = self.plan
-        self.evidence.plan({'snapshot': snapshot, 'revision': revision, 'generation': generation,
-            'file_key': file_key, 'length': length, 'sha256': sha, 'last_seq': seq, 'body_sha256': key})
-        value = self.evidence.load()
-        self.offset, self.sequence, self.tail = value['offset'], value['seq'], CANARY[:value['tail']]
+        if self.call is None: return
+        if self.call['kind'] == 'snapshot':
+            snapshot, revision, generation, file_key, length, sha, seq = self.plan
+            self.evidence.plan({'snapshot': snapshot, 'revision': revision, 'generation': generation,
+                'file_key': file_key, 'length': length, 'sha256': sha, 'last_seq': seq, 'body_sha256': key})
+            value = self.evidence.load()
+            self.offset, self.sequence, self.tail = value['offset'], value['seq'], CANARY[:value['tail']]
+        call = self.call
+        expected = binary if call['kind'] == 'content' else json.dumps(
+            body, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
+        if hashlib.sha256(expected).digest() != call['digest']: raise ValueError()
+        options = {}
+        if call['kind'] == 'content':
+            options = dict(start=call['details'][0], end=call['details'][1], prefix=self.prefix)
+        elif call['kind'] == 'view': options = dict(first=self.sequence+1, last=call['details'])
+        # Helper-only preparation is NOT an observation or product ACK. The
+        # real Request hook must see this durable readiness without waiting,
+        # verify the exact immutable bytes, then mark the intent observed.
+        call['intent'] = self.evidence.begin(self.worker, call['kind'], expected, observed=False, **options)
 
     def _request(self, url, method, data):
         super()._request(url, method, data)
         if self.call is None or url != self.call['url']: return
         if self.failed or boot_clock() >= self.deadline: raise ValueError()
         call = self.call
-        options = {}
-        if call['kind'] == 'content':
-            options = dict(start=call['details'][0], end=call['details'][1], prefix=self.prefix)
-        elif call['kind'] == 'view':
-            options = dict(first=self.sequence+1, last=call['details'])
-        call['intent'] = self.evidence.begin(self.worker, call['kind'], data, **options)
+        self.evidence.observed(call['intent'], self.worker, hashlib.sha256(data).hexdigest())
         if boot_clock() >= self.deadline: raise ValueError()
 
     def _end(self, method, path, success, result=None):
