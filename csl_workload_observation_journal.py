@@ -1,7 +1,6 @@
-"""Unwired local evidence prototype. Inputs are verified worker ACK/proof facts.
+"""Bounded evidence store fed only by checked worker ACK/proof callbacks.
 
 This store cannot authorize requests or establish delivery/EOF by itself.
-Future integration must preserve the existing guarded worker and proof checks.
 """
 from contextlib import contextmanager
 import fcntl
@@ -18,8 +17,8 @@ from csl_workload_state import child, read_record
 
 EMPTY = hashlib.sha256(b'').hexdigest()
 CONTEXT = {'run', 'scope', 'binding', 'source', 'session'}
-PLAN = {'snapshot', 'revision', 'generation', 'length', 'sha256', 'last_seq', 'body_sha256'}
-FIELDS = {'version', 'context', 'plan', 'worker', 'offset', 'prefix', 'tail', 'seq', 'content_seen',
+PLAN = {'snapshot', 'revision', 'generation', 'file_key', 'length', 'sha256', 'last_seq', 'body_sha256'}
+FIELDS = {'version', 'context', 'plan', 'worker', 'worker_seal', 'offset', 'prefix', 'tail', 'seq', 'content_seen',
           'view_seen', 'snapshot_worker', 'attempts', 'total', 'present', 'pending', 'final', 'poisoned'}
 PENDING = {'attempt', 'worker', 'kind', 'body_sha256', 'next_tail', 'start', 'end', 'first', 'last'}
 
@@ -40,6 +39,7 @@ def number(value, maximum=MAX_TOTAL):
 def check_plan(value):
     if type(value) is not dict or set(value) != PLAN: refused()
     for key in ('snapshot', 'revision', 'generation'): identity(value[key])
+    if type(value['file_key']) is not str or not re.fullmatch('[A-Za-z0-9._-]{1,128}', value['file_key']): refused()
     number(value['length']); number(value['last_seq'], 1000000)
     sha(value['sha256']); sha(value['body_sha256'])
 
@@ -48,14 +48,17 @@ class Evidence:
     def __init__(self, parent, context, *, create=False):
         if type(context) is not dict or set(context) != CONTEXT: refused()
         identity(context['run']); identity(context['session'])
-        sha(context['scope']); sha(context['binding']); sha(context['source'], 40)
+        sha(context['scope']); sha(context['binding']); sha(context['source'])
         self.context = dict(context)
         self.root = child(Path(parent), 'observation')
         self.path = self.root/(context['run']+'.json')
         if create:
+            with os.scandir(self.root) as entries:
+                for count, _ in enumerate(entries, 1):
+                    if count > 126: refused()
             with self.locked():
                 if read_record(self.path) is not None: refused()
-                private_json(self.path, {'version': 1, 'context': self.context, 'plan': None, 'worker': None,
+                private_json(self.path, {'version': 1, 'context': self.context, 'plan': None, 'worker': None, 'worker_seal': None,
                     'offset': 0, 'prefix': EMPTY, 'tail': 0, 'seq': 0, 'content_seen': False, 'view_seen': False,
                     'snapshot_worker': None, 'attempts': 0, 'total': 0, 'present': dict.fromkeys(KINDS, False),
                     'pending': None, 'final': None, 'poisoned': False})
@@ -82,7 +85,7 @@ class Evidence:
                 or value['version'] != 1 or value['context'] != self.context):
             refused()
         if value['plan'] is not None: check_plan(value['plan'])
-        for key in ('worker', 'snapshot_worker'):
+        for key in ('worker', 'worker_seal', 'snapshot_worker'):
             if value[key] is not None: identity(value[key])
         for key in ('offset', 'total'): number(value[key])
         number(value['attempts'], MAX_ATTEMPTS); number(value['tail'], len(CANARY)-1); number(value['seq'], 1000000)
@@ -114,12 +117,13 @@ class Evidence:
             private_json(self.path, value)
             return result
 
-    def worker(self, worker):
+    def worker(self, worker, seal=None):
         identity(worker)
+        seal = str(uuid.uuid4()) if seal is None else identity(seal)
         def update(v):
             if v['pending'] is not None: v['poisoned'] = True
             if v['worker'] == worker: refused()
-            v.update(worker=worker, final=None)
+            v.update(worker=worker, worker_seal=seal, final=None)
         self.change(update)
 
     def plan(self, plan):
@@ -129,6 +133,7 @@ class Evidence:
             old = v['plan']
             if old is not None:
                 if old['snapshot'] == plan['snapshot'] and old != plan: refused()
+                if old['file_key'] != plan['file_key'] and old['revision'] == plan['revision']: refused()
                 if old['revision'] != plan['revision']:
                     if old['generation'] == plan['generation']: refused()
                     v.update(offset=0, prefix=EMPTY, tail=0, content_seen=False)
@@ -184,7 +189,7 @@ class Evidence:
             v['pending'] = None
         self.change(update)
 
-    def finalized(self, worker, *, snapshot, revision, generation, length, sha256, last_seq):
+    def finalized(self, worker, *, snapshot, revision, generation, length, sha256, last_seq, seal=None):
         def update(v):
             for value in (worker, snapshot, revision, generation): identity(value)
             p = v['plan']
@@ -194,7 +199,8 @@ class Evidence:
                     or (snapshot, revision, generation, length, sha256, last_seq) !=
                        (p['snapshot'], p['revision'], p['generation'], p['length'], p['sha256'], p['last_seq'])
                     or v['offset'] != length or v['prefix'] != sha256 or v['seq'] != last_seq): refused()
-            v['final'] = {'worker': worker, 'seal': str(uuid.uuid4())}
+            if seal is not None and seal != v['worker_seal']: refused()
+            v['final'] = {'worker': worker, 'seal': v['worker_seal']}
             return v['final']['seal']
         return self.change(update)
 

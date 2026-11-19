@@ -21,10 +21,10 @@ class EvidenceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='composition-source-unit-'); self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name); self.root.chmod(0o770)
-        self.context = {'run': uid(), 'session': uid(), 'scope': '1'*64, 'binding': '2'*64, 'source': '3'*40}
+        self.context = {'run': uid(), 'session': uid(), 'scope': '1'*64, 'binding': '2'*64, 'source': '3'*64}
         self.data = CANARY+b' public unit'
         self.body = b'public metadata unit'
-        self.plan = {'snapshot': uid(), 'revision': uid(), 'generation': uid(), 'length': len(self.data),
+        self.plan = {'snapshot': uid(), 'revision': uid(), 'generation': uid(), 'file_key': 'primary', 'length': len(self.data),
                      'sha256': sha(self.data), 'last_seq': 1, 'body_sha256': sha(self.body)}
         self.e = Evidence(self.root, self.context, create=True)
         self.worker = uid(); self.e.worker(self.worker); self.e.plan(self.plan)
@@ -167,6 +167,12 @@ class EvidenceTests(unittest.TestCase):
         self.content(20, len(self.data)); self.metadata()
         seal, receipt = self.finish()
         self.assertTrue(self.e.consume(self.worker, seal, receipt)['content']['canary_present'])
+
+    def test_run_storage_is_bounded_without_deleting_old_evidence(self):
+        for i in range(125): (self.e.root/f'owned-{i}').touch()
+        count = len(list(self.e.root.iterdir()))
+        with self.assertRaises(SyncError): Evidence(self.root, {**self.context, 'run': uid()}, create=True)
+        self.assertEqual(len(list(self.e.root.iterdir())), count)
 
 
 if __name__ == '__main__': unittest.main()

@@ -21,6 +21,9 @@
 !csl_workload_http.py
 !csl_workload_identity.py
 !csl_workload_observation.py
+!csl_workload_observation_driver.py
+!csl_workload_observation_durable.py
+!csl_workload_observation_journal.py
 !csl_workload_producer.py
 !csl_workload_provider.py
 !csl_workload_runner.py

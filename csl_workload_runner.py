@@ -29,6 +29,8 @@ from csl_workload_stream import Bounds, opened_source, verify_prefix
 from csl_workload_state import child, read_record
 from csl_workload_producer import Producer, recover as recover_producer
 from csl_workload_observation import Observation, receipt_valid
+from csl_workload_observation_driver import AcceptanceDriver, runtime_fingerprint
+from csl_workload_observation_durable import DurableObservation
 
 POLL_SECONDS = 0.1
 PASS_SECONDS = 60
@@ -180,7 +182,7 @@ class ProofRegistry(Registry):
         except Exception:
             if observation is not None: observation.event('end', method, path, False)
             raise
-        if observation is not None: observation.event('end', method, path, True)
+        if observation is not None: observation.event('end', method, path, True, result)
         if method == 'PUT' and path.startswith('/sessions/') and len(path.split('/')) == 4:
             self.plans[path] = json.loads(json.dumps(kwargs['body']))
         return result
@@ -258,7 +260,7 @@ def source_manifest(config, adapter):
     return manifest
 
 
-def run_pass(config, deadline):
+def run_pass(config, deadline, composition=None, expected_worker=None):
     config = checked_config(config)
     limits = bounds(config)
     runtime = child(config.state_root, 'runtime')
@@ -282,6 +284,12 @@ def run_pass(config, deadline):
         private_json(runtime/'binding.json', binding)
         if config.observe_session is not None:
             http.observation = Observation(config.origin, config.provider, config.observe_session)
+            if composition is not None:
+                try:
+                    http.observation = DurableObservation(config, composition, binding, runtime_fingerprint(), deadline, expected_worker)
+                except Exception:
+                    # Bad/lost instrumentation is never a product admission error.
+                    http.observation = None
         selected = sources(config.transcript_root)
         known = read_record(runtime/'sources.json') or {'paths': []}
         if not isinstance(known.get('paths'), list) or not set(known['paths']) <= set(selected):
@@ -307,14 +315,15 @@ def run_pass(config, deadline):
             registry.prove(state, config.provider)
             manifest = source_manifest(config, adapter)
             result = {'ok': True, 'synced': result['synced'], 'pending': 0, 'manifest': manifest}
-            if http.observation is not None: result['observation'] = http.observation.receipt()
+            if isinstance(http.observation, DurableObservation): result.update(http.observation.finalize())
+            elif http.observation is not None: result['observation'] = http.observation.receipt()
             return result
         finally:
             state.close()
 
 
 class PassProcess:
-    def __init__(self, config, sequence, deadline):
+    def __init__(self, config, sequence, deadline, *, composition=None):
         try: valid = isinstance(sequence, str) and sequence == str(uuid.UUID(sequence))
         except ValueError: valid = False
         if not valid: raise SyncError('workload_runtime_record_refused')
@@ -327,10 +336,34 @@ class PassProcess:
         self.sequence = sequence
         home = child(config.state_root, 'worker-home')
         if boot_clock() >= deadline: raise SyncError('workload_flush_deadline')
-        self.process = subprocess.Popen([sys.executable, '-S', str(Path(__file__).absolute()), '--worker',
-            str(self.path), str(os.getpid()), str(deadline)],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
-            env={'PATH': os.defpath, 'LANG': 'C.UTF-8', 'HOME': str(home), 'PYTHONDONTWRITEBYTECODE': '1'})
+        read_fd = write_fd = None
+        try:
+            if composition is not None:
+                try:
+                    data = canonical(composition)
+                    if len(data) > 4096: raise ValueError()
+                    read_fd, write_fd = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+                    if os.write(write_fd, data) != len(data): raise ValueError()
+                except Exception:
+                    if read_fd is not None:
+                        try: os.close(read_fd)
+                        except OSError: pass
+                        read_fd = None
+                finally:
+                    if write_fd is not None:
+                        try: os.close(write_fd)
+                        except OSError: pass
+            argv = [sys.executable, '-S', str(Path(__file__).absolute()), '--worker',
+                    str(self.path), str(os.getpid()), str(deadline)]
+            if read_fd is not None: argv.append(str(read_fd))
+            if boot_clock() >= deadline: raise SyncError('workload_flush_deadline')
+            self.process = subprocess.Popen(argv, pass_fds=() if read_fd is None else (read_fd,),
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+                env={'PATH': os.defpath, 'LANG': 'C.UTF-8', 'HOME': str(home), 'PYTHONDONTWRITEBYTECODE': '1'})
+        finally:
+            if read_fd is not None:
+                try: os.close(read_fd)
+                except OSError: pass
 
     def poll(self): return self.process.poll()
 
@@ -371,15 +404,26 @@ def stop_signals(stop):
 
 
 class Runner:
-    def __init__(self, config, *, pass_factory=PassProcess, clock=boot_clock, sleep=time.sleep):
+    def __init__(self, config, *, pass_factory=PassProcess, clock=boot_clock, sleep=time.sleep, observation_driver=None):
         config = checked_config(config)
         bounds(config)
         self.config, self.pass_factory, self.clock, self.sleep = config, pass_factory, clock, sleep
         self.stopping = False
+        if observation_driver is not None and not isinstance(observation_driver, AcceptanceDriver): raise TypeError()
+        self.observation_driver = observation_driver
+
+    def launch(self, deadline):
+        self.worker_sequence = str(uuid.uuid4())
+        if self.observation_driver is not None:
+            assignment = self.observation_driver.assign(self.worker_sequence, deadline)
+            if assignment is not None:
+                return self.pass_factory(self.config, self.worker_sequence, deadline, composition=assignment)
+        return self.pass_factory(self.config, self.worker_sequence, deadline)
 
     def stop(self): self.stopping = True
 
     def run(self, command=None):
+        if self.observation_driver is not None: self.observation_driver.invalidate()
         runtime = child(self.config.state_root, 'runtime')
         with exclusive(runtime, 'runner.lock'), stop_signals(self.stop):
             owner = {'version': 2, 'scope': scope(self.config)}
@@ -395,7 +439,11 @@ class Runner:
             recover_producer(runtime, scope(self.config))
             clean_receipts(runtime)
             private_json(runtime/'configuration.json', environment(self.config))
-            return self._run(command)
+            if self.observation_driver is not None: self.observation_driver.start(self.config, scope(self.config))
+            try: return self._run(command)
+            except BaseException:
+                if self.observation_driver is not None: self.observation_driver.invalidate()
+                raise
 
     def _run(self, command):
         writer = None
@@ -416,13 +464,16 @@ class Runner:
             while not self.stopping and (writer is None or writer.poll() is None):
                 if worker is None and self.clock() >= next_pass:
                     started = self.clock()
-                    worker = self.pass_factory(self.config, str(uuid.uuid4()), started+PASS_SECONDS)
+                    worker = self.launch(started+PASS_SECONDS)
                 if worker is not None:
                     if worker.poll() is not None:
                         receipt = worker.receipt()
+                        if self.observation_driver is not None:
+                            self.observation_driver.retain(receipt, self.worker_sequence, now=self.clock())
                         if receipt: report['synced'] = receipt['synced']
                         worker.remove_receipt(); worker = None; next_pass = self.clock()+0.25
                     elif self.clock()-started >= PASS_SECONDS:
+                        if self.observation_driver is not None: self.observation_driver.invalidate()
                         worker.kill()
                         if worker.reap(REAP_SECONDS):
                             worker.remove_receipt(); worker = None; next_pass = self.clock()+1
@@ -440,27 +491,36 @@ class Runner:
             deadline = self.clock()+self.config.flush_seconds
             drain_deadline = deadline
             if worker is not None:
+                if self.observation_driver is not None: self.observation_driver.invalidate()
                 worker.kill()
                 report['worker_reaped'] = worker.reap(min(REAP_SECONDS, max(0, deadline-self.clock())))
                 worker.remove_receipt(); worker = None
                 if not report['worker_reaped']: return report
             while self.clock() < deadline-REAP_SECONDS:
-                if worker is None: worker = self.pass_factory(self.config, str(uuid.uuid4()), deadline-REAP_SECONDS)
+                if worker is None: worker = self.launch(deadline-REAP_SECONDS)
                 if worker.poll() is not None:
-                    receipt = worker.receipt(); worker.remove_receipt(); worker = None
+                    receipt = worker.receipt()
                     if receipt and receipt['ok'] and receipt['pending'] == 0:
                         # This fresh worker captured and checked EOF after both
                         # content and view ACKs, after producer quiescence. Keep
                         # hashing/I/O inside the killable worker, not the timer.
+                        if self.observation_driver is not None:
+                            self.observation_driver.consume(receipt, self.worker_sequence,
+                                complete=report['producer_quiesced'], now=self.clock())
+                            if self.clock() >= deadline: self.observation_driver.invalidate()
+                        worker.remove_receipt(); worker = None
                         report.update(synced=receipt['synced'], pending=not report['producer_quiesced'])
                         report['complete'] = report['producer_quiesced']
                         if self.clock() >= deadline: report.update(complete=False, pending=True)
                         return report
+                    if self.observation_driver is not None: self.observation_driver.invalidate()
+                    worker.remove_receipt(); worker = None
                 self.sleep(POLL_SECONDS)
             return report
         except (OSError, SyncError):
             return report
         finally:
+            if self.observation_driver is not None and not report['complete']: self.observation_driver.invalidate()
             if worker is not None:
                 worker.kill()
                 remaining = REAP_SECONDS if drain_deadline is None else min(REAP_SECONDS, max(0, drain_deadline-self.clock()))
@@ -480,7 +540,7 @@ def parent_death(parent):
         raise SyncError('workload_parent_unavailable')
 
 
-def worker_main(receipt, parent, deadline):
+def worker_main(receipt, parent, deadline, observation_fd=None):
     parent_death(parent)
     if not math.isfinite(deadline) or deadline <= boot_clock(): raise SyncError('workload_flush_deadline')
     receipt = Path(receipt)
@@ -493,7 +553,23 @@ def worker_main(receipt, parent, deadline):
     directory = child(child(config.state_root, 'runtime'), 'receipts')
     if receipt.parent != directory or receipt.name != str(uuid.UUID(receipt.stem))+'.json':
         raise SyncError('workload_runtime_storage_refused')
-    try: result = run_pass(config, deadline)
+    composition = None
+    try:
+        if observation_fd is not None:
+            info = os.fstat(observation_fd)
+            if not stat.S_ISFIFO(info.st_mode) or info.st_uid != os.getuid(): raise ValueError()
+            raw = os.read(observation_fd, 4097)
+            if len(raw) > 4096: raise ValueError()
+            candidate = json.loads(raw)
+            if (config.observe_session is not None and candidate['worker'] == receipt.stem
+                    and candidate['deadline'] == deadline):
+                composition = candidate
+    except Exception: pass
+    finally:
+        if observation_fd is not None:
+            try: os.close(observation_fd)
+            except OSError: pass
+    try: result = run_pass(config, deadline, composition=composition, expected_worker=receipt.stem)
     except Exception: result = {'ok': False, 'synced': 0, 'pending': 1, 'manifest': []}
     if boot_clock() >= deadline: result.update(ok=False, pending=1)
     if config.observe_session is not None:
@@ -505,8 +581,8 @@ def worker_main(receipt, parent, deadline):
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
-        if len(argv) == 4 and argv[0] == '--worker':
-            worker_main(argv[1], int(argv[2]), float(argv[3])); return 0
+        if len(argv) in (4, 5) and argv[0] == '--worker':
+            worker_main(argv[1], int(argv[2]), float(argv[3]), int(argv[4]) if len(argv) == 5 else None); return 0
         if argv and argv[0] != '--': raise SyncError('workload_command_refused')
         config = Configuration.from_environment(os.environ)
         result = Runner(config).run(argv[1:] if argv else None)

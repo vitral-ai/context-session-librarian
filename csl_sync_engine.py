@@ -433,7 +433,7 @@ class Collector:
                               'start': offset, 'end': end, 'sha256': headers['X-Content-SHA256']})
                 try:
                     callback = getattr(self.registry, 'upload_planned', None)
-                    if callback is not None: callback(path, item['file_key'], checkpoint['revision'], offset, end)
+                    if callback is not None: callback(path, item['file_key'], checkpoint['revision'], offset, end, h.hexdigest())
                     receipt = self.registry.call('PUT', path + suffix, binary=data, headers=headers, key=key)
                 except SyncError as error:
                     if error.code == 'prefix_mismatch':
