@@ -353,6 +353,54 @@ class GateTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix='codex-gate-')
         self.addCleanup(self.tmp.cleanup); self.root = Path(self.tmp.name)
 
+    def test_optional_owner_result_is_atomic_and_never_waits_for_reader(self):
+        from types import SimpleNamespace
+
+        read_fd, write_fd = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
+        self.addCleanup(os.close, write_fd)
+        report = {'complete': True, 'writer_exit': 0}
+        driver = SimpleNamespace(result=None)
+        try:
+            self.gate.owner_result(write_fd, report, driver)
+            self.assertEqual(json.loads(os.read(read_fd, 4096)),
+                             {'report': report, 'observation': None})
+            limit = os.fpathconf(write_fd, 'PC_PIPE_BUF')
+            filler = b'x' * limit
+            count = 0
+            while True:
+                try:
+                    count += os.write(write_fd, filler)
+                except BlockingIOError:
+                    break
+            self.gate.owner_result(write_fd, report, driver)
+            self.assertEqual(os.read(read_fd, count + limit), b'x' * count)
+            self.gate.owner_result(write_fd, report, SimpleNamespace(result='x' * limit))
+            with self.assertRaises(BlockingIOError):
+                os.read(read_fd, limit)
+        finally:
+            os.close(read_fd)
+        self.gate.owner_result(write_fd, report, driver)
+
+    def test_owner_expected_requires_private_closed_object(self):
+        path = self.root / 'expected.json'
+        expected = {'source': 'a' * 64, 'scope': 'b' * 64,
+                    'account_id': 'c' * 24, 'device_id': 'ses_fixture'}
+        path.write_text(json.dumps({'version': 1, **expected}))
+        path.chmod(0o600)
+        descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, descriptor)
+        self.assertEqual(self.gate.owner_expected(descriptor, os.getuid()), expected)
+        path.chmod(0o644)
+        with self.assertRaises(self.gate.Refused):
+            self.gate.owner_expected(descriptor, os.getuid())
+        path.chmod(0o600)
+        for payload in ({'version': True, **expected},
+                        {'version': 1, **expected, 'session': 'guessed'},
+                        list({'version': 1, **expected}.items())):
+            path.write_text(json.dumps(payload))
+            with self.assertRaises(self.gate.Refused):
+                self.gate.owner_expected(descriptor, os.getuid())
+
     def test_literal_argument_bounds_and_native_exec_refusal_before_effect(self):
         for argv in ([], ['--'], ['--prepare-seconds', '0', '--', 'x'],
                      ['--prepare-seconds', '01', '--', 'x'], ['--prepare-seconds', '1801', '--', 'x'],

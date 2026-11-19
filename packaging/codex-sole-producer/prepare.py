@@ -1,4 +1,5 @@
 """One-shot PID1 preparation; unchanged Runner owns the real exec-only writer."""
+import json
 import os
 from pathlib import Path
 import signal
@@ -13,6 +14,7 @@ HOME = Path('/agent-private')
 NATIVE = HOME/'.codex'
 TRANSCRIPTS = Path('/transcripts')
 STATE = Path('/collector-state')
+OWNER_LAUNCH = Path('/run/vitral-a8')
 SIGNALS = {signal.SIGUSR1, signal.SIGTERM, signal.SIGINT}
 STOPS = {signal.SIGTERM, signal.SIGINT}
 
@@ -172,6 +174,88 @@ def native_exec(argv, env, *, now=clock, validator=validate, execute=os.execve):
     raise Refused('exec returned')
 
 
+def owner_expected(directory, uid):
+    from csl_canonical import strict_json
+
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    with os.fdopen(os.open('expected.json', flags, dir_fd=directory), 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_uid != uid or info.st_nlink != 1 or info.st_size > 2048):
+            raise Refused('owner input')
+        raw = stream.read(2049)
+        if len(raw) != info.st_size:
+            raise Refused('owner input changed')
+    expected = strict_json(raw)
+    if type(expected) is not dict:
+        raise Refused('owner input schema')
+    version = expected.pop('version', None)
+    if (expected.keys() != {'source', 'scope', 'account_id', 'device_id'}
+            or type(version) is not int or version != 1
+            or any(type(value) is not str for value in expected.values())):
+        raise Refused('owner input schema')
+    return expected
+
+
+def owner_result(descriptor, report, driver):
+    if descriptor is None:
+        return
+    try:
+        payload = (json.dumps({'report': report, 'observation': driver.result},
+                              separators=(',', ':')) + '\n').encode('utf-8')
+        if len(payload) <= os.fpathconf(descriptor, 'PC_PIPE_BUF'):
+            os.write(descriptor, payload)
+    except Exception:
+        # The private reader sees no frame if the atomic write cannot proceed.
+        pass
+
+
+def owner_result_pipe():
+    descriptor = 3
+    try:
+        if not stat.S_ISFIFO(os.fstat(descriptor).st_mode):
+            return None
+        os.set_inheritable(descriptor, False)
+        os.set_blocking(descriptor, False)
+        return descriptor
+    except OSError:
+        return None
+
+
+def owner_launch(argv, env, result_pipe):
+    from csl_workload_config import Configuration
+    from csl_workload_launch_binding import PROFILE, LaunchAcceptanceDriver, PreparedLaunch
+    from csl_workload_observation_driver import runtime_fingerprint
+    from csl_workload_runner import scope
+
+    if 'VITRAL_COLLECTOR_OBSERVE_SESSION' in env:
+        raise Refused('session selector')
+    config = Configuration.from_environment(env)
+    if config.provider != 'codex' or config.profile != PROFILE:
+        raise Refused('owner provider or profile')
+    uid = os.getuid()
+    directory = os.open(OWNER_LAUNCH, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(directory)
+        if info.st_uid != uid or stat.S_IMODE(info.st_mode) != 0o700:
+            raise Refused('owner directory')
+        expected = owner_expected(directory, uid)
+        if expected['source'] != runtime_fingerprint() or expected['scope'] != scope(config):
+            raise Refused('owner runtime or scope')
+        with os.scandir(directory) as entries:
+            if next(entries).name != 'expected.json' or next(entries, None) is not None:
+                raise Refused('fresh owner directory')
+        driver = LaunchAcceptanceDriver(**expected, prepared=PreparedLaunch())
+        report = prepare(argv, env, launch=driver)
+        owner_result(result_pipe, report, driver)
+        if not report['complete']:
+            return 2
+        code = report['writer_exit'] or 0
+        return 128 - code if code < 0 else code
+    finally:
+        os.close(directory)
+
+
 def main():
     try:
         argv = sys.argv[1:]
@@ -185,6 +269,8 @@ def main():
             import resource
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
             sys.path.insert(0, '/opt/vitral/collector')
+            if argv[:1] == ['--observe-owned-launch']:
+                return owner_launch(argv[1:], dict(os.environ), owner_result_pipe())
             return prepare(argv, dict(os.environ))
     except Cancelled as error:
         return 128+error.signum
