@@ -33,7 +33,10 @@ An unwired [execution-import foundation](EXECUTION_IMPORT_FOUNDATION.md) provide
 closed metadata, sealed input capture and reserved-ID lookup for source tests.
 Its private [FD9 transport fixture](EXECUTION_TRANSPORT.md) exercises bounded
 Go/Python framing and parent lifetime with synthetic checks only.
-It adds no command, import publication, native caller or model/recall capability.
+These foundations add no command, native caller or model/recall capability.
+The separate private [Codex publisher](EXECUTION_PUBLISHER.md) now implements
+keeper-backed synthetic publication/cold recovery, still unwired to every command
+and production caller. Claude publisher support remains explicitly unavailable.
 Codex 0.169.0 external `history_base` chains are included in raw v3 snapshots and
 single-session `export --raw`. Portable/batch export of referenced histories
 rejects rather than omitting ancestors. Native `thread/read` requires rebuilt

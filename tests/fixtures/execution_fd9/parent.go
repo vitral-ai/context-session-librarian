@@ -1,4 +1,4 @@
-// Synthetic Go/Python process fixture. No native Access or provider publication.
+// Synthetic Go/Python fixture. No native Access or production provider home.
 package main
 
 import (
@@ -181,7 +181,15 @@ func main() {
 		deathSupervisor(args)
 		return
 	}
-	must(os.WriteFile(filepath.Join(root, "package"), []byte("package"), 0600))
+	packageBytes := []byte("package")
+	sourceID := "synthetic"
+	if scenario == "publisher" || scenario == "death-publisher-effect" {
+		var err error
+		packageBytes, err = os.ReadFile(filepath.Join(root, "publisher.zip"))
+		must(err)
+		sourceID = "11111111-1111-4111-8111-111111111111"
+	}
+	must(os.WriteFile(filepath.Join(root, "package"), packageBytes, 0600))
 	must(os.Mkdir(filepath.Join(root, "codex"), 0700))
 	boot, e := os.ReadFile("/proc/sys/kernel/random/boot_id")
 	must(e)
@@ -194,8 +202,8 @@ func main() {
 	info, e := os.Stat(root)
 	must(e)
 	st := info.Sys().(*syscall.Stat_t)
-	digest := sha256.Sum256([]byte("package"))
-	req := map[string]any{"schema_version": 1, "operation": "import", "execution_id": "re_" + strings.Repeat("1", 64), "import_key": "ri_" + strings.Repeat("2", 64), "provider": "codex", "source_id": "synthetic", "package_size": 7, "package_sha256": hex.EncodeToString(digest[:]), "owner": strings.Repeat("1", 24), "host_id": "ses_fixture", "assignment_id": "33333333-3333-4333-8333-333333333333", "generation": "1", "boot_id": authority["boot_id"], "cwd": root, "cwd_device": strconv.FormatUint(uint64(st.Dev), 10), "cwd_inode": strconv.FormatUint(st.Ino, 10), "authority": authority}
+	digest := sha256.Sum256(packageBytes)
+	req := map[string]any{"schema_version": 1, "operation": "import", "execution_id": "re_" + strings.Repeat("1", 64), "import_key": "ri_" + strings.Repeat("2", 64), "provider": "codex", "source_id": sourceID, "package_size": len(packageBytes), "package_sha256": hex.EncodeToString(digest[:]), "owner": strings.Repeat("1", 24), "host_id": "ses_fixture", "assignment_id": "33333333-3333-4333-8333-333333333333", "generation": "1", "boot_id": authority["boot_id"], "cwd": root, "cwd_device": strconv.FormatUint(uint64(st.Dev), 10), "cwd_inode": strconv.FormatUint(st.Ino, 10), "authority": authority}
 	raw := canonicalRequest(req)
 	commitment := sha256.Sum256(raw)
 	rr, rw, e := os.Pipe()
@@ -311,7 +319,7 @@ func main() {
 			writeFrame(conn, encoded(map[string]any{"type": "deny", "reason": "original_expired"}))
 			break
 		}
-		if scenario == "death-effect" && message["phase"] == "effect" {
+		if (scenario == "death-effect" || scenario == "death-publisher-effect") && message["phase"] == "effect" {
 			select {}
 		}
 		if scenario == "deny" {
@@ -358,7 +366,7 @@ func main() {
 	}
 	report, e := os.ReadFile(filepath.Join(root, "report.json"))
 	must(e)
-	if scenario == "success" {
+	if scenario == "success" || scenario == "publisher" {
 		select {
 		case result := <-resultCh:
 			if string(result) != string(report) {

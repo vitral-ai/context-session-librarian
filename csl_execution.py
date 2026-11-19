@@ -1,5 +1,6 @@
 """Unwired Linux execution codec/capture/reservation. No import or Start caller."""
 from dataclasses import dataclass
+from contextlib import nullcontext
 import fcntl
 import hashlib
 import os
@@ -168,7 +169,7 @@ def capture(fd, req, check, max_bytes):
             os.close(out)
 
 
-def plan(captured, req, check, staging_fd):
+def plan(captured, req, check, staging_fd, *, graph_stage=None,storage=None):
     """Validate the whole sealed package, reserve every graph ID; no rewriting."""
     check()
     durable.directory(staging_fd)
@@ -188,14 +189,15 @@ def plan(captured, req, check, staging_fd):
                 raise ExecutionError('execution_compressed_graph_unsupported')
             import csl_codex_history as history
             check()
-            with tempfile.TemporaryDirectory(prefix='.graph-', dir=f'/proc/self/fd/{staging_fd}') as scratch:
+            context = nullcontext(graph_stage) if graph_stage is not None else tempfile.TemporaryDirectory(prefix='.graph-', dir=f'/proc/self/fd/{staging_fd}')
+            with context as scratch:
                 scratch = Path(scratch).resolve(strict=True)
                 parent = scratch.parent.stat()
                 held = durable.directory(staging_fd)
                 if (parent.st_dev, parent.st_ino) != (held.st_dev, held.st_ino):
                     raise ExecutionError('execution_staging_parent_changed')
                 check()
-                nodes = history.unpack(archive, entry, scratch, check=check)
+                nodes = history.unpack(archive, entry, scratch, check=check,storage=storage)
                 mapping = history.reserve_mapping(nodes)
         else:
             mapping = {'rollouts': {entry['id']: str(uuid.uuid4())}, 'owners': {}}
