@@ -69,6 +69,39 @@ removed; Codex JSON-encoded call arguments are decoded before that check, then
 encoded again. Detection is partial: arbitrary unknown, encoded or split
 secrets can be missed. Structural IDs which cannot survive safely refuse.
 
+## Codex Tool Declaration Omission
+
+The declared `codex-0.169.0-text-v1` subset additionally recognizes the native
+`response_item` / `additional_tools` catalog. The primary schema is
+[`ResponseItem::AdditionalTools` at Codex rust-v0.169.0,
+`d32063f96c2dff1dc96af839b3952abb6acfeda4`](https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/protocol/src/models.rs#L1097).
+Its wire envelope is the pinned
+[`RolloutItemWire::ResponseItem`](https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/history/src/rollout_payload.rs#L41).
+
+This extension accepts only `type`, `role`, `tools` and optional `id`. Role must
+be system/developer/user/assistant; tools must be a JSON array of objects
+(including an empty array), not encoded JSON or opaque bytes. Every native
+descendant is structurally validated before omission. Known encrypted/binary
+field names and media blocks refuse even beneath credential keys. Schemas are
+not executed or dereferenced; this does not qualify every arbitrary JSON value
+allowed by the native schema, or broaden tool-call argument parsing.
+
+The entire catalog becomes the fixed notice "Native tool declarations omitted;
+workload text is view-only." No declaration, identifier, role, description,
+schema, argument, count or catalog hash is transmitted. Its notice offset is
+in the sanitized stream. A catalog-only edit leaves projected bytes unchanged;
+no raw-source coordinate becomes an ACK. Other previously unsupported response
+types, fork/import/attached/history-base cases and opaque payloads still refuse.
+
+The Codex policy fingerprint adds `tool_declarations_omission: 1`; Claude and the
+provider/profile packaging ABI are unchanged. Unaffected Codex projected bytes
+stay identical, and identical sanitized bytes/view may retain acknowledged
+lineage across this policy change. This is a separately reviewed source
+extension, not a substitution into the frozen `e00fd7ee` runtime/image. Operators
+must select an explicitly reviewed corrected source/artifact pin and rerun the
+offline qualification on the already-created real source. Synthetic tests and
+an operator's record-type report do not qualify a new real upload or A8.
+
 ## State And Delivery
 
 The shared `PreparedProvider` contains the formerly Gemini-only explicit-root,

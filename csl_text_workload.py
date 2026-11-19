@@ -8,12 +8,13 @@ from csl_gemini_workload import identifier, timestamp
 from csl_sync_providers import _view
 from csl_sync_state import SyncError
 from csl_workload_provider import PreparedProvider
-from csl_workload_stream import StructureBudget, encoded
+from csl_workload_stream import OPAQUE, StructureBudget, encoded
 
 PROFILES = {'codex': 'codex-0.169.0-text-v1', 'claude': 'claude-2.1.308-text-v1'}
 VERSIONS = {'codex': '0.169.0', 'claude': '2.1.308'}
 MARKER = 'workload_omission_v1'
 PROFILE_MARKER = 'workload_profile_v1'
+TOOL_DECLARATIONS_NOTICE = 'Native tool declarations omitted; workload text is view-only.'
 PROVENANCE_FIELDS = {'csl_conversion', 'csl_source_provider', 'csl_source_session_id',
                      'forkedFrom', 'forked_from_id', 'forked_from_ordinal_exclusive',
                      'parent_thread_id'}
@@ -33,6 +34,30 @@ def refused():
 
 def selected(value, names):
     return {name: value[name] for name in names if name in value}
+
+
+def tool_declarations(value):
+    """Validate the bounded readable catalog before omitting it in its entirety."""
+    if (not {'type', 'role', 'tools'} <= set(value) <= {'type', 'id', 'role', 'tools'}
+            or value['role'] not in ('system', 'developer', 'user', 'assistant')
+            or not isinstance(value['tools'], list)
+            or any(not isinstance(tool, dict) for tool in value['tools'])):
+        refused()
+    if value.get('id') is not None:
+        identifier(value['id'])
+    # project() has validated every descendant against the capture-wide budget.
+    # Visit credential subtrees too: omission must not hide an opaque schema.
+    pending = [value['tools']]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            if (any(key in OPAQUE for key in item)
+                    or item.get('type') in ('image', 'document', 'audio', 'video',
+                                           'base64', 'input_image', 'input_file')):
+                raise SyncError('workload_text_opaque_or_block_refused')
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
 
 
 def blocks(value, *, claude=False):
@@ -75,8 +100,10 @@ class WorkloadTextProvider(PreparedProvider):
 
     @property
     def policy_fingerprint(self):
-        return hashlib.sha256(encoded({'profile': self.profile,
-            'redaction_sha256': self.redactor.fingerprint})).hexdigest()
+        policy = {'profile': self.profile, 'redaction_sha256': self.redactor.fingerprint}
+        if self.provider == 'codex':
+            policy['tool_declarations_omission'] = 1
+        return hashlib.sha256(encoded(policy)).hexdigest()
 
     def _codex(self, record, budget):
         kind, value = record.get('type'), record.get('payload', {})
@@ -111,7 +138,11 @@ class WorkloadTextProvider(PreparedProvider):
             result[MARKER] = 'Native compaction state omitted; workload text is view-only.'
         elif kind == 'response_item':
             subtype = value.get('type')
-            if subtype == 'message':
+            if subtype == 'additional_tools':
+                tool_declarations(value)
+                result['payload'] = {'type': subtype}
+                result[MARKER] = TOOL_DECLARATIONS_NOTICE
+            elif subtype == 'message':
                 if value.get('role') not in ('user', 'assistant', 'system', 'developer'): refused()
                 content, omitted = blocks(value.get('content'))
                 if omitted: refused()
