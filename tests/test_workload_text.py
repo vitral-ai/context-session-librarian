@@ -111,7 +111,7 @@ class WorkloadTextTests(unittest.TestCase):
     def test_omitted_tool_catalog_refuses_opaque_descendants_even_under_credentials(self):
         variants = [{name: 'opaque'} for name in OPAQUE_FIELDS]
         variants += [{'type': name, 'data': 'opaque'} for name in (
-            'image', 'document', 'audio', 'video', 'base64', 'input_image', 'input_file')]
+            'image', 'document', 'audio', 'video', 'base64', 'input_image', 'input_audio', 'input_file')]
         for hidden in variants:
             for field in ('ordinary', 'password'):
                 with self.subTest(marker=tuple(hidden), field=field):
@@ -135,6 +135,33 @@ class WorkloadTextTests(unittest.TestCase):
             row = self.catalog(); row['payload']['type'] = subtype
             adapter, _ = self.provider('codex', native('codex')+[row])
             self.assert_no_upload(adapter)
+
+    def test_tool_catalog_inline_media_carriers_refuse_but_readable_schema_names_pass(self):
+        urls = ('data:image/png;base64,QQ==', 'DATA:audio/wav;base64,QQ==',
+                ' \tDa\rta:application/octet-stream;base64,QQ==', 'data:text/plain,opaque')
+        for carrier in ('image_url', 'audio_url'):
+            for url in urls:
+                for wrapped in (False, True):
+                    for field in ('ordinary', 'password'):
+                        media = {'url': url} if wrapped else url
+                        rows = native('codex')+[self.catalog(tools=[{field: [{carrier: media}]}])]
+                        with self.subTest(carrier=carrier, wrapped=wrapped, field=field):
+                            adapter, _ = self.provider('codex', rows)
+                            self.assert_no_upload(adapter)
+        declaration = {'type': 'function', 'name': 'describe_media_url', 'parameters': {
+            'type': 'object', 'properties': {
+                'image_url': {'type': 'string', 'format': 'uri'},
+                'audio_url': {'type': 'object', 'properties': {'url': {'type': 'string'}}},
+                'input_audio': {'type': 'string'}, 'file_id': {'type': 'string'}},
+            'required': ['image_url']}, 'description': 'Use an image_url or audio_url field.'}
+        adapter, _ = self.provider('codex', native('codex')+[self.catalog(tools=[declaration])])
+        adapter.list_sessions('codex')
+        projected = Path(adapter.raw_files('codex', SID)[0]['path']).read_bytes()
+        self.assertNotIn(b'describe_media_url', projected)
+        for carrier in ('image_url', 'audio_url'):
+            adapter, _ = self.provider('codex', native('codex')+[
+                self.catalog(tools=[{carrier: 'https://example.test/public-reference'}])])
+            adapter.list_sessions('codex')
 
     def test_tool_catalog_does_not_relax_fork_history_or_ordinal_refusal(self):
         for header in ({'forked_from_id': SID}, {'history_base': {'thread_id': SID}},

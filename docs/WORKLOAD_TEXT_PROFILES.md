@@ -82,8 +82,12 @@ This extension accepts only `type`, `role`, `tools` and optional `id`. Role must
 be system/developer/user/assistant; tools must be a JSON array of objects
 (including an empty array), not encoded JSON or opaque bytes. Every native
 descendant is structurally validated before omission. Known encrypted/binary
-field names and media blocks refuse even beneath credential keys. Schemas are
-not executed or dereferenced; this does not qualify every arbitrary JSON value
+field names and media blocks (including native `input_audio`) refuse even beneath
+credential keys. Native `image_url`/`audio_url` inline data URLs also refuse,
+including wrapped `url` values and normalized scheme spelling; no decoding or
+fetch occurs. These field names in readable JSON-schema declarations remain
+valid, and ordinary HTTPS reference strings are omitted without dereferencing.
+Schemas are not executed; this does not qualify every arbitrary JSON value
 allowed by the native schema, or broaden tool-call argument parsing.
 
 The entire catalog becomes the fixed notice "Native tool declarations omitted;

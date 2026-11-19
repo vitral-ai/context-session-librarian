@@ -2,6 +2,7 @@
 from itertools import chain
 import hashlib
 import re
+from urllib.parse import urlsplit
 
 from csl_canonical import strict_json
 from csl_gemini_workload import identifier, timestamp
@@ -53,8 +54,19 @@ def tool_declarations(value):
         if isinstance(item, dict):
             if (any(key in OPAQUE for key in item)
                     or item.get('type') in ('image', 'document', 'audio', 'video',
-                                           'base64', 'input_image', 'input_file')):
+                                           'base64', 'input_image', 'input_audio', 'input_file')):
                 raise SyncError('workload_text_opaque_or_block_refused')
+            for name in ('image_url', 'audio_url'):
+                media = item.get(name)
+                if isinstance(media, dict):
+                    media = media.get('url')
+                if isinstance(media, str):
+                    try:
+                        inline = urlsplit(media).scheme == 'data'
+                    except ValueError:
+                        inline = True
+                    if inline:
+                        raise SyncError('workload_text_opaque_or_block_refused')
             pending.extend(item.values())
         elif isinstance(item, list):
             pending.extend(item)
