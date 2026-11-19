@@ -59,8 +59,12 @@ map. All metadata opens are nonblocking before regular-file/mode/owner/link
 qualification; a FIFO cannot hold a lookup hostage. Replaced/linked/insecure
 records refuse. There is no TTL or actor.
 
-Still required: reviewed identity-owned target proof and person authority;
+The separate private [Codex publisher](EXECUTION_PUBLISHER.md) now supplies
+keeper-backed publication and cold recovery on the same reserved identity. It
+does not change these reserved-only APIs or add a production caller.
+
+Still required for a positive native flow: reviewed identity-owned target proof and person authority;
 production native FD launch/lifetime/EOF/revocation/backpressure qualification;
-keeper-backed destination publication with real SIGKILL cuts; exact result and
-provenance receipts; qualified manifest-scoped erasure; the native loading/model
+native qualification of the publisher and its result/provenance receipts;
+qualified manifest-scoped erasure; the native loading/model
 and A7/A10 tests. Existing harness state and credentials are never fixtures.

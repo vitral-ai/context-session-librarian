@@ -271,11 +271,11 @@ class ExecutionTests(unittest.TestCase):
         import ast
         root=Path(__file__).resolve().parents[1]
         for source in list(root.glob('*.py'))+[root/'csl']:
-            if source.name in ('csl_execution.py','csl_execution_transport.py'):continue
+            if source.name in ('csl_execution.py','csl_execution_transport.py','csl_import_execution.py'):continue
             tree=ast.parse(source.read_text())
             for node in ast.walk(tree):
                 names=[a.name for a in node.names] if isinstance(node,ast.Import) else [node.module] if isinstance(node,ast.ImportFrom) else []
-                self.assertFalse(any(name in ('csl_execution','csl_durable','csl_execution_transport') for name in names),(source.name,names))
+                self.assertFalse(any(name in ('csl_execution','csl_durable','csl_execution_transport','csl_import_execution') for name in names),(source.name,names))
 
     def test_graph_open_expiry_cannot_create_member(self):
         from unittest.mock import patch
