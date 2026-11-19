@@ -16,6 +16,10 @@ VERSIONS = {'codex': '0.169.0', 'claude': '2.1.308'}
 MARKER = 'workload_omission_v1'
 PROFILE_MARKER = 'workload_profile_v1'
 TOOL_DECLARATIONS_NOTICE = 'Native tool declarations omitted; workload text is view-only.'
+WORLD_STATE_NOTICE = 'Native world state omitted; workload text is view-only.'
+TOKEN_USAGE_NOTICE = 'Native token usage omitted; workload text is view-only.'
+USAGE_COUNTERS = {'input_tokens', 'cached_input_tokens', 'output_tokens',
+                  'reasoning_output_tokens', 'total_tokens'}
 PROVENANCE_FIELDS = {'csl_conversion', 'csl_source_provider', 'csl_source_session_id',
                      'forkedFrom', 'forked_from_id', 'forked_from_ordinal_exclusive',
                      'parent_thread_id'}
@@ -46,9 +50,14 @@ def tool_declarations(value):
         refused()
     if value.get('id') is not None:
         identifier(value['id'])
+    readable_metadata(value['tools'])
+
+
+def readable_metadata(value):
+    """Reject known opaque/media descendants before omitting bounded metadata."""
     # project() has validated every descendant against the capture-wide budget.
-    # Visit credential subtrees too: omission must not hide an opaque schema.
-    pending = [value['tools']]
+    # Visit credential subtrees too: omission must not hide opaque payloads.
+    pending = [value]
     while pending:
         item = pending.pop()
         if isinstance(item, dict):
@@ -70,6 +79,22 @@ def tool_declarations(value):
             pending.extend(item.values())
         elif isinstance(item, list):
             pending.extend(item)
+
+
+def token_usage(value):
+    identities = {'thread_id', 'turn_id', 'session_id', 'root_turn_id', 'response_id'}
+    counters = {'usage', 'turn_token_usage', 'thread_token_usage'}
+    if set(value) != identities | counters:
+        refused()
+    for name in identities:
+        identifier(value[name])
+    for name in counters:
+        usage = value[name]
+        if (not isinstance(usage, dict)
+                or not USAGE_COUNTERS <= set(usage) <= USAGE_COUNTERS | {'cache_write_input_tokens'}
+                or any(type(count) is not int or not -(1 << 63) <= count < (1 << 63)
+                       for count in usage.values())):
+            refused()
 
 
 def blocks(value, *, claude=False):
@@ -115,6 +140,7 @@ class WorkloadTextProvider(PreparedProvider):
         policy = {'profile': self.profile, 'redaction_sha256': self.redactor.fingerprint}
         if self.provider == 'codex':
             policy['tool_declarations_omission'] = 1
+            policy['native_metadata_omission'] = 1
         return hashlib.sha256(encoded(policy)).hexdigest()
 
     def _codex(self, record, budget):
@@ -139,6 +165,15 @@ class WorkloadTextProvider(PreparedProvider):
             result['payload'] = {'id': sid}
         elif kind == 'turn_context':
             result['payload'] = selected(value, ('model',))
+        elif kind == 'world_state':
+            if (set(value) != {'full', 'state'} or type(value['full']) is not bool
+                    or not isinstance(value['state'], dict)):
+                refused()
+            readable_metadata(value['state'])
+            result[MARKER] = WORLD_STATE_NOTICE
+        elif kind == 'token_usage_record':
+            token_usage(value)
+            result[MARKER] = TOKEN_USAGE_NOTICE
         elif kind == 'event_msg':
             identifier(value.get('type'))
             if value['type'] not in CODEX_EVENTS: refused()
@@ -242,6 +277,11 @@ class WorkloadTextProvider(PreparedProvider):
             if (any(name in record for name in PROVENANCE_FIELDS)
                     or isinstance(payload, dict) and any(name in payload for name in PROVENANCE_FIELDS)):
                 raise SyncError('workload_text_provenance_refused')
+            if self.provider == 'codex' and record.get('type') == 'token_usage_record':
+                sid = header.get('id', header.get('session_id'))
+                if (not isinstance(payload, dict) or payload.get('thread_id') != sid
+                        or payload.get('session_id') != sid):
+                    raise SyncError('workload_text_provenance_refused')
         selected_records = [self._codex(record, budget) if self.provider == 'codex'
                             else self._claude(record) for record in records]
         clean = self.redactor.clean(selected_records)

@@ -106,6 +106,41 @@ must select an explicitly reviewed corrected source/artifact pin and rerun the
 offline qualification on the already-created real source. Synthetic tests and
 an operator's record-type report do not qualify a new real upload or A8.
 
+## Codex World And Usage Metadata
+
+The Codex subset also recognizes exactly the native `world_state` and
+`token_usage_record` envelopes from the same pinned 0.169.0 source:
+[`WorldStateItem`](https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/protocol/src/protocol.rs#L3643)
+and [`TokenUsageRecord` / `TokenUsage`](https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/protocol/src/protocol.rs#L2545).
+
+World state requires only `full` (an actual boolean) and `state` (a JSON object).
+Both full snapshots and patches become the same fixed notice: "Native world
+state omitted; workload text is view-only." No state is replayed, merged or used
+as authority. The existing bounded structural validation and reviewed opaque /
+inline-media traversal apply before omission, including credential descendants.
+
+Usage requires the five bounded native identity strings plus `usage`,
+`turn_token_usage` and `thread_token_usage`. Thread/session IDs must match the
+main header. Each counter object is closed to the pinned signed-i64 fields:
+`input_tokens`, `cached_input_tokens`, `output_tokens`, `reasoning_output_tokens`,
+`total_tokens`, and optional `cache_write_input_tokens` (the upstream serde
+default). Booleans, floats, out-of-range values, missing/unknown fields and
+structured/opaque counter payloads refuse. This validates representation, not
+provider accounting; no sums, costs or nonnegative-use claim are inferred.
+Every usage record becomes only "Native token usage omitted; workload text is
+view-only." No native counter values/names, turn/response IDs, state contents or
+body hashes are transmitted. Notice coordinates remain sanitized coordinates.
+
+Codex policy adds `native_metadata_omission: 1`; the previous tool-declaration
+policy, package refusal, provenance/history/argument checks and global redaction
+are unchanged. Catalog-only / world-state-only / usage-only edits that leave
+sanitized bytes and view identical retain their ACK lineage. Unknown record
+types still refuse; this is not a general skip-metadata rule. The corrected
+runtime is separately pinned and reviewed: do not modify an older checkout or
+image to impersonate this source. Reuse the existing executor-selected real
+transcript for a fresh full provider preflight after exact-head review and CI;
+neither enrollment nor another model turn is required to qualify source parsing.
+
 ## State And Delivery
 
 The shared `PreparedProvider` contains the formerly Gemini-only explicit-root,
