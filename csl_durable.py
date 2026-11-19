@@ -60,23 +60,35 @@ def locked(fd, check):
         regular(lock)
         check()
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        directory(fd)
-        held = regular(lock)
-        try:
-            named = os.stat('operation.lock', dir_fd=fd, follow_symlinks=False)
-        except FileNotFoundError:
-            raise DurableError('execution_lock_uncertain') from None
-        if (named.st_dev, named.st_ino) != (held.st_dev, held.st_ino):
-            raise DurableError('execution_lock_replaced')
+        def current():
+            """Held lock AND its original name must remain the same authority."""
+            directory(fd)
+            held = os.fstat(lock)
+            try:
+                named = os.stat('operation.lock', dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                raise DurableError('execution_lock_uncertain') from None
+            if (named.st_dev, named.st_ino) != (held.st_dev, held.st_ino):
+                raise DurableError('execution_lock_replaced')
+            regular(lock)
+        current()
         check()
-        yield
+        yield current
     finally:
         os.close(lock)
 
 
 def read(fd, name, limit):
+    raw, held = read_owned(fd, name, limit)
+    os.close(held)
+    return raw
+
+
+def read_owned(fd, name, limit):
+    """Return qualified bytes and an owned FD pin; caller must close the FD."""
     _name(name)
     directory(fd)
+    transferred = False
     try:
         src = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=fd)
     except FileNotFoundError:
@@ -96,9 +108,11 @@ def read(fd, name, limit):
             raise DurableError('execution_metadata_replaced')
         if len(raw) > limit or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
             raise DurableError('execution_metadata_changed')
-        return raw
+        transferred = True
+        return raw, src
     finally:
-        os.close(src)
+        if not transferred:
+            os.close(src)
 
 
 def create(fd, name, value, check, limit):

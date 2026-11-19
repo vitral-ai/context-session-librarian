@@ -1,7 +1,7 @@
 # Private execution transport
 
 `csl_execution_transport` is an unwired Linux library. No command, production
-launcher, Access serialization, native import, provider publication, target
+launcher, Access serialization, production native import/publication, target
 nonce adapter or model Start uses it. A passing fixture is source evidence,
 not native authorization or imported-session qualification.
 
@@ -79,8 +79,11 @@ getppid; the actual Go/Python tests do not.
 For parent-death cuts a private Go supervisor becomes a child subreaper, kills
 its own Go launcher before hello or before an effect check returns, then reaps
 the exact Python PID and checks SIGKILL with no effect marker. It creates no
-daemon, unit, privileged path or new container. This is not the publication
-SIGKILL/keeper recovery matrix: publication still does not exist here.
+daemon, unit, privileged path or new container. The separate private
+[publisher tests](EXECUTION_PUBLISHER.md) now add synthetic keeper publication,
+cold SIGKILL recovery and an actual receipt round-trip on this channel. They
+also kill/reap the real parent before its first link, with zero target files.
+No production Access or native launcher is supplied by either fixture.
 
 Run `python3 -B -m unittest -v tests.test_execution_transport` with Go on PATH.
 Without Go/Linux the language-pair tests report SKIP; set

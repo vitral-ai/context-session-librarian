@@ -300,6 +300,40 @@ class GoPythonTransportTests(unittest.TestCase):
         self.assertTrue(result['sealed'])
         self.assertTrue(result['input_offset_zero'])
 
+    def test_private_publisher_result_and_parent_death_before_link(self):
+        import hashlib
+        import io
+        import zipfile
+        sid='11111111-1111-4111-8111-111111111111'
+        body=(json.dumps({'type':'session_meta','payload':{'id':sid,'cwd':'/synthetic'}})+'\n'+
+              json.dumps({'type':'response_item','payload':{'type':'message','role':'user','content':[]}})+'\n').encode()
+        manifest=dict(format='codex-session-librarian',version=1,mode='raw',sessions=[dict(id=sid,provider='codex',title='synthetic',file='sessions/'+sid+'.jsonl',bytes=len(body),sha256=hashlib.sha256(body).hexdigest())])
+        stream=io.BytesIO()
+        with zipfile.ZipFile(stream,'w') as archive:
+            archive.writestr('manifest.json',json.dumps(manifest))
+            archive.writestr('sessions/'+sid+'.jsonl',body)
+        for scenario in ('publisher','death-publisher-effect'):
+            with self.subTest(scenario=scenario),tempfile.TemporaryDirectory(dir=self.root,prefix='publish-') as path:
+                root=Path(path);root.chmod(0o700)
+                (root/'publisher.zip').write_bytes(stream.getvalue())
+                result=subprocess.run([str(self.binary),sys.executable,str(self.fixture/'publisher.py'),
+                    str(Path(__file__).resolve().parents[1]),path,scenario],capture_output=True,text=True,timeout=12,
+                    env=dict(PATH=os.environ['PATH'],HOME=path,TMPDIR=path,PYTHONDONTWRITEBYTECODE='1'))
+                self.assertEqual(result.returncode,0,result.stdout+'\n'+result.stderr)
+                value=json.loads(result.stdout)
+                if scenario=='publisher':
+                    self.assertEqual(value['validation'],'native_unverified')
+                    self.assertEqual(value['state'],'imported')
+                    self.assertNotEqual(value['imported_native_id'],sid)
+                    self.assertEqual(len(list((root/'codex').rglob('*.jsonl'))),1)
+                    self.assertEqual(value,json.loads((root/'report.json').read_bytes()))
+                else:
+                    self.assertEqual(value,{'reaped':True,'signal':9,'effect':False})
+                    self.assertEqual(list((root/'codex').rglob('*.jsonl')),[])
+                    row=json.loads(next(root.glob('ri_*.json')).read_bytes())
+                    self.assertEqual(row['state'],'publishing')
+                    self.assertIsNone(row['receipt'])
+
     def test_real_result_backpressure_and_request_truncation(self):
         for scenario in ['result-pressure','request-pressure','request-truncated','request-header-truncated','request-trailing','request-mismatch','request-oversize','deny','close','wrong-seq','wrong-bound','partial-deny','prehello-silence','capture-tamper']:
             with self.subTest(scenario=scenario):

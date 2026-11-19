@@ -331,18 +331,20 @@ def validate_graph(entry):
     return graph
 
 
-def unpack(archive,entry,stage,*,check=None):
+def unpack(archive,entry,stage,*,check=None,storage=None):
     graph=validate_graph(entry);root=Path(stage)/'source'
     files={f['file_key']:f for f in entry['files']};primary=None
     for row in graph['nodes']:
         if check:check()
-        path=root/'sessions'/row['file_name'];path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+        path=root/'sessions'/row['file_name']
+        if storage:storage.mkdirs(path.parent)
+        else:path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
         item=files[row['file_key']];digest=hashlib.sha256()
         with archive.open(item['file']) as source:
             if check:check()
-            with path.open('xb', buffering=0 if check else -1) as dest:
+            with (storage.open(path) if storage else path.open('xb', buffering=0 if check else -1)) as dest:
                 if check:check()
-                os.chmod(path,0o600)
+                if not storage:os.chmod(path,0o600)
                 for data in iter(lambda:source.read(1024*1024),b''):
                     digest.update(data)
                     view=memoryview(data)
@@ -388,7 +390,7 @@ def _mapping(nodes, value, new_thread_id):
     return dict(rollouts), dict(owners)
 
 
-def restore(nodes,cwd,new_thread_id,stage,target_home,*,mapping=None):
+def restore(nodes,cwd,new_thread_id,stage,target_home,*,mapping=None,check=None,storage=None):
     """Rewrite identity/coordinates, never remove the native lineage reference."""
     if mapping is None:
         owners={nodes[-1].owner:new_thread_id}
@@ -400,6 +402,7 @@ def restore(nodes,cwd,new_thread_id,stage,target_home,*,mapping=None):
         rollouts, owners = _mapping(nodes, mapping, new_thread_id)
     lengths={};plans=[]
     for n in nodes:
+        if check:check()
         base=reference(n.meta.get('history_base'))
         new_owner=owners[n.owner];new_rollout=rollouts[n.rollout_id]
         main=n is nodes[-1]
@@ -407,10 +410,15 @@ def restore(nodes,cwd,new_thread_id,stage,target_home,*,mapping=None):
         suffix=new_owner if new_owner==new_rollout else new_owner+'_'+new_rollout
         target=Path(target_home)/('sessions' if main else 'archived_sessions')/stamp[:4]/stamp[5:7]/stamp[8:10]/('rollout-'+stamp+'-'+suffix+'.jsonl')
         relative=target.relative_to(target_home)
-        local=Path(stage)/'rewritten'/relative;local.parent.mkdir(parents=True,exist_ok=True,mode=0o700);length=0
-        with local.open('xb') as output:
-            os.chmod(local,0o600)
+        local=Path(stage)/'rewritten'/relative;length=0
+        if storage:storage.mkdirs(local.parent)
+        else:local.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+        if check:check()
+        with (storage.open(local) if storage else local.open('xb',buffering=0 if check else -1)) as output:
+            if check:check()
+            if not storage:os.chmod(local,0o600)
             for record,_,_,_ in lines(n.path,n.length):
+                if check:check()
                 payload=record.get('payload')
                 if record.get('type')=='session_meta':
                     payload.update(id=new_owner,session_id=owners.get(payload.get('session_id'),new_owner),cwd=str(cwd))
@@ -433,8 +441,19 @@ def restore(nodes,cwd,new_thread_id,stage,target_home,*,mapping=None):
                     elif record.get('type')=='event_msg' and payload.get('thread_id') in owners:
                         payload['thread_id']=owners[payload['thread_id']]
                 body=(json.dumps(record,ensure_ascii=False)+'\n').encode()
-                output.write(body);length+=len(body)
+                if check and (length+len(body)>MAX_FILE or sum(lengths.values())+length+len(body)>MAX_TOTAL):
+                    raise HistoryError('history_base_size_limit')
+                view=memoryview(body)
+                while view:
+                    if check:check()
+                    count=output.write(view)
+                    if not count:raise HistoryError('history_base_short_write')
+                    view=view[count:]
+                length+=len(body)
+                if check:check()
         lengths[n.rollout_id]=length;plans.append((local,target,main))
     # Validate the rewritten graph before any publication to the destination.
+    if check:check()
     lineage(Path(stage)/'rewritten',plans[-1][0])
+    if check:check()
     return plans
