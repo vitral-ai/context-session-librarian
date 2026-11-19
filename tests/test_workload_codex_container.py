@@ -353,6 +353,48 @@ class GateTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix='codex-gate-')
         self.addCleanup(self.tmp.cleanup); self.root = Path(self.tmp.name)
 
+    def test_stalled_owner_startup_exits_on_stop_or_original_timeout(self):
+        code = '''import os, runpy, signal, sys, threading
+gate = runpy.run_path(sys.argv[1])
+namespace = gate['owner_launch'].__globals__
+def stalled(_env):
+    print('reading', flush=True)
+    threading.Event().wait()
+namespace['owner_driver'] = stalled
+signal.pthread_sigmask(signal.SIG_BLOCK, gate['SIGNALS'])
+try:
+    gate['owner_launch'](['--prepare-seconds', '1', '--', 'fixture'], {}, None)
+except gate['Cancelled'] as error:
+    sys.exit(128 + error.signum)
+except gate['Refused']:
+    sys.exit(2)
+sys.exit(99)
+'''
+        for cancel_early, expected in ((True, 143), (False, 2)):
+            with self.subTest(cancel_early=cancel_early):
+                process = subprocess.Popen(
+                    [sys.executable, '-B', '-c', code, str(OVERLAY / 'prepare.py')],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.addCleanup(self.cleanup_child, process)
+                if cancel_early:
+                    import select
+                    self.assertTrue(select.select([process.stdout], [], [], 3)[0])
+                    self.assertEqual(process.stdout.readline(), b'reading\n')
+                    process.send_signal(signal.SIGUSR1)
+                    process.send_signal(signal.SIGTERM)
+                process.communicate(timeout=3)
+                self.assertEqual(process.returncode, expected)
+
+    def test_preparation_carries_startup_time_without_reset(self):
+        def unexpected_validation(_env):
+            self.fail('expired startup reached mount validation')
+
+        original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        self.addCleanup(signal.pthread_sigmask, signal.SIG_SETMASK, original_mask)
+        with self.assertRaisesRegex(self.gate.Refused, 'preparation deadline'):
+            self.gate.prepare(['--prepare-seconds', '1', '--', 'fixture'], {},
+                              now=lambda: 12, validator=unexpected_validation, _started=10)
+
     def test_optional_owner_result_is_atomic_and_never_waits_for_reader(self):
         from types import SimpleNamespace
 

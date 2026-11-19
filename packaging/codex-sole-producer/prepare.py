@@ -106,20 +106,20 @@ def stop_pending():
     return signal.SIGTERM if signal.SIGTERM in pending else signal.SIGINT if signal.SIGINT in pending else None
 
 
-def prepare(argv, env, *, now=clock, validator=validate, run=None, wait=signal.sigtimedwait, launch=None):
+def prepare(argv, env, *, now=clock, validator=validate, run=None, wait=signal.sigtimedwait, launch=None, _started=None):
     if launch is not None:
         from csl_workload_launch_binding import LaunchAcceptanceDriver
         if not isinstance(launch, LaunchAcceptanceDriver): raise Refused('launch binding')
     try:
-        return _prepare(argv, env, now=now, validator=validator, run=run, wait=wait, launch=launch)
+        return _prepare(argv, env, now=now, validator=validator, run=run, wait=wait, launch=launch, started=_started)
     finally:
         if launch is not None: launch.close()
 
 
-def _prepare(argv, env, *, now, validator, run, wait, launch):
+def _prepare(argv, env, *, now, validator, run, wait, launch, started):
     # The process owns this signal mask until exit. Tests use isolated children.
     signal.pthread_sigmask(signal.SIG_BLOCK, SIGNALS)
-    started = now()
+    started = now() if started is None else started
     seconds, values = arguments(argv)
     deadline = started+seconds
     if launch is not None:
@@ -128,6 +128,9 @@ def _prepare(argv, env, *, now, validator, run, wait, launch):
             raise Refused('launch binding')
     def validate_views():
         return validator(env) if launch is None else validator(env, prepared=launch.prepared)
+    stop = stop_pending()
+    if stop: raise Cancelled(stop)
+    check_deadline(deadline, now)
     prepared_views = validate_views()
     check_deadline(deadline, now)
     while True:
@@ -222,7 +225,7 @@ def owner_result_pipe():
         return None
 
 
-def owner_launch(argv, env, result_pipe):
+def owner_driver(env):
     from csl_workload_config import Configuration
     from csl_workload_launch_binding import PROFILE, LaunchAcceptanceDriver, PreparedLaunch
     from csl_workload_observation_driver import runtime_fingerprint
@@ -245,15 +248,49 @@ def owner_launch(argv, env, result_pipe):
         with os.scandir(directory) as entries:
             if next(entries).name != 'expected.json' or next(entries, None) is not None:
                 raise Refused('fresh owner directory')
-        driver = LaunchAcceptanceDriver(**expected, prepared=PreparedLaunch())
-        report = prepare(argv, env, launch=driver)
-        owner_result(result_pipe, report, driver)
-        if not report['complete']:
-            return 2
-        code = report['writer_exit'] or 0
-        return 128 - code if code < 0 else code
+        return LaunchAcceptanceDriver(**expected, prepared=PreparedLaunch())
     finally:
         os.close(directory)
+
+
+def await_owner_driver(env, deadline):
+    from threading import Thread
+
+    result = None
+
+    def read():
+        nonlocal result
+        try:
+            result = owner_driver(env)
+        except Exception:
+            return
+
+    # All gate signals are already blocked and the reader inherits the mask.
+    reader = Thread(target=read, daemon=True)
+    reader.start()
+    while True:
+        stop = stop_pending()
+        if stop: raise Cancelled(stop)
+        remaining = deadline - clock()
+        if remaining <= 0: raise Refused('preparation deadline')
+        if not reader.is_alive():
+            if result is None: raise Refused('owner startup')
+            return result
+        # Leave an early USR1 pending for the ordinary preparation gate.
+        notification = signal.sigtimedwait(STOPS, min(.05, remaining))
+        if notification is not None: raise Cancelled(notification.si_signo)
+
+
+def owner_launch(argv, env, result_pipe):
+    started = clock()
+    seconds, _ = arguments(argv)
+    driver = await_owner_driver(env, started + seconds)
+    report = prepare(argv, env, launch=driver, _started=started)
+    owner_result(result_pipe, report, driver)
+    if not report['complete']:
+        return 2
+    code = report['writer_exit'] or 0
+    return 128 - code if code < 0 else code
 
 
 def main():
