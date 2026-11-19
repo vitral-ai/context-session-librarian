@@ -140,6 +140,15 @@ class LifecycleTests(unittest.TestCase):
         self.assertNotIn(self.config.origin, repr(popen.call_args.args))
         self.assertEqual(options['stdin'], subprocess.DEVNULL)
 
+    def test_receipt_cleanup_failure_cannot_change_pending_into_complete(self):
+        clock, worker = Clock(), FakePass()
+        writer = Mock(returncode=0); writer.poll.return_value = 0; writer.quiesced.return_value = True
+        runner = Runner(self.config, clock=clock, sleep=clock.sleep, pass_factory=lambda *args: worker)
+        with patch.object(worker, 'remove_receipt', side_effect=[OSError('owned cleanup unit'), None]), \
+             patch('csl_workload_runner.Producer', return_value=writer):
+            result = runner.run(['/literal/fixture'])
+        self.assertFalse(result['complete']); self.assertTrue(result['pending'])
+
     def test_expired_write_boundary_refuses_before_opener_or_worker_spawn(self):
         with patch('csl_workload_runner.boot_clock', return_value=1000):
             http = DeadlineHTTP(self.config.origin, 1001, attempts=1)
