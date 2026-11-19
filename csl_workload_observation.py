@@ -54,7 +54,7 @@ class Observation:
         try: getattr(self, '_' + name)(*args)
         except Exception: self.failed = True
 
-    def _upload_planned(self, path, file_key, revision, start, end):
+    def _upload_planned(self, path, file_key, revision, start, end, prefix=None):
         if path != self.path: return
         self.proved = False
         if self.upload is not None or self.last is not None: raise ValueError()
@@ -135,7 +135,7 @@ class Observation:
                            if joined.endswith(CANARY[:n])), b'')
             call['content'] = candidate, suffix
 
-    def _end(self, method, path, success):
+    def _end(self, method, path, success, result=None):
         if method != 'PUT' or not (path == self.path or path.startswith((self.path + '/', self.path + '?'))): return
         call, self.call = self.call, None
         if not success or call is None or call['attempts'] != 1: raise ValueError()

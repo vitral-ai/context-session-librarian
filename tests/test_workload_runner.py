@@ -40,6 +40,85 @@ def config_at(root):
         2, 128*1024*1024, None)
 
 
+def stopped_record_after_guardian_exit(path, guardian_fd, deadline):
+    # Writer/child exit does not mean the guardian finished atomic publication.
+    poll = select.poll()
+    poll.register(guardian_fd, select.POLLIN)
+    remaining = deadline-boot_clock()
+    if remaining <= 0 or not poll.poll(int(remaining*1000)) or boot_clock() >= deadline:
+        raise AssertionError('original guardian did not exit within fixture cap')
+    value = read_record(path)
+    if boot_clock() >= deadline:
+        raise AssertionError('guardian record read exceeded fixture cap')
+    if value is None or value.get('phase') != 'stopped':
+        raise AssertionError('original guardian did not persist stopped state')
+    return value
+
+
+class GuardianReadOrderingTests(unittest.TestCase):
+    def test_strict_read_follows_guardian_exit(self):
+        events = []
+        poll = Mock()
+        poll.poll.side_effect = lambda timeout: events.append(('wait', timeout)) or [(7, select.POLLIN)]
+        value = {'phase': 'stopped'}
+        with patch('test_workload_runner.select.poll', return_value=poll), \
+             patch('test_workload_runner.boot_clock', return_value=10), \
+             patch('test_workload_runner.read_record', side_effect=lambda _: events.append(('read',)) or value):
+            self.assertEqual(stopped_record_after_guardian_exit(Path('owned.json'), 7, 13), value)
+        poll.register.assert_called_once_with(7, select.POLLIN)
+        self.assertEqual(events, [('wait', 3000), ('read',)])
+
+    def test_missing_or_late_exit_never_reads_a_live_record(self):
+        for ready, times in (([], (10,)), ([(7, select.POLLIN)], (10, 13)), ([], (13,))):
+            with self.subTest(ready=ready, times=times), \
+                 patch('test_workload_runner.select.poll') as polling, \
+                 patch('test_workload_runner.boot_clock', side_effect=times), \
+                 patch('test_workload_runner.read_record') as read:
+                polling.return_value.poll.return_value = ready
+                with self.assertRaises(AssertionError):
+                    stopped_record_after_guardian_exit(Path('owned.json'), 7, 13)
+                read.assert_not_called()
+
+    def test_exit_does_not_waive_unsafe_or_missing_stop_state(self):
+        for outcome in (SyncError('workload_runtime_storage_refused'), None, {'phase': 'running'}):
+            with self.subTest(outcome=type(outcome).__name__), \
+                 patch('test_workload_runner.select.poll') as polling, \
+                 patch('test_workload_runner.boot_clock', return_value=10), \
+                 patch('test_workload_runner.read_record') as read:
+                polling.return_value.poll.return_value = [(7, select.POLLIN)]
+                if isinstance(outcome, Exception): read.side_effect = outcome
+                else: read.return_value = outcome
+                with self.assertRaises(SyncError if isinstance(outcome, Exception) else AssertionError):
+                    stopped_record_after_guardian_exit(Path('owned.json'), 7, 13)
+                read.assert_called_once()
+
+    def test_late_record_read_cannot_extend_original_wait_cap(self):
+        with patch('test_workload_runner.select.poll') as polling, \
+             patch('test_workload_runner.boot_clock', side_effect=(10, 10, 13)), \
+             patch('test_workload_runner.read_record', return_value={'phase': 'stopped'}):
+            polling.return_value.poll.return_value = [(7, select.POLLIN)]
+            with self.assertRaisesRegex(AssertionError, 'exceeded fixture cap'):
+                stopped_record_after_guardian_exit(Path('owned.json'), 7, 13)
+
+    def test_atomic_replacement_keeps_strict_unlinked_inode_refusal(self):
+        with tempfile.TemporaryDirectory(prefix='guardian-rename-') as directory:
+            path = Path(directory)/'producer.json'
+            private_json(path, {'phase': 'running'})
+            original, observed = os.fstat, []
+            def replace_before_stat(fd):
+                if not observed:
+                    observed.append(original(fd).st_nlink)
+                    private_json(path, {'phase': 'stopped'})
+                    observed.append(original(fd).st_nlink)
+                return original(fd)
+            with patch('csl_workload_state.os.fstat', side_effect=replace_before_stat), \
+                 self.assertRaises(SyncError) as refusal:
+                read_record(path)
+            self.assertEqual(refusal.exception.code, 'workload_runtime_storage_refused')
+            self.assertEqual(observed, [1, 0])
+            self.assertEqual(read_record(path), {'phase': 'stopped'})
+
+
 class Clock:
     def __init__(self): self.now = 1000
     def __call__(self): return self.now
@@ -139,6 +218,15 @@ class LifecycleTests(unittest.TestCase):
         self.assertNotIn('SYNTHETIC-CANARY', repr(popen.call_args))
         self.assertNotIn(self.config.origin, repr(popen.call_args.args))
         self.assertEqual(options['stdin'], subprocess.DEVNULL)
+
+    def test_receipt_cleanup_failure_cannot_change_pending_into_complete(self):
+        clock, worker = Clock(), FakePass()
+        writer = Mock(returncode=0); writer.poll.return_value = 0; writer.quiesced.return_value = True
+        runner = Runner(self.config, clock=clock, sleep=clock.sleep, pass_factory=lambda *args: worker)
+        with patch.object(worker, 'remove_receipt', side_effect=[OSError('owned cleanup unit'), None]), \
+             patch('csl_workload_runner.Producer', return_value=writer):
+            result = runner.run(['/literal/fixture'])
+        self.assertFalse(result['complete']); self.assertTrue(result['pending'])
 
     def test_expired_write_boundary_refuses_before_opener_or_worker_spawn(self):
         with patch('csl_workload_runner.boot_clock', return_value=1000):
@@ -671,11 +759,15 @@ class UploaderTests(unittest.TestCase):
         process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             env={'PATH': os.defpath, 'HOME': str(self.root), **environment(self.config)})
         descriptors = []
+        guardian_fd = None
         try:
             until = boot_clock()+6
             while not child_pid.exists() and boot_clock() < until and process.poll() is None: time.sleep(.01)
             self.assertTrue(child_pid.exists())
             descriptors = [os.pidfd_open(int(path.read_text())) for path in (root_pid, child_pid)]
+            # The native child could run only after its guardian's running record
+            # was durable. Retain that original guardian identity before killing Runner.
+            guardian_fd = os.pidfd_open(read_record(self.config.state_root/'runtime/producer.json')['guardian_pid'])
             process.kill(); process.wait(timeout=2)
             # An immediate restart either refuses the live claim or observes its
             # completed guardian stop. It never relaunches the original argv.
@@ -687,9 +779,7 @@ class UploaderTests(unittest.TestCase):
                     poll = select.poll(); poll.register(fd, select.POLLIN); self.assertTrue(poll.poll(0))
             for fd in descriptors:
                 poll = select.poll(); poll.register(fd, select.POLLIN); self.assertTrue(poll.poll(6000))
-            until = boot_clock()+3
-            while read_record(self.config.state_root/'runtime/producer.json')['phase'] != 'stopped' and boot_clock() < until:
-                time.sleep(.01)
+            stopped_record_after_guardian_exit(self.config.state_root/'runtime/producer.json', guardian_fd, boot_clock()+3)
             before = source_path.read_bytes(); release.touch()
             result = Runner(replace(self.config, flush_seconds=5)).run([sys.executable, '-S', '-c', 'pass'])
             self.assertTrue(result['complete'], result)
@@ -702,6 +792,10 @@ class UploaderTests(unittest.TestCase):
                 try: signal.pidfd_send_signal(fd, signal.SIGKILL)
                 except ProcessLookupError: pass
                 os.close(fd)
+            if guardian_fd is not None:
+                try: signal.pidfd_send_signal(guardian_fd, signal.SIGKILL)
+                except ProcessLookupError: pass
+                os.close(guardian_fd)
 
 
 if __name__ == '__main__': unittest.main()

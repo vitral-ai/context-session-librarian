@@ -14,6 +14,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import test_workload_packaging as chart_fixture
+from csl_workload_observation_driver import runtime_fingerprint
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = ROOT/'packaging/collector-image'
@@ -57,8 +58,10 @@ class WorkloadImageTests(unittest.TestCase):
                     'm=json.load(open(sys.argv[1]+"/runtime-manifest.json")); '
                     '[importlib.import_module(n[:-3]) for n in m["sha256"] if n.endswith(".py")]; '
                     'from csl_workload_config import PROVIDER_PROFILES; '
-                    'assert set(PROVIDER_PROFILES)=={"codex","claude","gemini"}')
-            result = subprocess.run([sys.executable, '-E', '-s', '-S', '-c', code, str(output)],
+                    'assert set(PROVIDER_PROFILES)=={"codex","claude","gemini"}; '
+                    'from csl_workload_observation_driver import runtime_fingerprint; '
+                    'assert runtime_fingerprint()==sys.argv[2]')
+            result = subprocess.run([sys.executable, '-E', '-s', '-S', '-c', code, str(output), runtime_fingerprint()],
                 cwd=temporary, env={'PATH': os.defpath, 'PYTHONDONTWRITEBYTECODE': '1',
                                     'PYTHONPATH': '/not-an-approved-checkout'},
                 capture_output=True, timeout=10)

@@ -65,18 +65,21 @@ changed plans/metadata, oversized bodies, exhausted bounds, missing callbacks,
 incomplete/unmatched ACKs, failed/retried attempts, lost responses or final proof
 loss poison evidence without changing the network call or product result.
 
-No observation authority crosses workers or restarts. Reused remote content,
+Without the separately supplied private composition driver, no observation
+authority crosses workers or restarts. Reused remote content,
 nonzero resume ranges and already-delivered or empty views have missing surface
 coverage and remain UNQUALIFIED. In particular a final worker after a live pass
 will often have no content/view writes and cannot qualify those prior uploads.
-The current source intentionally does NOT solve durable multi-pass observation,
+The single-worker mode intentionally does NOT solve durable multi-pass observation,
 lost-response reconciliation or earlier-range coverage. It must not borrow prior
 ACK digests or replay uploads to manufacture evidence. A later reviewed evidence
-composition would be needed for that broader acceptance lane.
+composition is now available only through the explicit
+[private source driver](WORKLOAD_OBSERVATION_COMPOSITION_LOCAL.md), with its
+separate conservative limits and owned synthetic process tests.
 
 Generic image source inventory includes the new module. Existing pinned #60/#61
 artifacts do not contain it; no receipt or pin is silently substituted. Future
 image builds, overlays, native harness turns, consent, registry/UI joining and
 execution remain separately commissioned. Validation here is in-process source
-units with synthetic bodies and mocked transport/process creation, not actual
+units for the single-worker cut used synthetic bodies and mocked transport/process creation, not actual
 worker/collector processes, enrollment, provider calls or containers.
