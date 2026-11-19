@@ -22,7 +22,11 @@ class PreparedProvider:
     def policy_fingerprint(self):
         return self.redactor.fingerprint
 
-    def __init__(self, sources, store, *, bounds=None, extra_literals=()):
+    def __init__(self, sources, store, *, bounds=None, extra_literals=(), capture=None):
+        if capture is not None:
+            from csl_workload_launch_binding import LaunchObservation
+            if not isinstance(capture, LaunchObservation): raise TypeError()
+        self.capture = capture
         self.bounds = bounds or Bounds()
         if not isinstance(sources, tuple) or not 1 <= len(sources) <= self.bounds.files:
             raise SyncError('workload_source_limit')
@@ -49,12 +53,15 @@ class PreparedProvider:
             raise SyncError('unsupported_provider')
         entries = {}
         for root, relative in self.sources:
-            records, cursor = read_complete(root, relative, self.bounds)
+            records, cursor = (read_complete(root, relative, self.bounds) if self.capture is None else
+                               read_complete(root, relative, self.bounds, capture=self.capture))
             metadata, output, view = self.project(records)
+            if self.capture is not None: self.capture.header(records)
             sid = metadata['native_id']
             if sid in entries:
                 raise SyncError(self.duplicate_code)
-            verify_prefix(root, relative, cursor)
+            if self.capture is None: verify_prefix(root, relative, cursor)
+            else: verify_prefix(root, relative, cursor, capture=self.capture)
             # Preserve Gemini's existing source-key mapping across the extraction.
             source_key = str(Path(root).absolute()) + '/' + relative
             path = self.store.publish(source_key, output)
@@ -65,7 +72,9 @@ class PreparedProvider:
             entries[sid] = {'metadata': metadata, 'file': descriptor, 'view': view,
                 'source_cursor': cursor, 'projection_version': 1, 'policy_sha256': self.policy_fingerprint}
         self.prepared = entries
-        return [entry['metadata'] for entry in entries.values()]
+        accepted = [entry['metadata'] for entry in entries.values()]
+        if self.capture is not None: self.capture.admitted(self, accepted)
+        return accepted
 
     def _entry(self, provider, native_id):
         if provider != self.provider or native_id not in self.prepared:

@@ -128,17 +128,18 @@ class Agent:
 
 
 class RemoteObservation(Channel):
-    def __init__(self, config, assignment, binding, expected_worker):
+    def __init__(self, config, assignment, binding, expected_worker, *, selected_session=None):
         from csl_workload_http import Origin
         context = assignment['context']
+        session = config.observe_session if selected_session is None else identity(selected_session)
         if (assignment['worker'] != expected_worker or context['scope'] != binding['scope']
-                or context['session'] != config.observe_session
+                or context['session'] != session
                 or context['binding'] != hashlib.sha256(canonical({k: binding[k] for k in ('account_id', 'device_id')})).hexdigest()):
             raise ValueError()
         super().__init__(socket.socket(fileno=os.dup(assignment['observer_fd'])))
         self.worker, self.seal = map(identity, (expected_worker, assignment['seal']))
         self.context, self.deadline = context, assignment['deadline']
-        self.path = '/sessions/'+config.provider+'/'+config.observe_session
+        self.path = '/sessions/'+config.provider+'/'+session
         self.url = Origin(config.origin).registry+self.path
         self.failed, self.call = False, None
         self.prepared = {}
@@ -185,6 +186,7 @@ class RemoteObservation(Channel):
 
 
 def serve(fd, parent):
+    from dataclasses import replace
     from csl_workload_runner import parent_death, scope
     from csl_workload_config import Configuration
     from csl_workload_observation_driver import StoredDriver, runtime_fingerprint
@@ -193,6 +195,7 @@ def serve(fd, parent):
     sock = socket.socket(fileno=fd)
     driver = observation = config = None
     finals = {}
+    launch = None
     for _ in range(MAX_EVENTS):
         raw, _, flags, _ = sock.recvmsg(MAX_PACKET)
         if not raw or flags & socket.MSG_TRUNC: return
@@ -201,11 +204,31 @@ def serve(fd, parent):
         if op == 'start':
             if driver is not None: return
             config = Configuration.from_environment(message['configuration'])
-            driver = StoredDriver(**message['expected'])
+            if 'native_launch' in message:
+                launch = identity(message['native_launch'])
+                if (config.observe_session is not None or config.provider != 'codex'
+                        or config.profile != 'codex-0.169.0-text-v1'
+                        or message['expected']['session'] is not None): return
+                driver = StoredDriver.__new__(StoredDriver)
+                expected = message['expected']
+                driver._initialize(expected['source'], expected['scope'], expected['account_id'], expected['device_id'], None)
+            else: driver = StoredDriver(**message['expected'])
             identity(message['run'])
             driver.run = message['run']; driver.context['run'] = message['run']
-            driver.start(config, scope(config))
+            if launch is None: driver.start(config, scope(config))
+            else: driver.authorize(config, scope(config))
             if not driver.valid: return
+            answer = ({'event': 'started', 'anchor': driver.anchor} if launch is None else
+                      {'event': 'launch_prepared', 'launch': launch})
+        elif op == 'bind_launch':
+            if (set(message) != {'op', 'launch', 'session', 'deadline'} or launch is None
+                    or message['launch'] != launch or driver is None or not driver.valid
+                    or driver.context['session'] is not None or boot_clock() >= message['deadline']): return
+            session = identity(message['session'])
+            driver.context['session'] = session
+            config = driver.config = replace(config, observe_session=session)
+            driver.open_evidence()
+            if boot_clock() >= message['deadline']: return
             answer = {'event': 'started', 'anchor': driver.anchor}
         elif op == 'assign':
             assignment = message['assignment']

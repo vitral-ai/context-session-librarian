@@ -31,6 +31,7 @@ from csl_workload_producer import Producer, recover as recover_producer
 from csl_workload_observation import Observation, receipt_valid
 from csl_workload_observation_driver import AcceptanceDriver
 from csl_workload_observation_agent import RemoteObservation
+from csl_workload_launch_binding import LaunchAcceptanceDriver, LaunchObservation
 
 POLL_SECONDS = 0.1
 PASS_SECONDS = 60
@@ -298,12 +299,24 @@ def run_pass(config, deadline, composition=None, expected_worker=None):
         if type(cursor) is not int or not 0 <= cursor < max(1, len(selected)):
             raise SyncError('workload_runtime_record_refused')
         private_json(runtime/'sources.json', {'paths': list(selected), 'next_index': (cursor+1) % max(1, len(selected))})
-        if not selected: return {'ok': False, 'synced': 0, 'pending': 1, 'manifest': []}
+        if not selected:
+            result = {'ok': False, 'synced': 0, 'pending': 1, 'manifest': []}
+            if config.observe_session is None and composition is not None and composition.get('mode') == 'fresh-codex':
+                try:
+                    empty = LaunchObservation(config, composition, binding, expected_worker)
+                    try: result.update(empty.no_source())
+                    finally: empty.close()
+                except Exception: pass
+            return result
+        if config.observe_session is None and composition is not None and composition.get('mode') == 'fresh-codex':
+            try: http.observation = LaunchObservation(config, composition, binding, expected_worker)
+            except Exception: http.observation = None
         ordered = selected[cursor:]+selected[:cursor]
         inputs = tuple((config.transcript_root, path) for path in ordered)
         projection = child(config.state_root, 'projection')
         adapter = (WorkloadGeminiProvider(inputs, projection, bounds=limits) if config.provider == 'gemini'
-                   else WorkloadTextProvider(config.provider, inputs, projection, bounds=limits))
+                   else WorkloadTextProvider(config.provider, inputs, projection, bounds=limits,
+                        capture=http.observation if isinstance(http.observation, LaunchObservation) else None))
         state = State(sync)
         try:
             state.set('device_id', identity['device_id'])
@@ -315,21 +328,24 @@ def run_pass(config, deadline, composition=None, expected_worker=None):
             registry.prove(state, config.provider)
             manifest = source_manifest(config, adapter)
             result = {'ok': True, 'synced': result['synced'], 'pending': 0, 'manifest': manifest}
-            if config.observe_session is not None:
+            selected_session = (http.observation.session if isinstance(http.observation, LaunchObservation)
+                                else config.observe_session)
+            if selected_session is not None:
                 # Existing checked/persisted proof, NOT an observer assertion.
                 # No extra state read, request or ACK/proof acceptance occurs.
                 try:
-                    plan = registry.plans['/sessions/'+config.provider+'/'+config.observe_session]
+                    plan = registry.plans['/sessions/'+config.provider+'/'+selected_session]
                     file, = plan['files']
                     result['delivery_plan'] = {'snapshot': plan['snapshot_id'], 'revision': file['revision'],
                         'generation': plan['view']['generation'], 'file_key': file['file_key'],
                         'length': file['length'], 'sha256': file['sha256'], 'last_seq': plan['view']['last_seq']}
                 except Exception: pass
-            if isinstance(http.observation, RemoteObservation): result.update(http.observation.finalize())
+            if isinstance(http.observation, (RemoteObservation, LaunchObservation)): result.update(http.observation.finalize())
             elif http.observation is not None: result['observation'] = http.observation.receipt()
             return result
         finally:
             state.close()
+            if isinstance(http.observation, LaunchObservation): http.observation.close()
 
 
 class PassProcess:
@@ -432,7 +448,9 @@ class Runner:
         if self.observation_driver is not None:
             assignment = self.observation_driver.assign(self.worker_sequence, deadline)
             if assignment is not None:
-                return self.pass_factory(self.config, self.worker_sequence, deadline, composition=assignment)
+                try: return self.pass_factory(self.config, self.worker_sequence, deadline, composition=assignment)
+                finally:
+                    if isinstance(self.observation_driver, LaunchAcceptanceDriver): self.observation_driver.spawned()
         return self.pass_factory(self.config, self.worker_sequence, deadline)
 
     def stop(self): self.stopping = True
@@ -479,7 +497,11 @@ class Runner:
                 if self.stopping: return report
                 # The writer inherits its own environment without inspection;
                 # collector children instead receive only the allowlist above.
-                writer = Producer(child(self.config.state_root, 'runtime'), scope(self.config), command)
+                if isinstance(self.observation_driver, LaunchAcceptanceDriver):
+                    capture_launch = self.observation_driver.command_matches(command)
+                    writer = Producer(child(self.config.state_root, 'runtime'), scope(self.config), command, capture_launch=capture_launch)
+                    self.observation_driver.launched(writer)
+                else: writer = Producer(child(self.config.state_root, 'runtime'), scope(self.config), command)
             next_pass = self.clock()
             while not self.stopping and (writer is None or writer.poll() is None):
                 if worker is None and self.clock() >= next_pass:
@@ -581,7 +603,7 @@ def worker_main(receipt, parent, deadline, observation_fd=None):
             raw = os.read(observation_fd, 4097)
             if len(raw) > 4096: raise ValueError()
             candidate = json.loads(raw)
-            if (config.observe_session is not None and candidate['worker'] == receipt.stem
+            if ((config.observe_session is not None or candidate.get('mode') == 'fresh-codex') and candidate['worker'] == receipt.stem
                     and candidate['deadline'] == deadline):
                 composition = candidate
     except Exception: pass

@@ -17,6 +17,7 @@ import tarfile
 import tempfile
 import time
 import unittest
+from unittest.mock import Mock
 from unittest.mock import patch
 
 from csl_sync_state import SyncError
@@ -352,6 +353,96 @@ class GateTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix='codex-gate-')
         self.addCleanup(self.tmp.cleanup); self.root = Path(self.tmp.name)
 
+    def test_stalled_owner_startup_exits_on_stop_or_original_timeout(self):
+        code = '''import os, runpy, signal, sys, threading
+gate = runpy.run_path(sys.argv[1])
+namespace = gate['owner_launch'].__globals__
+def stalled(_env):
+    print('reading', flush=True)
+    threading.Event().wait()
+namespace['owner_driver'] = stalled
+signal.pthread_sigmask(signal.SIG_BLOCK, gate['SIGNALS'])
+try:
+    gate['owner_launch'](['--prepare-seconds', '1', '--', 'fixture'], {}, None)
+except gate['Cancelled'] as error:
+    sys.exit(128 + error.signum)
+except gate['Refused']:
+    sys.exit(2)
+sys.exit(99)
+'''
+        for cancel_early, expected in ((True, 143), (False, 2)):
+            with self.subTest(cancel_early=cancel_early):
+                process = subprocess.Popen(
+                    [sys.executable, '-B', '-c', code, str(OVERLAY / 'prepare.py')],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.addCleanup(self.cleanup_child, process)
+                if cancel_early:
+                    import select
+                    self.assertTrue(select.select([process.stdout], [], [], 3)[0])
+                    self.assertEqual(process.stdout.readline(), b'reading\n')
+                    process.send_signal(signal.SIGUSR1)
+                    process.send_signal(signal.SIGTERM)
+                process.communicate(timeout=3)
+                self.assertEqual(process.returncode, expected)
+
+    def test_preparation_carries_startup_time_without_reset(self):
+        def unexpected_validation(_env):
+            self.fail('expired startup reached mount validation')
+
+        original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        self.addCleanup(signal.pthread_sigmask, signal.SIG_SETMASK, original_mask)
+        with self.assertRaisesRegex(self.gate.Refused, 'preparation deadline'):
+            self.gate.prepare(['--prepare-seconds', '1', '--', 'fixture'], {},
+                              now=lambda: 12, validator=unexpected_validation, _started=10)
+
+    def test_optional_owner_result_is_atomic_and_never_waits_for_reader(self):
+        from types import SimpleNamespace
+
+        read_fd, write_fd = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
+        self.addCleanup(os.close, write_fd)
+        report = {'complete': True, 'writer_exit': 0}
+        driver = SimpleNamespace(result=None)
+        try:
+            self.gate.owner_result(write_fd, report, driver)
+            self.assertEqual(json.loads(os.read(read_fd, 4096)),
+                             {'report': report, 'observation': None})
+            limit = os.fpathconf(write_fd, 'PC_PIPE_BUF')
+            filler = b'x' * limit
+            count = 0
+            while True:
+                try:
+                    count += os.write(write_fd, filler)
+                except BlockingIOError:
+                    break
+            self.gate.owner_result(write_fd, report, driver)
+            self.assertEqual(os.read(read_fd, count + limit), b'x' * count)
+            self.gate.owner_result(write_fd, report, SimpleNamespace(result='x' * limit))
+            with self.assertRaises(BlockingIOError):
+                os.read(read_fd, limit)
+        finally:
+            os.close(read_fd)
+        self.gate.owner_result(write_fd, report, driver)
+
+    def test_owner_expected_requires_private_closed_object(self):
+        path = self.root / 'expected.json'
+        expected = {'source': 'a' * 64, 'scope': 'b' * 64,
+                    'account_id': 'c' * 24, 'device_id': 'ses_fixture'}
+        path.write_text(json.dumps({'version': 1, **expected}))
+        path.chmod(0o600)
+        descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, descriptor)
+        self.assertEqual(self.gate.owner_expected(descriptor, os.getuid()), expected)
+        path.chmod(0o644)
+        with self.assertRaises(self.gate.Refused):
+            self.gate.owner_expected(descriptor, os.getuid())
+        path.chmod(0o600)
+        for payload in ({'version': True, **expected},
+                        {'version': 1, **expected, 'session': 'guessed'},
+                        list({'version': 1, **expected}.items())):
+            path.write_text(json.dumps(payload))
+            with self.assertRaises(self.gate.Refused):
+                self.gate.owner_expected(descriptor, os.getuid())
+
     def test_literal_argument_bounds_and_native_exec_refusal_before_effect(self):
         for argv in ([], ['--'], ['--prepare-seconds', '0', '--', 'x'],
                      ['--prepare-seconds', '01', '--', 'x'], ['--prepare-seconds', '1801', '--', 'x'],
@@ -362,19 +453,29 @@ class GateTests(unittest.TestCase):
         calls = []
         def execute(*args): calls.append(args); raise RuntimeError('fixture exec boundary')
         with self.assertRaisesRegex(RuntimeError, 'fixture exec boundary'):
-            self.gate.native_exec(['10.0', '--', *values], {}, now=lambda: 1,
-                                 validator=lambda env: None, execute=execute)
+            self.gate.native_exec(['10.0', '1:2:1:2', '--', *values], {}, now=lambda: 1,
+                                 validator=lambda env: ((1, 2), (1, 2)), execute=execute)
         self.assertEqual(calls, [(self.gate.CODEX, [self.gate.CODEX, 'exec', *values], {})])
         for deadline in ('0', 'nan', 'inf', '-1', '2000'):
             with self.assertRaises((self.gate.Refused, ValueError)):
-                self.gate.native_exec([deadline, '--', 'x'], {}, now=lambda: 1,
-                                     validator=lambda env: None, execute=execute)
+                self.gate.native_exec([deadline, '1:2:1:2', '--', 'x'], {}, now=lambda: 1,
+                                     validator=lambda env: ((1, 2), (1, 2)), execute=execute)
         self.assertEqual(len(calls), 1)
         clock = [1]
-        def late(_env): clock[0] = 11
+        def late(_env):
+            clock[0] = 11
+            return ((1, 2), (1, 2))
         with self.assertRaises(self.gate.Refused):
-            self.gate.native_exec(['10.0', '--', 'x'], {}, now=lambda: clock[0], validator=late, execute=execute)
+            self.gate.native_exec(['10.0', '1:2:1:2', '--', 'x'], {}, now=lambda: clock[0], validator=late, execute=execute)
         self.assertEqual(len(calls), 1)
+
+    def test_pre_exec_rejects_root_replacement_before_native_command(self):
+        execute = Mock()
+        with self.assertRaisesRegex(self.gate.Refused, 'mount changed'):
+            self.gate.native_exec(['10.0', '1:2:1:2', '--', 'literal'], {},
+                                 now=lambda: 1, validator=lambda _: ((1, 3), (1, 3)),
+                                 execute=execute)
+        execute.assert_not_called()
 
     def child(self, *, late=False, cancel_on_handoff=False, idle=False):
         ready, handed = self.root/'ready', self.root/'handed'
@@ -386,6 +487,7 @@ def validate(env):
  count[0]+=1
  ready.write_text('ready')
  if sys.argv[4]=='late' and count[0]==2: now[0]=20.0
+ return ((1, 2), (1, 2))
 def run(argv):
  if sys.argv[5]=='cancel': os.kill(os.getpid(),signal.SIGTERM)
  handed.write_text(json.dumps(argv)); return 0
@@ -418,7 +520,7 @@ os._exit(result)
         self.assertEqual(process.returncode, 0, errors); self.assertEqual(output+errors, b'')
         argv = json.loads(handed.read_text())
         self.assertEqual(argv, ['--', self.gate.PYTHON, '-E', '-s', '-S', self.gate.SCRIPT,
-                               '--native-exec', '11.0', '--', 'space value', ';no shell', '$(no exec)'])
+                               '--native-exec', '11.0', '1:2:1:2', '--', 'space value', ';no shell', '$(no exec)'])
 
     def test_term_before_usr1_and_coqueued_term_win_without_handoff(self):
         for coqueued, signum in ((False, signal.SIGTERM), (True, signal.SIGTERM),

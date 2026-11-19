@@ -58,7 +58,11 @@ class StoredDriver:
     receipt before cleanup. A non-null detection is evidence, NOT an A8 PASS.
     """
     def __init__(self, *, source, scope, account_id, device_id, session):
-        sha(source); sha(scope); identity(session)
+        identity(session)
+        self._initialize(source, scope, account_id, device_id, session)
+
+    def _initialize(self, source, scope, account_id, device_id, session):
+        sha(source); sha(scope)
         if (type(account_id) is not str or not re.fullmatch('[0-9a-f]{24}', account_id)
                 or type(device_id) is not str or not re.fullmatch('ses_[A-Za-z0-9_-]{1,124}', device_id)): raise ValueError()
         self.run = str(uuid.uuid4())
@@ -82,21 +86,27 @@ class StoredDriver:
         if self.used: self.valid = False; return
         self.used = True
         try:
-            if (config.observe_session != self.context['session'] or expected_scope != self.context['scope']
-                    or runtime_fingerprint() != self.context['source']): raise ValueError()
-            http = WorkloadHTTP(config.origin, ca_file=config.ca_file, attempts=1)
-            tokens = WorkloadTokens(config.state_root/'auth', config.origin, config.location,
-                                   http=http, key=WorkloadKey(config.state_root/'identity'))
-            # Atomic validated read only: never take a product auth/sync lock
-            # that optional stalled I/O could hold against the real worker.
-            state = tokens._read()
-            if (state is None or state['phase'] not in ('ready', 'refresh_inflight')
-                    or state['account_id'] != self.account or state['device_id'] != self.device): raise ValueError()
-            self.evidence = Evidence(config.state_root, self.context, create=True)
-            self.anchor = hashlib.sha256(canonical(self.evidence.load())).hexdigest()
-            self.config = config
-            self.valid = True
+            self.authorize(config, expected_scope)
+            self.open_evidence()
         except Exception: self.valid = False
+
+    def authorize(self, config, expected_scope):
+        if (config.observe_session != self.context['session'] or expected_scope != self.context['scope']
+                or runtime_fingerprint() != self.context['source']): raise ValueError()
+        http = WorkloadHTTP(config.origin, ca_file=config.ca_file, attempts=1)
+        tokens = WorkloadTokens(config.state_root/'auth', config.origin, config.location,
+                               http=http, key=WorkloadKey(config.state_root/'identity'))
+        # Atomic validated read only: never take a product auth/sync lock
+        # that optional stalled I/O could hold against the real worker.
+        state = tokens._read()
+        if (state is None or state['phase'] not in ('ready', 'refresh_inflight')
+                or state['account_id'] != self.account or state['device_id'] != self.device): raise ValueError()
+        self.config = config
+        self.valid = True
+
+    def open_evidence(self):
+        self.evidence = Evidence(self.config.state_root, self.context, create=True)
+        self.anchor = hashlib.sha256(canonical(self.evidence.load())).hexdigest()
 
     def assign(self, sequence, deadline):
         # In-memory invalidation precedes ALL I/O or launch; old successful seals
@@ -164,6 +174,9 @@ class AcceptanceDriver(StoredDriver):
     """Nonblocking parent facade; no optional filesystem reads/writes here."""
     def __init__(self, **expected):
         super().__init__(**expected)
+        self._facade(expected)
+
+    def _facade(self, expected):
         self.expected = dict(expected)
         self.agent = None
         self.started = self.awaiting_retention = False
@@ -193,16 +206,19 @@ class AcceptanceDriver(StoredDriver):
         if not self.valid or self.agent is None: return
         try:
             for message in self.agent.poll():
-                if message.get('event') == 'started' and not self.started:
-                    self.anchor, self.started = sha(message['anchor']), True
-                elif (message.get('worker') == self.expected_worker and message.get('seal') == self.expected_seal):
-                    if boot_clock() >= self.deadline: raise ValueError()
-                    if message.get('event') == 'final': self.finals[identity(message['ticket'])] = message['result']
-                    elif message.get('event') == 'retained' and self.awaiting_retention:
-                        if message['plan'] != self.expected_plan: raise ValueError()
-                        self.anchor = sha(message['anchor'])
-                        self.awaiting_retention = False
+                self.message(message)
         except Exception: self.invalidate()
+
+    def message(self, message):
+        if message.get('event') == 'started' and not self.started:
+            self.anchor, self.started = sha(message['anchor']), True
+        elif (message.get('worker') == self.expected_worker and message.get('seal') == self.expected_seal):
+            if boot_clock() >= self.deadline: raise ValueError()
+            if message.get('event') == 'final': self.finals[identity(message['ticket'])] = message['result']
+            elif message.get('event') == 'retained' and self.awaiting_retention:
+                if message['plan'] != self.expected_plan: raise ValueError()
+                self.anchor = sha(message['anchor'])
+                self.awaiting_retention = False
 
     def assign(self, sequence, deadline):
         self._result = None
