@@ -88,8 +88,13 @@ manifest/config/index identities, archive hash, platform, native manifest and
 `codex --version`. Compare base runtime-manifest, launcher, helper and check
 script bytes unchanged against #60. Compare prepare.py/launcher bytes to this
 source. Verify licenses, ELF inventory/modes and empty image-owned UID10001
-native home. Version checks run network-off; helper presence/version alone is
-not actual sandbox, sign-in, model, native-format or Kubernetes qualification.
+native home (only its precreated empty `sessions` directory). The build's
+network-off version check uses a fresh private `TemporaryDirectory` HOME and
+CODEX_HOME, with normal cleanup on success, wrong version or subprocess failure.
+It never points the native check at the final home; afterward it asserts the
+final home still has exactly that empty layout. No startup files are removed
+from the final home to hide an unexpected effect. Helper presence/version alone
+is not actual sandbox, sign-in, model, native-format or Kubernetes qualification.
 No runtime installers, sandbox-disabling flags, capabilities or privilege
 workarounds are introduced. Preserve e00 and #60 receipts separately.
 

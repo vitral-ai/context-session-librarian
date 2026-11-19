@@ -17,7 +17,23 @@ RUN chmod 0444 /opt/vitral/codex/prepare.py \
     && install -d -m 0750 -o 10001 -g 10001 /agent-private/.codex/sessions
 ENV HOME=/agent-private CODEX_HOME=/agent-private/.codex
 USER 10001:10001
-RUN --network=none python3 -B -I -c 'import subprocess; v=subprocess.check_output(["/opt/vitral/codex/bin/codex","--version"],text=True,timeout=5).strip(); assert v=="codex-cli 0.169.0"; print(v)'
+RUN --network=none python3 -B -I <<'VERSION_CHECK'
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+with tempfile.TemporaryDirectory(prefix="codex-version-") as home:
+    code_home = Path(home)/".codex"
+    code_home.mkdir(mode=0o700)
+    env = {**os.environ, "HOME": home, "CODEX_HOME": str(code_home)}
+    v = subprocess.check_output(["/opt/vitral/codex/bin/codex", "--version"],
+                                env=env, text=True, timeout=5).strip()
+    assert v=="codex-cli 0.169.0"
+assert os.listdir(os.environ["HOME"]) == [".codex"]
+assert os.listdir(os.environ["CODEX_HOME"]) == ["sessions"]
+assert not os.listdir(Path(os.environ["CODEX_HOME"])/"sessions")
+print(v)
+VERSION_CHECK
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/bin/csl-codex-prepare"]
 CMD []

@@ -1,5 +1,6 @@
 """Owned synthetic archive/signal fixtures, not an actual native/image receipt."""
 import gzip
+from contextlib import redirect_stdout
 import hashlib
 import importlib.util
 import io
@@ -7,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import shlex
 import signal
 import stat
 import subprocess
@@ -208,6 +210,72 @@ except (ValueError,OSError): sys.exit(2)
         policy = (OVERLAY/'Containerfile.dockerignore').read_text().splitlines()
         for parent in ('packaging', 'packaging/codex-sole-producer'):
             self.assertEqual(policy[policy.index('!'+parent)+1], parent+'/**')
+
+
+class VersionCheckTests(unittest.TestCase):
+    def version_source(self):
+        recipe = (OVERLAY/'Containerfile').read_text().split('USER 10001:10001\n', 1)[1]
+        line, remainder = recipe.split('\n', 1)
+        argv = shlex.split(line)
+        self.assertEqual(argv[:5], ['RUN', '--network=none', 'python3', '-B', '-I'])
+        if argv[5] == '-c': return argv[6]
+        self.assertEqual(argv[5:], ['<<VERSION_CHECK'])
+        return remainder.split('\nVERSION_CHECK\n', 1)[0]
+
+    def exercise(self, outcome):
+        with tempfile.TemporaryDirectory(prefix='version-home-fixture-') as temporary:
+            root = Path(temporary)
+            home = root/'native-home'; code = home/'.codex'
+            (code/'sessions').mkdir(parents=True)
+            seen = []
+            def version(argv, **kwargs):
+                self.assertEqual(argv, ['/opt/vitral/codex/bin/codex', '--version'])
+                self.assertEqual(kwargs['timeout'], 5); self.assertTrue(kwargs['text'])
+                self.assertFalse(kwargs.get('shell', False))
+                env = kwargs.get('env', os.environ)
+                child_home, child_code = Path(env['HOME']), Path(env['CODEX_HOME'])
+                seen.append((child_home, child_code))
+                # Model the observed native --version side effect without
+                # executing a native binary or reading any credential file.
+                (child_code/'tmp').mkdir()
+                (child_code/'tmp'/'public-fixture').write_text('synthetic build state')
+                self.assertNotEqual(child_home, home); self.assertNotEqual(child_code, code)
+                self.assertEqual(child_code.parent, child_home)
+                for path in (child_home, child_code):
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
+                if outcome == 'unexpected_final_state': (code/'tmp').mkdir()
+                if outcome == 'timeout': raise subprocess.TimeoutExpired(argv, 5)
+                if outcome == 'failure': raise subprocess.CalledProcessError(2, argv)
+                return 'codex-cli wrong\n' if outcome == 'wrong' else 'codex-cli 0.169.0\n'
+            output = io.StringIO()
+            with patch.dict(os.environ, {'HOME': str(home), 'CODEX_HOME': str(code)}):
+                original = dict(os.environ)
+                with patch.object(subprocess, 'check_output', side_effect=version), redirect_stdout(output):
+                    if outcome == 'success': exec(compile(self.version_source(), 'Containerfile-version', 'exec'), {})
+                    else:
+                        error = {'wrong': AssertionError, 'unexpected_final_state': AssertionError,
+                                 'timeout': subprocess.TimeoutExpired,
+                                 'failure': subprocess.CalledProcessError}[outcome]
+                        with self.assertRaises(error):
+                            exec(compile(self.version_source(), 'Containerfile-version', 'exec'), {})
+                self.assertEqual(dict(os.environ), original)
+            self.assertEqual(len(seen), 1)
+            self.assertFalse(seen[0][0].exists()); self.assertFalse(seen[0][1].exists())
+            self.assertEqual(list(home.iterdir()), [code])
+            expected = ['sessions', 'tmp'] if outcome == 'unexpected_final_state' else ['sessions']
+            self.assertEqual(sorted(path.name for path in code.iterdir()), expected)
+            self.assertEqual(list((code/'sessions').iterdir()), [])
+            self.assertEqual(output.getvalue(), 'codex-cli 0.169.0\n' if outcome == 'success' else '')
+
+    def test_version_check_preserves_empty_native_home_and_cleans_temporary_home(self):
+        self.exercise('success')
+
+    def test_failed_version_check_cleans_temporary_home_without_changing_final_home(self):
+        for outcome in ('wrong', 'timeout', 'failure'):
+            with self.subTest(outcome=outcome): self.exercise(outcome)
+
+    def test_unexpected_final_state_refuses_without_erasing_it(self):
+        self.exercise('unexpected_final_state')
 
 
 class BuildTests(unittest.TestCase):
