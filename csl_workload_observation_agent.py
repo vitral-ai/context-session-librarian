@@ -101,6 +101,9 @@ class Agent:
                 instance = AgentProcess(payload)
                 self.instance = instance
                 if self.cancelled.is_set(): instance.close()
+                # Linux PDEATHSIG belongs to the creating thread. Keep that
+                # owner alive until the helper exits, never on product control.
+                instance.process.wait()
             except Exception: self.failed = True
         self.launcher = threading.Thread(target=launch, daemon=True)
         self.launcher.start()

@@ -6,7 +6,7 @@ import re
 import uuid
 
 from csl_workload_http import WorkloadHTTP
-from csl_workload_auth import WorkloadTokens
+from csl_workload_auth import WorkloadTokens, boot_clock
 from csl_workload_identity import canonical, WorkloadKey
 from csl_workload_observation import identity, receipt_valid
 from csl_workload_observation_journal import Evidence, sha
@@ -110,7 +110,7 @@ class StoredDriver:
                     'seal': self.expected_seal, 'deadline': deadline, 'predecessor': self.anchor}
         except Exception: self.valid = False
 
-    def consume(self, receipt, sequence, *, complete, now):
+    def _candidate(self, receipt, sequence, *, complete, now):
         self._result = None
         allowed, self.valid = self.valid, False
         try:
@@ -127,8 +127,11 @@ class StoredDriver:
                     or not receipt_valid(receipt.get('observation'))): return
             if any(receipt['observation'][kind]['matched_identity'] != self.expected_plan[name]
                    for kind, name in zip(('snapshot', 'content', 'view'), ('snapshot', 'revision', 'generation'))): return
-            self._result = json.loads(json.dumps(receipt['observation']))
+            return json.loads(json.dumps(receipt['observation']))
         except Exception: self.valid = False
+
+    def consume(self, receipt, sequence, *, complete, now):
+        self._result = self._candidate(receipt, sequence, complete=complete, now=now)
 
     def retain(self, receipt, sequence, *, now):
         """A missing/failed live-worker observation cannot be healed by a later pass."""
@@ -193,6 +196,7 @@ class AcceptanceDriver(StoredDriver):
                 if message.get('event') == 'started' and not self.started:
                     self.anchor, self.started = sha(message['anchor']), True
                 elif (message.get('worker') == self.expected_worker and message.get('seal') == self.expected_seal):
+                    if boot_clock() >= self.deadline: raise ValueError()
                     if message.get('event') == 'final': self.finals[identity(message['ticket'])] = message['result']
                     elif message.get('event') == 'retained' and self.awaiting_retention:
                         if message['plan'] != self.expected_plan: raise ValueError()
@@ -215,6 +219,7 @@ class AcceptanceDriver(StoredDriver):
 
     def combined(self, receipt, sequence, now):
         self.poll()
+        now = max(now, boot_clock())
         if (not self.valid or now >= self.deadline or sequence != self.expected_worker
                 or type(receipt) is not dict or receipt.get('sequence') != sequence
                 or receipt.get('scope') != self.context['scope'] or receipt.get('ok') is not True
@@ -243,11 +248,16 @@ class AcceptanceDriver(StoredDriver):
         except Exception: self.invalidate()
 
     def consume(self, receipt, sequence, *, complete, now):
+        self.clear_result()
         try:
             combined = self.combined(receipt, sequence, now)
             if combined is not None and delivery_fact(receipt) != self.expected_plan: combined = None
-        except Exception: combined = None
-        super().consume(combined, sequence, complete=complete, now=now)
+            candidate = self._candidate(combined, sequence, complete=complete, now=max(now, boot_clock()))
+            # Candidate remains private until the SAME worker cap is checked
+            # again after all polling, validation and copying, not the drain cap.
+            if candidate is not None and boot_clock() < self.deadline:
+                self._result = candidate
+        except Exception: self.invalidate()
 
     def close(self):
         if self.agent is not None:
