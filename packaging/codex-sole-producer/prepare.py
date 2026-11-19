@@ -65,12 +65,20 @@ def validate(env):
     def identity(path):
         info = path.stat()
         return info.st_dev, info.st_ino
-    if (identity(native) != identity(TRANSCRIPTS)
+    native_id, transcript_id = identity(native), identity(TRANSCRIPTS)
+    if (native_id != transcript_id
             or identity(STATE) in {identity(TRANSCRIPTS), identity(HOME), identity(NATIVE)}
             or readonly(STATE) or not readonly(TRANSCRIPTS) or readonly(native)):
         raise Refused('mount aliases')
     with os.scandir(TRANSCRIPTS) as entries:
         if next(entries, None) is not None: raise Refused('source not fresh')
+    if (identity(native), identity(TRANSCRIPTS)) != (native_id, transcript_id):
+        raise Refused('mount changed')
+    return native_id, transcript_id
+
+
+def encode_views(views):
+    return ':'.join(str(number) for identity in views for number in identity)
 
 
 def cancel(signum, _frame): raise Cancelled(signum)
@@ -87,7 +95,8 @@ def prepare(argv, env, *, now=clock, validator=validate, run=None, wait=signal.s
     started = now()
     seconds, values = arguments(argv)
     deadline = started+seconds
-    validator(env); check_deadline(deadline, now)
+    prepared_views = validator(env)
+    check_deadline(deadline, now)
     while True:
         check_deadline(deadline, now)
         notification = wait(SIGNALS, min(.25, deadline-now()))
@@ -96,7 +105,8 @@ def prepare(argv, env, *, now=clock, validator=validate, run=None, wait=signal.s
         if notification is None: continue
         if notification.si_signo in STOPS: raise Cancelled(notification.si_signo)
         if notification.si_signo != signal.SIGUSR1: raise Refused('signal')
-        validator(env); check_deadline(deadline, now)
+        if validator(env) != prepared_views: raise Refused('mount changed')
+        check_deadline(deadline, now)
         stop = stop_pending()
         if stop: raise Cancelled(stop)
         signal.signal(signal.SIGUSR1, signal.SIG_IGN)
@@ -109,16 +119,18 @@ def prepare(argv, env, *, now=clock, validator=validate, run=None, wait=signal.s
         # its own handlers. The exec-only child checks this same deadline later.
         check_deadline(deadline, now)
         return run(['--', PYTHON, '-E', '-s', '-S', SCRIPT, '--native-exec',
-                    repr(deadline), '--', *values])
+                    repr(deadline), encode_views(prepared_views), '--', *values])
 
 
 def native_exec(argv, env, *, now=clock, validator=validate, execute=os.execve):
-    if len(argv) < 3 or argv[1] != '--' or len(argv[0]) > 32: raise Refused('handoff')
+    if len(argv) < 4 or argv[2] != '--' or len(argv[0]) > 32 or len(argv[1]) > 84:
+        raise Refused('handoff')
     deadline = float(argv[0])
     # Reuse the literal-argument bounds without opening an alternate command.
-    _, values = arguments(['--', *argv[2:]])
+    _, values = arguments(['--', *argv[3:]])
     check_deadline(deadline, now)
-    validator(env); check_deadline(deadline, now)
+    if encode_views(validator(env)) != argv[1]: raise Refused('mount changed')
+    check_deadline(deadline, now)
     execute(CODEX, [CODEX, 'exec', *values], env)
     raise Refused('exec returned')
 

@@ -32,6 +32,20 @@ def recover(runtime, expected_scope):
         raise SyncError('workload_producer_outcome_unknown')
 
 
+def process_start(pid, parent):
+    """Read a Linux process identity without exposing argv or environment."""
+    try:
+        data = Path('/proc') / str(pid) / 'stat'
+        fields = data.read_text().rsplit(')', 1)[1].split()
+        if int(fields[1]) == parent:
+            start = int(fields[19])
+            if start > 0:
+                return start
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
 class Producer:
     def __init__(self, runtime, expected_scope, command):
         recover(runtime, expected_scope)
@@ -51,6 +65,19 @@ class Producer:
             os.close(self.control); self.control = None
             raise
         finally: os.close(read_fd)
+
+    def launch_identity(self):
+        """Return optional pre-gate facts from this guardian's original run."""
+        value = read_record(self.runtime/'producer.json')
+        if (not value or value.get('run_id') != self.run_id
+                or value.get('scope') != self.expected_scope
+                or value.get('boot') != boot_identity()
+                or value.get('guardian_pid') != self.process.pid):
+            return None
+        keys = ('guardian_pid', 'guardian_start', 'producer_pid', 'producer_start')
+        if any(type(value.get(key)) is not int or value[key] <= 0 for key in keys):
+            return None
+        return {key: value[key] for key in ('run_id', 'boot', *keys)}
 
     def _proof(self):
         value = read_record(self.runtime/'producer.json')
@@ -127,6 +154,10 @@ def guardian(runtime, run_id, parent, control, command):
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 # The child cannot execute user argv until this identity is durable.
                 record.update(phase='running', guardian_pid=os.getpid(), producer_pid=writer.pid)
+                guardian_start = process_start(os.getpid(), parent)
+                producer_start = process_start(writer.pid, os.getpid())
+                if guardian_start is not None and producer_start is not None:
+                    record.update(guardian_start=guardian_start, producer_start=producer_start)
                 private_json(runtime/'producer.json', record)
                 if not stopped(control) and not stop_requested[0] and os.getppid() == parent:
                     os.write(write_gate, b'G')

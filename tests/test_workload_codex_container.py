@@ -17,6 +17,7 @@ import tarfile
 import tempfile
 import time
 import unittest
+from unittest.mock import Mock
 from unittest.mock import patch
 
 from csl_sync_state import SyncError
@@ -362,19 +363,29 @@ class GateTests(unittest.TestCase):
         calls = []
         def execute(*args): calls.append(args); raise RuntimeError('fixture exec boundary')
         with self.assertRaisesRegex(RuntimeError, 'fixture exec boundary'):
-            self.gate.native_exec(['10.0', '--', *values], {}, now=lambda: 1,
-                                 validator=lambda env: None, execute=execute)
+            self.gate.native_exec(['10.0', '1:2:1:2', '--', *values], {}, now=lambda: 1,
+                                 validator=lambda env: ((1, 2), (1, 2)), execute=execute)
         self.assertEqual(calls, [(self.gate.CODEX, [self.gate.CODEX, 'exec', *values], {})])
         for deadline in ('0', 'nan', 'inf', '-1', '2000'):
             with self.assertRaises((self.gate.Refused, ValueError)):
-                self.gate.native_exec([deadline, '--', 'x'], {}, now=lambda: 1,
-                                     validator=lambda env: None, execute=execute)
+                self.gate.native_exec([deadline, '1:2:1:2', '--', 'x'], {}, now=lambda: 1,
+                                     validator=lambda env: ((1, 2), (1, 2)), execute=execute)
         self.assertEqual(len(calls), 1)
         clock = [1]
-        def late(_env): clock[0] = 11
+        def late(_env):
+            clock[0] = 11
+            return ((1, 2), (1, 2))
         with self.assertRaises(self.gate.Refused):
-            self.gate.native_exec(['10.0', '--', 'x'], {}, now=lambda: clock[0], validator=late, execute=execute)
+            self.gate.native_exec(['10.0', '1:2:1:2', '--', 'x'], {}, now=lambda: clock[0], validator=late, execute=execute)
         self.assertEqual(len(calls), 1)
+
+    def test_pre_exec_rejects_root_replacement_before_native_command(self):
+        execute = Mock()
+        with self.assertRaisesRegex(self.gate.Refused, 'mount changed'):
+            self.gate.native_exec(['10.0', '1:2:1:2', '--', 'literal'], {},
+                                 now=lambda: 1, validator=lambda _: ((1, 3), (1, 3)),
+                                 execute=execute)
+        execute.assert_not_called()
 
     def child(self, *, late=False, cancel_on_handoff=False, idle=False):
         ready, handed = self.root/'ready', self.root/'handed'
@@ -386,6 +397,7 @@ def validate(env):
  count[0]+=1
  ready.write_text('ready')
  if sys.argv[4]=='late' and count[0]==2: now[0]=20.0
+ return ((1, 2), (1, 2))
 def run(argv):
  if sys.argv[5]=='cancel': os.kill(os.getpid(),signal.SIGTERM)
  handed.write_text(json.dumps(argv)); return 0
@@ -418,7 +430,7 @@ os._exit(result)
         self.assertEqual(process.returncode, 0, errors); self.assertEqual(output+errors, b'')
         argv = json.loads(handed.read_text())
         self.assertEqual(argv, ['--', self.gate.PYTHON, '-E', '-s', '-S', self.gate.SCRIPT,
-                               '--native-exec', '11.0', '--', 'space value', ';no shell', '$(no exec)'])
+                               '--native-exec', '11.0', '1:2:1:2', '--', 'space value', ';no shell', '$(no exec)'])
 
     def test_term_before_usr1_and_coqueued_term_win_without_handoff(self):
         for coqueued, signum in ((False, signal.SIGTERM), (True, signal.SIGTERM),
