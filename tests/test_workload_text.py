@@ -18,6 +18,8 @@ SID = '11111111-2222-4333-8444-555555555555'
 CANARY = 'sk-proj-'+'Q'*32
 OPAQUE = 'SYNTHETIC-OPAQUE-PRIVATE-REASONING'
 CATALOG_NOTICE = 'Native tool declarations omitted; workload text is view-only.'
+WORLD_NOTICE = 'Native world state omitted; workload text is view-only.'
+USAGE_NOTICE = 'Native token usage omitted; workload text is view-only.'
 
 
 def native(provider):
@@ -68,6 +70,182 @@ class WorkloadTextTests(unittest.TestCase):
                 'parameters': {'type': 'object', 'properties': {
                     'password': {'type': 'string', 'default': 'tiny'},
                     'count': {'type': 'integer', 'default': 1}}}}], **fields}}
+
+    def native_metadata(self):
+        usage = {'input_tokens': 10, 'cached_input_tokens': 2, 'cache_write_input_tokens': 0,
+            'output_tokens': 4, 'reasoning_output_tokens': 1, 'total_tokens': 14}
+        return [
+            {'type': 'world_state', 'payload': {'full': True, 'state': {
+                'cwd': '/private-world-path', 'instructions': 'private-world-text '+CANARY,
+                'password': 'tiny', 'api_key': CANARY}}},
+            {'type': 'token_usage_record', 'payload': {'thread_id': SID, 'session_id': SID,
+                'turn_id': 'private-turn-id', 'root_turn_id': 'private-root-id',
+                'response_id': 'private-response-id', 'usage': copy.deepcopy(usage),
+                'turn_token_usage': copy.deepcopy(usage), 'thread_token_usage': copy.deepcopy(usage)}},
+        ]
+
+    def test_native_world_and_token_metadata_are_fixed_nondisclosing_notices(self):
+        for full in (False, True):
+            for paginated in (False, True):
+                rows = native('codex')+self.native_metadata(); rows[-2]['payload']['full'] = full
+                if paginated:
+                    rows[0]['payload']['history_mode'] = 'paginated'
+                    for ordinal, row in enumerate(rows): row['ordinal'] = ordinal
+                adapter, path = self.provider('codex', rows)
+                original = path.read_bytes(); metadata = adapter.list_sessions('codex')[0]
+                projected = Path(adapter.raw_files('codex', SID)[0]['path']).read_bytes()
+                output = [json.loads(line) for line in projected.splitlines()]
+                view = adapter.view_records('codex', SID)['records']
+                for row, notice in zip(output[-2:], (WORLD_NOTICE, USAGE_NOTICE)):
+                    self.assertEqual(row['payload'], {})
+                    self.assertEqual(row[MARKER], notice)
+                    visible = [item for item in view if item['text'] == notice]
+                    self.assertEqual(len(visible), 1)
+                    self.assertEqual(visible[0]['kind'], 'notice')
+                    offset = visible[0]['raw_offset']['offset']
+                    self.assertEqual(json.loads(projected[offset:].splitlines()[0]), row)
+                for artifact in (projected, encoded(view), encoded(metadata)):
+                    for secret in (CANARY.encode(), b'private-world', b'private-turn',
+                                   b'private-root', b'private-response', b'tiny', b'input_tokens'):
+                        self.assertNotIn(secret, artifact)
+                self.assertEqual(path.read_bytes(), original)
+                self.assertFalse(adapter.package_descriptor('codex', SID)['available'])
+
+    def test_world_state_closed_shape_and_structure_limits_precede_omission(self):
+        deep = 0
+        for _ in range(40): deep = [deep]
+        payloads = [{'full': 1, 'state': {}}, {'full': 'false', 'state': {}},
+            {'full': True, 'state': []}, {'state': {}}, {'full': True},
+            {'full': True, 'state': {}, 'extra': None}]
+        payloads += [{'full': True, 'state': {'password': value}}
+                     for value in (deep, [None]*300, float('inf'), '\ud800')]
+        for payload in payloads:
+            with self.subTest(fields=tuple(payload)):
+                rows = native('codex')+[{'type': 'world_state', 'payload': payload}]
+                adapter, _ = self.provider('codex', rows, bounds=Bounds(values=250))
+                self.assert_no_upload(adapter)
+
+    def test_world_state_opaque_media_and_credential_descendants_refuse(self):
+        variants = [{name: 'opaque'} for name in OPAQUE_FIELDS]
+        variants += [{'type': name} for name in ('input_audio', 'input_image', 'input_file', 'audio', 'base64')]
+        variants += [{name: value} for name in ('image_url', 'audio_url')
+                     for value in (' \tDATA:audio/wav;base64,QQ==', {'url': 'data:image/png;base64,QQ=='})]
+        for hidden in variants:
+            for field in ('ordinary', 'password'):
+                with self.subTest(marker=tuple(hidden), field=field):
+                    row = {'type': 'world_state', 'payload': {'full': False, 'state': {field: [hidden]}}}
+                    adapter, _ = self.provider('codex', native('codex')+[row])
+                    self.assert_no_upload(adapter)
+
+    def test_token_usage_closed_integer_shape_and_main_identity(self):
+        row = self.native_metadata()[1]
+        for field in row['payload']:
+            broken = copy.deepcopy(row); del broken['payload'][field]
+            adapter, _ = self.provider('codex', native('codex')+[broken])
+            self.assert_no_upload(adapter)
+        for extra in ('unknown', 'password', 'encrypted_content'):
+            broken = copy.deepcopy(row); broken['payload'][extra] = {'type': 'input_audio'}
+            adapter, _ = self.provider('codex', native('codex')+[broken])
+            self.assert_no_upload(adapter)
+        for name in ('usage', 'turn_token_usage', 'thread_token_usage'):
+            for count in (True, 1.5, float('inf'), '10', 1 << 63, -(1 << 63)-1, {'password': 1}):
+                broken = copy.deepcopy(row); broken['payload'][name]['input_tokens'] = count
+                adapter, _ = self.provider('codex', native('codex')+[broken])
+                self.assert_no_upload(adapter)
+            for change in ('missing', 'unknown', 'opaque', 'media'):
+                broken = copy.deepcopy(row)
+                if change == 'missing': del broken['payload'][name]['total_tokens']
+                else: broken['payload'][name][{'unknown':'extra', 'opaque':'encrypted_content', 'media':'audio_url'}[change]] = 'data:audio/wav;base64,QQ=='
+                adapter, _ = self.provider('codex', native('codex')+[broken])
+                self.assert_no_upload(adapter)
+        for field in ('thread_id', 'session_id', 'turn_id', 'root_turn_id', 'response_id'):
+            for value in (None, 42, '../unqualified'):
+                broken = copy.deepcopy(row); broken['payload'][field] = value
+                adapter, _ = self.provider('codex', native('codex')+[broken])
+                self.assert_no_upload(adapter)
+        for field in ('thread_id', 'session_id'):
+            broken = copy.deepcopy(row); broken['payload'][field] = 'foreign-main'
+            adapter, _ = self.provider('codex', native('codex')+[broken])
+            self.assert_no_upload(adapter)
+        for count in (-(1 << 63), (1 << 63)-1):
+            valid = copy.deepcopy(row)
+            for name in ('usage', 'turn_token_usage', 'thread_token_usage'):
+                valid['payload'][name]['input_tokens'] = count
+                del valid['payload'][name]['cache_write_input_tokens']
+            adapter, _ = self.provider('codex', native('codex')+[valid])
+            self.assertEqual(adapter.list_sessions('codex')[0]['native_id'], SID)
+
+    def test_metadata_policy_upgrade_preserves_prior_tool_policy_acks(self):
+        self.provider('codex', native('codex')+[self.catalog()])
+        peer, state_root = Peer(), self.root/'metadata-policy-state'
+        state = State(state_root)
+        try:
+            def run():
+                adapter, _ = self.provider('codex')
+                return Collector(state, Registry(peer.url, FakeTokens(), http=HTTP(attempts=1)),
+                    adapter, chunk_size=23).run(providers=['codex'], days=None)
+            def previous_policy(adapter):
+                return hashlib.sha256(encoded({'profile': adapter.profile,
+                    'redaction_sha256': adapter.redactor.fingerprint,
+                    'tool_declarations_omission': 1})).hexdigest()
+            adapter, _ = self.provider('codex')
+            self.assertNotEqual(adapter.policy_fingerprint, previous_policy(adapter))
+            with patch.object(WorkloadTextProvider, 'policy_fingerprint', property(previous_policy)):
+                self.assertEqual(run()['synced'], 1)
+            before = copy.deepcopy(state.session('codex', SID))
+            state.close(); state = State(state_root)
+            self.assertEqual(run()['synced'], 1)
+            current = state.session('codex', SID)
+            self.assertEqual(before['snapshot_id'], current['snapshot_id'])
+            self.assertEqual(before['files'], current['files'])
+            self.assertEqual(before['view'], current['view'])
+        finally:
+            peer.close(); state.close()
+
+    def test_metadata_records_do_not_relax_unknown_fork_history_or_call_guards(self):
+        for kind in ('world_state_unknown', 'token_usage_record_unknown', 'retained_context'):
+            row = self.native_metadata()[0]; row['type'] = kind
+            adapter, _ = self.provider('codex', native('codex')+[row])
+            self.assert_no_upload(adapter)
+        for fields in ({'forked_from_id': SID}, {'attached_thread': True},
+                       {'history_base': {'thread_id': SID}}, {'source': {'subagent': 'review'}}):
+            rows = native('codex')+self.native_metadata(); rows[0]['payload'].update(fields)
+            adapter, _ = self.provider('codex', rows)
+            self.assert_no_upload(adapter)
+        rows = native('codex')+self.native_metadata(); rows[3]['payload']['arguments'] = '{"password":1e999}'
+        adapter, _ = self.provider('codex', rows)
+        self.assert_no_upload(adapter)
+
+    def test_metadata_omission_preserves_lost_ack_and_unchanged_revision_lineage(self):
+        rows = native('codex')+self.native_metadata(); self.provider('codex', rows)
+        peer, state_root = Peer(), self.root/'metadata-state'
+        state = State(state_root)
+        try:
+            def run():
+                adapter, _ = self.provider('codex')
+                return Collector(state, Registry(peer.url, FakeTokens(), http=HTTP(attempts=1)),
+                    adapter, chunk_size=23).run(providers=['codex'], days=None)
+            peer.drop_view_once = True
+            self.assertEqual(run()['pending'], 1)
+            planned = copy.deepcopy(state.session('codex', SID))
+            state.close(); state = State(state_root)
+            self.assertEqual(run()['synced'], 1)
+            first = copy.deepcopy(state.session('codex', SID))
+            self.assertEqual(planned['view']['generation'], first['view']['generation'])
+            rows[-2]['payload']['state'] = {'changed': CANARY}
+            rows[-2]['payload']['full'] = False
+            rows[-1]['payload']['usage']['input_tokens'] = 500
+            self.provider('codex', rows)
+            self.assertEqual(run()['synced'], 1)
+            current = state.session('codex', SID)
+            self.assertEqual(first['files'], current['files'])
+            self.assertEqual(first['view'], current['view'])
+            for artifact in peer.files.values():
+                self.assertNotIn(CANARY.encode(), artifact)
+                self.assertNotIn(b'private-world', artifact)
+                self.assertNotIn(b'input_tokens', artifact)
+        finally:
+            peer.close(); state.close()
 
     def test_codex_additional_tools_is_a_fixed_notice_not_a_schema_upload(self):
         for paginated in (False, True):
