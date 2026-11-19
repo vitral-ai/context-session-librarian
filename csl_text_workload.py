@@ -18,6 +18,7 @@ PROFILE_MARKER = 'workload_profile_v1'
 TOOL_DECLARATIONS_NOTICE = 'Native tool declarations omitted; workload text is view-only.'
 WORLD_STATE_NOTICE = 'Native world state omitted; workload text is view-only.'
 TOKEN_USAGE_NOTICE = 'Native token usage omitted; workload text is view-only.'
+THREAD_SETTINGS_NOTICE = 'Native thread settings omitted; workload text is view-only.'
 USAGE_COUNTERS = {'input_tokens', 'cached_input_tokens', 'output_tokens',
                   'reasoning_output_tokens', 'total_tokens'}
 PROVENANCE_FIELDS = {'csl_conversion', 'csl_source_provider', 'csl_source_session_id',
@@ -97,6 +98,109 @@ def token_usage(value):
             refused()
 
 
+def closed_object(value, required, optional=()):
+    if not isinstance(value, dict) or not set(required) <= set(value) <= set(required) | set(optional):
+        refused()
+
+
+def optional_strings(value, fields):
+    if any(value.get(name) is not None and not isinstance(value[name], str) for name in fields):
+        refused()
+
+
+def permission_metadata(value):
+    """Validate emitted permission envelopes as data, never interpret paths/access."""
+    if not isinstance(value, dict): refused()
+    kind = value.get('type')
+    if kind == 'disabled':
+        closed_object(value, ('type',))
+        return
+    if kind == 'external':
+        closed_object(value, ('type', 'network'))
+    elif kind == 'managed':
+        closed_object(value, ('type', 'network', 'file_system'))
+        filesystem = value['file_system']
+        if not isinstance(filesystem, dict): refused()
+        if filesystem.get('type') == 'unrestricted':
+            closed_object(filesystem, ('type',))
+        elif filesystem.get('type') == 'restricted':
+            closed_object(filesystem, ('type', 'entries'), ('glob_scan_max_depth',))
+            maximum = filesystem.get('glob_scan_max_depth')
+            if maximum is not None and (type(maximum) is not int or not 0 < maximum < (1 << 64)): refused()
+            if not isinstance(filesystem['entries'], list): refused()
+            for entry in filesystem['entries']:
+                closed_object(entry, ('path', 'access'), ('missing_path_behavior',))
+                if entry['access'] not in ('read', 'write', 'deny'): refused()
+                if entry.get('missing_path_behavior') not in (None, 'skip'): refused()
+                path = entry['path']
+                if not isinstance(path, dict): refused()
+                kind_path = path.get('type')
+                if kind_path in ('path', 'glob_pattern'):
+                    field = 'path' if kind_path == 'path' else 'pattern'
+                    closed_object(path, ('type', field))
+                    if not isinstance(path[field], str): refused()
+                elif kind_path == 'special':
+                    closed_object(path, ('type', 'value'))
+                    special = path['value']
+                    if not isinstance(special, dict): refused()
+                    kind_special = special.get('kind')
+                    if kind_special in ('root', 'minimal', 'tmpdir', 'slash_tmp'):
+                        closed_object(special, ('kind',))
+                    elif kind_special in ('project_roots', 'unknown'):
+                        required = ('kind',) if kind_special == 'project_roots' else ('kind', 'path')
+                        closed_object(special, required, ('subpath',))
+                        if kind_special == 'unknown' and not isinstance(special['path'], str): refused()
+                        optional_strings(special, ('subpath',))
+                    else: refused()
+                else: refused()
+        else: refused()
+    else: refused()
+    if value['network'] not in ('enabled', 'restricted'): refused()
+
+
+def thread_settings(value):
+    closed_object(value, ('type', 'thread_settings'), ('thread_id',))
+    if value.get('thread_id') is not None: identifier(value['thread_id'])
+    snapshot = value['thread_settings']
+    required = {'model', 'model_provider_id', 'approval_policy', 'approvals_reviewer',
+                'permission_profile', 'cwd', 'collaboration_mode'}
+    optional = {'service_tier', 'requested_approvals_reviewer', 'active_permission_profile',
+                'runtime_workspace_roots', 'reasoning_effort', 'reasoning_summary',
+                'personality', 'disabled_plugin_ids'}
+    closed_object(snapshot, required, optional)
+    if any(not isinstance(snapshot[name], str) for name in ('model', 'model_provider_id', 'cwd')): refused()
+    optional_strings(snapshot, ('service_tier', 'reasoning_effort'))
+    if snapshot['approvals_reviewer'] not in ('user', 'auto_review'): refused()
+    if snapshot.get('requested_approvals_reviewer') not in (None, 'user', 'auto_review'): refused()
+    if snapshot.get('reasoning_summary') not in (None, 'auto', 'concise', 'detailed', 'none'): refused()
+    if snapshot.get('personality') not in (None, 'none', 'friendly', 'pragmatic'): refused()
+    for name in ('runtime_workspace_roots', 'disabled_plugin_ids'):
+        if name not in snapshot or name == 'runtime_workspace_roots' and snapshot[name] is None: continue
+        if not isinstance(snapshot[name], list) or any(not isinstance(item, str) for item in snapshot[name]): refused()
+    approval = snapshot['approval_policy']
+    if isinstance(approval, dict):
+        closed_object(approval, ('granular',))
+        granular = approval['granular']
+        closed_object(granular, ('sandbox_approval', 'rules', 'mcp_elicitations'),
+                      ('skill_approval', 'request_permissions'))
+        if any(type(flag) is not bool for flag in granular.values()): refused()
+    elif approval not in ('untrusted', 'on-request', 'never'): refused()
+    permission_metadata(snapshot['permission_profile'])
+    active = snapshot.get('active_permission_profile')
+    if active is not None:
+        closed_object(active, ('id',), ('extends',))
+        if not isinstance(active['id'], str): refused()
+        optional_strings(active, ('extends',))
+    collaboration = snapshot['collaboration_mode']
+    closed_object(collaboration, ('mode', 'settings'))
+    if collaboration['mode'] not in ('default', 'plan'): refused()
+    settings = collaboration['settings']
+    closed_object(settings, ('model',), ('reasoning_effort', 'developer_instructions'))
+    if not isinstance(settings['model'], str): refused()
+    optional_strings(settings, ('reasoning_effort', 'developer_instructions'))
+    readable_metadata(snapshot)
+
+
 def blocks(value, *, claude=False):
     """Only declared readable blocks; opaque reasoning becomes a fixed notice."""
     if isinstance(value, str):
@@ -141,6 +245,7 @@ class WorkloadTextProvider(PreparedProvider):
         if self.provider == 'codex':
             policy['tool_declarations_omission'] = 1
             policy['native_metadata_omission'] = 1
+            policy['thread_settings_omission'] = 1
         return hashlib.sha256(encoded(policy)).hexdigest()
 
     def _codex(self, record, budget):
@@ -176,7 +281,10 @@ class WorkloadTextProvider(PreparedProvider):
             result[MARKER] = TOKEN_USAGE_NOTICE
         elif kind == 'event_msg':
             identifier(value.get('type'))
-            if value['type'] not in CODEX_EVENTS: refused()
+            if value['type'] == 'thread_settings_applied':
+                thread_settings(value)
+                result[MARKER] = THREAD_SETTINGS_NOTICE
+            elif value['type'] not in CODEX_EVENTS: refused()
             result['payload'] = selected(value, ('type',))
             if value['type'] == 'thread_name_updated':
                 if not isinstance(value.get('thread_name'), str): refused()

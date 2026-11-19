@@ -20,6 +20,7 @@ OPAQUE = 'SYNTHETIC-OPAQUE-PRIVATE-REASONING'
 CATALOG_NOTICE = 'Native tool declarations omitted; workload text is view-only.'
 WORLD_NOTICE = 'Native world state omitted; workload text is view-only.'
 USAGE_NOTICE = 'Native token usage omitted; workload text is view-only.'
+SETTINGS_NOTICE = 'Native thread settings omitted; workload text is view-only.'
 
 
 def native(provider):
@@ -83,6 +84,192 @@ class WorkloadTextTests(unittest.TestCase):
                 'response_id': 'private-response-id', 'usage': copy.deepcopy(usage),
                 'turn_token_usage': copy.deepcopy(usage), 'thread_token_usage': copy.deepcopy(usage)}},
         ]
+
+    def settings_record(self):
+        return {'type': 'event_msg', 'payload': {'type': 'thread_settings_applied',
+            'thread_id': SID, 'thread_settings': {
+                'model': 'private-settings-model '+CANARY, 'model_provider_id': 'private-provider',
+                'cwd': '/private-settings-path', 'service_tier': 'private-tier',
+                'approval_policy': {'granular': {'sandbox_approval': True, 'rules': False,
+                    'mcp_elicitations': True, 'skill_approval': False, 'request_permissions': False}},
+                'approvals_reviewer': 'auto_review', 'requested_approvals_reviewer': 'user',
+                'permission_profile': {'type': 'managed', 'network': 'restricted', 'file_system': {
+                    'type': 'restricted', 'glob_scan_max_depth': 3, 'entries': [
+                        {'path': {'type': 'special', 'value': {'kind': 'project_roots'}}, 'access': 'write'},
+                        {'path': {'type': 'path', 'path': '/private-settings-entry'}, 'access': 'read'}]}},
+                'active_permission_profile': {'id': 'private-profile', 'extends': 'private-parent'},
+                'runtime_workspace_roots': ['/private-settings-root'],
+                'reasoning_effort': 'custom-readable-effort', 'reasoning_summary': 'auto',
+                'personality': 'pragmatic', 'disabled_plugin_ids': ['private-plugin'],
+                'collaboration_mode': {'mode': 'default', 'settings': {
+                    'model': 'private-collaboration-model', 'reasoning_effort': 'high',
+                    'developer_instructions': 'password=tiny '+CANARY}}}}}
+
+    def test_settings_event_has_one_fixed_notice_without_applying_any_fields(self):
+        for paginated in (False, True):
+            rows = native('codex')+self.native_metadata()+[self.settings_record()]
+            if paginated:
+                rows[0]['payload']['history_mode'] = 'paginated'
+                for ordinal, row in enumerate(rows): row['ordinal'] = ordinal
+            adapter, path = self.provider('codex', rows); original = path.read_bytes()
+            metadata = adapter.list_sessions('codex')[0]
+            self.assertEqual(metadata['model'], 'fixture-model'); self.assertIsNone(metadata['cwd'])
+            projected = Path(adapter.raw_files('codex', SID)[0]['path']).read_bytes()
+            view = adapter.view_records('codex', SID)['records']
+            final = json.loads(projected.splitlines()[-1])
+            self.assertEqual(final['payload'], {'type': 'thread_settings_applied'})
+            self.assertEqual(final[MARKER], SETTINGS_NOTICE)
+            notices = [row for row in view if row['text'] == SETTINGS_NOTICE]
+            self.assertEqual(len(notices), 1); self.assertEqual(notices[0]['kind'], 'notice')
+            self.assertEqual(json.loads(projected[notices[0]['raw_offset']['offset']:].splitlines()[0]), final)
+            for artifact in (projected, encoded(view), encoded(metadata)):
+                for secret in (CANARY.encode(), b'private-settings', b'private-provider', b'private-tier',
+                               b'private-profile', b'private-plugin', b'granular', b'auto_review', b'tiny'):
+                    self.assertNotIn(secret, artifact)
+            self.assertEqual(path.read_bytes(), original)
+            self.assertFalse(adapter.package_descriptor('codex', SID)['available'])
+
+    def test_settings_closed_snapshot_and_nested_shapes_refuse_before_upload(self):
+        fields = self.settings_record()['payload']['thread_settings']
+        required = ('model', 'model_provider_id', 'approval_policy', 'approvals_reviewer',
+                    'permission_profile', 'cwd', 'collaboration_mode')
+        for field in required:
+            row = self.settings_record(); del row['payload']['thread_settings'][field]
+            adapter, _ = self.provider('codex', native('codex')+[row]); self.assert_no_upload(adapter)
+        variants = [('model', {}), ('cwd', []), ('approval_policy', 'unknown'),
+            ('approvals_reviewer', 'unknown'), ('reasoning_summary', 'unknown'), ('personality', 'unknown'),
+            ('disabled_plugin_ids', None), ('runtime_workspace_roots', [1]),
+            ('active_permission_profile', {'id': 'x', 'extra': 1}),
+            ('permission_profile', {}), ('permission_profile', {'type': 'disabled', 'extra': 1}),
+            ('permission_profile', {'type': 'external', 'network': True}),
+            ('collaboration_mode', {'mode': 'unknown', 'settings': {'model': 'x'}}),
+            ('collaboration_mode', {'mode': 'default', 'settings': {'model': 'x', 'extra': 1}}),
+            ('approval_policy', {'granular': {'sandbox_approval': True, 'rules': 1, 'mcp_elicitations': False}}),
+            ('unexpected', CANARY)]
+        for name, value in variants:
+            with self.subTest(field=name):
+                row = self.settings_record(); row['payload']['thread_settings'][name] = value
+                adapter, _ = self.provider('codex', native('codex')+[row]); self.assert_no_upload(adapter)
+        for filesystem in (
+                {'type': 'unrestricted', 'entries': []},
+                {'type': 'restricted', 'entries': {}},
+                *({'type': 'restricted', 'entries': [], 'glob_scan_max_depth': value}
+                  for value in (True, 0, -1, 1 << 64)),
+                *({'type': 'restricted', 'entries': [entry]} for entry in (
+                    {'path': {'type': 'path', 'path': '/x'}, 'access': True},
+                    {'path': {'type': 'path', 'path': {}}, 'access': 'read'},
+                    {'path': {'type': 'glob_pattern', 'pattern': []}, 'access': 'read'},
+                    {'path': {'type': 'special', 'value': {'kind': 'unrecognized'}}, 'access': 'read'},
+                    {'path': {'type': 'special', 'value': {'kind': 'root', 'subpath': 'x'}}, 'access': 'read'},
+                    {'path': {'type': 'special', 'value': {'kind': 'unknown'}}, 'access': 'read'},
+                    {'path': {'type': 'path', 'path': '/x'}, 'access': 'read', 'missing_path_behavior': 'create'},
+                    {'path': {'type': 'path', 'path': '/x'}, 'access': 'read', 'extra': True}))):
+            with self.subTest(filesystem=filesystem):
+                row = self.settings_record()
+                row['payload']['thread_settings']['permission_profile']['file_system'] = filesystem
+                adapter, _ = self.provider('codex', native('codex')+[row]); self.assert_no_upload(adapter)
+        for payload in ({'type': 'thread_settings_applied'}, {'type': 'thread_settings_applied', 'thread_settings': []},
+                        {'type': 'thread_settings_applied', 'thread_settings': fields, 'extra': 1}):
+            adapter, _ = self.provider('codex', native('codex')+[{'type': 'event_msg', 'payload': payload}])
+            self.assert_no_upload(adapter)
+        minimal = self.settings_record()
+        minimal['payload']['thread_settings'] = {name: fields[name] for name in required}
+        observed = copy.deepcopy(minimal)
+        observed['payload']['thread_settings'].update({
+            'approval_policy': 'on-request', 'requested_approvals_reviewer': 'user',
+            'disabled_plugin_ids': [], 'runtime_workspace_roots': [],
+            'collaboration_mode': {'mode': 'default', 'settings': {
+                'model': 'fixture-model', 'reasoning_effort': None, 'developer_instructions': None}}})
+        adapter, _ = self.provider('codex', native('codex')+[observed])
+        adapter.list_sessions('codex')
+        self.assertEqual(adapter.view_records('codex', SID)['records'][-1]['text'], SETTINGS_NOTICE)
+        for origin in ('absent', None, 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'):
+            row = copy.deepcopy(minimal)
+            if origin == 'absent': del row['payload']['thread_id']
+            else: row['payload']['thread_id'] = origin
+            adapter, _ = self.provider('codex', native('codex')+[row])
+            adapter.list_sessions('codex')
+        for origin in (42, {}, '../bad'):
+            row = copy.deepcopy(minimal); row['payload']['thread_id'] = origin
+            adapter, _ = self.provider('codex', native('codex')+[row]); self.assert_no_upload(adapter)
+
+    def test_settings_permission_envelopes_are_data_not_paths_or_grants(self):
+        permissions = [{'type': 'disabled'}, {'type': 'external', 'network': 'enabled'},
+            {'type': 'managed', 'network': 'enabled', 'file_system': {'type': 'unrestricted'}}]
+        for special in ({'kind': 'root'}, {'kind': 'minimal'}, {'kind': 'tmpdir'}, {'kind': 'slash_tmp'},
+                        {'kind': 'project_roots', 'subpath': 'private-subpath'},
+                        {'kind': 'unknown', 'path': 'private-future-token', 'subpath': None}):
+            permissions.append({'type': 'managed', 'network': 'restricted', 'file_system': {'type': 'restricted',
+                'entries': [{'path': {'type': 'special', 'value': special}, 'access': 'deny', 'missing_path_behavior': 'skip'}]}})
+        permissions.append({'type': 'managed', 'network': 'restricted', 'file_system': {'type': 'restricted',
+            'entries': [{'path': {'type': 'glob_pattern', 'pattern': 'private-pattern/**'}, 'access': 'deny'}]}})
+        with patch('pathlib.Path.resolve', side_effect=AssertionError('no native path resolution')):
+            # Pure projection has no filesystem input discovery or permission application.
+            for permission in permissions:
+                adapter = WorkloadTextProvider.__new__(WorkloadTextProvider)
+                adapter.provider, adapter.profile = 'codex', 'codex-0.169.0-text-v1'
+                adapter.bounds, adapter.redactor = Bounds(), Redactor(Bounds())
+                row = self.settings_record(); row['payload']['thread_settings']['permission_profile'] = permission
+                metadata, output, view = adapter.project(native('codex')+[row])
+                self.assertEqual(metadata['model'], 'fixture-model'); self.assertNotIn(b'private-pattern', output)
+
+    def test_settings_opaque_credentials_media_and_bounds_refuse_before_omission(self):
+        deep = 0
+        for _ in range(40): deep = [deep]
+        adapter, _ = self.provider('codex', native('codex')+[self.settings_record()], bounds=Bounds(values=500))
+        adapter.list_sessions('codex')
+        for value, expected in ((deep, 'workload_structure_limit'), ([None]*600, 'workload_structure_limit'),
+                                (float('inf'), 'workload_record_refused'), ('\ud800', 'workload_record_refused')):
+            row = self.settings_record(); row['payload']['thread_settings']['private'] = {'password': value}
+            adapter, _ = self.provider('codex', native('codex')+[row], bounds=Bounds(values=500))
+            with self.assertRaisesRegex(SyncError, '^'+expected+'$'): adapter.list_sessions('codex')
+            self.assert_no_upload(adapter)
+        for hidden in ({'encrypted_content': 'opaque'}, {'type': 'input_audio'},
+                       {'image_url': 'data:image/png;base64,QQ=='}, {'audio_url': {'url': 'DATA:audio/wav;base64,QQ=='}}):
+            row = self.settings_record(); row['payload']['thread_settings']['collaboration_mode']['settings']['developer_instructions'] = {'password': hidden}
+            adapter, _ = self.provider('codex', native('codex')+[row]); self.assert_no_upload(adapter)
+
+    def test_settings_do_not_relax_provenance_unknown_records_or_call_arguments(self):
+        for header in ({'forked_from_id': SID}, {'attached_thread': True}, {'history_base': {'thread_id': SID}},
+                       {'source': {'subagent': 'review'}}):
+            rows = native('codex')+[self.settings_record()]; rows[0]['payload'].update(header)
+            adapter, _ = self.provider('codex', rows); self.assert_no_upload(adapter)
+        for kind in ('thread_settings_proposed', 'thread_settings_applied_unknown'):
+            row = self.settings_record(); row['payload']['type'] = kind
+            adapter, _ = self.provider('codex', native('codex')+[row]); self.assert_no_upload(adapter)
+        row = self.settings_record(); row['type'] = 'thread_settings_applied'
+        adapter, _ = self.provider('codex', native('codex')+[row]); self.assert_no_upload(adapter)
+        rows = native('codex')+[self.settings_record()]; rows[3]['payload']['arguments'] = '{"password":1e999}'
+        adapter, _ = self.provider('codex', rows); self.assert_no_upload(adapter)
+
+    def test_settings_body_edits_and_policy_upgrade_preserve_ack_lineage(self):
+        self.provider('codex', native('codex')+self.native_metadata())
+        peer, state_root = Peer(), self.root/'settings-policy-state'; state = State(state_root)
+        try:
+            def run():
+                adapter, _ = self.provider('codex')
+                return Collector(state, Registry(peer.url, FakeTokens(), http=HTTP(attempts=1)),
+                    adapter, chunk_size=23).run(providers=['codex'], days=None)
+            def previous_policy(adapter):
+                return hashlib.sha256(encoded({'profile': adapter.profile, 'redaction_sha256': adapter.redactor.fingerprint,
+                    'tool_declarations_omission': 1, 'native_metadata_omission': 1})).hexdigest()
+            adapter, _ = self.provider('codex'); self.assertNotEqual(adapter.policy_fingerprint, previous_policy(adapter))
+            with patch.object(WorkloadTextProvider, 'policy_fingerprint', property(previous_policy)):
+                self.assertEqual(run()['synced'], 1)
+            before = copy.deepcopy(state.session('codex', SID)); state.close(); state = State(state_root)
+            self.assertEqual(run()['synced'], 1)
+            self.assertEqual(before['files'], state.session('codex', SID)['files'])
+            self.assertEqual(before['view'], state.session('codex', SID)['view'])
+            rows = native('codex')+self.native_metadata()+[self.settings_record()]; self.provider('codex', rows)
+            peer.drop_view_once = True; self.assertEqual(run()['pending'], 1)
+            plan = copy.deepcopy(state.session('codex', SID)); state.close(); state = State(state_root)
+            self.assertEqual(run()['synced'], 1)
+            delivered = copy.deepcopy(state.session('codex', SID)); self.assertEqual(plan['view']['generation'], delivered['view']['generation'])
+            rows[-1]['payload']['thread_settings']['model'] = 'private-changed-model'
+            self.provider('codex', rows); self.assertEqual(run()['synced'], 1)
+            self.assertEqual(delivered['files'], state.session('codex', SID)['files'])
+            self.assertEqual(delivered['view'], state.session('codex', SID)['view'])
+        finally: peer.close(); state.close()
 
     def test_native_world_and_token_metadata_are_fixed_nondisclosing_notices(self):
         for full in (False, True):
