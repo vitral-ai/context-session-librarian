@@ -11,12 +11,13 @@ from csl_sync_engine import Collector, PROVIDERS
 from csl_sync_http import HTTP, Registry
 from csl_sync_state import State, SyncError
 from csl_text_workload import WorkloadTextProvider, PROFILE_MARKER, MARKER
-from csl_workload_stream import Bounds, Redactor
+from csl_workload_stream import Bounds, OPAQUE as OPAQUE_FIELDS, Redactor, encoded
 from sync_support import Peer, FakeTokens
 
 SID = '11111111-2222-4333-8444-555555555555'
 CANARY = 'sk-proj-'+'Q'*32
 OPAQUE = 'SYNTHETIC-OPAQUE-PRIVATE-REASONING'
+CATALOG_NOTICE = 'Native tool declarations omitted; workload text is view-only.'
 
 
 def native(provider):
@@ -59,6 +60,179 @@ class WorkloadTextTests(unittest.TestCase):
         if records is not None:
             path.write_bytes(b''.join(json.dumps(row).encode()+b'\n' for row in records))
         return WorkloadTextProvider(provider, ((source,'main.jsonl'),), self.root/provider/'projection', **options), path
+
+    def catalog(self, **fields):
+        return {'type': 'response_item', 'payload': {'type': 'additional_tools', 'role': 'developer',
+            'tools': [{'type': 'function', 'name': 'catalog-private-name',
+                'description': 'catalog-private-description '+CANARY,
+                'parameters': {'type': 'object', 'properties': {
+                    'password': {'type': 'string', 'default': 'tiny'},
+                    'count': {'type': 'integer', 'default': 1}}}}], **fields}}
+
+    def test_codex_additional_tools_is_a_fixed_notice_not_a_schema_upload(self):
+        for paginated in (False, True):
+            for tools in ([], self.catalog()['payload']['tools']):
+                rows = native('codex'); rows.insert(1, self.catalog(tools=tools, id='catalog-1'))
+                if paginated:
+                    rows[0]['payload']['history_mode'] = 'paginated'
+                    for ordinal, row in enumerate(rows): row['ordinal'] = ordinal
+                adapter, path = self.provider('codex', rows)
+                original = path.read_bytes(); metadata = adapter.list_sessions('codex')[0]
+                projected = Path(adapter.raw_files('codex', SID)[0]['path']).read_bytes()
+                output = [json.loads(line) for line in projected.splitlines()]
+                self.assertEqual(output[1]['payload'], {'type': 'additional_tools'})
+                self.assertEqual(output[1][MARKER], CATALOG_NOTICE)
+                view = adapter.view_records('codex', SID)['records']
+                notices = [row for row in view if row['text'] == CATALOG_NOTICE]
+                self.assertEqual(len(notices), 1)
+                self.assertEqual(notices[0]['kind'], 'notice')
+                self.assertEqual(json.loads(projected[notices[0]['raw_offset']['offset']:].splitlines()[0]), output[1])
+                for artifact in (projected, encoded(view), encoded(metadata)):
+                    for secret in (CANARY.encode(), b'catalog-private-name', b'catalog-private-description', b'tiny'):
+                        self.assertNotIn(secret, artifact)
+                self.assertEqual(path.read_bytes(), original)
+                self.assertFalse(adapter.package_descriptor('codex', SID)['available'])
+        for role in ('system', 'developer', 'user', 'assistant'):
+            adapter, _ = self.provider('codex', native('codex')+[self.catalog(role=role, id=None)])
+            self.assertEqual(adapter.list_sessions('codex')[0]['native_id'], SID)
+
+    def test_additional_tools_requires_the_declared_payload_shape(self):
+        for fields in ({'tools': None}, {'tools': {}}, {'tools': 'opaque'}, {'tools': [None]},
+                       {'tools': ['{}']}, {'role': None}, {'role': 'tool'}, {'id': 1},
+                       {'id': '../bad'}, {'encrypted_content': 'private'}, {'arguments': '{}'}):
+            with self.subTest(fields=tuple(fields)):
+                adapter, _ = self.provider('codex', native('codex')+[self.catalog(**fields)])
+                self.assert_no_upload(adapter)
+        for missing in ('role', 'tools'):
+            row = self.catalog(); del row['payload'][missing]
+            adapter, _ = self.provider('codex', native('codex')+[row])
+            self.assert_no_upload(adapter)
+
+    def test_omitted_tool_catalog_refuses_opaque_descendants_even_under_credentials(self):
+        variants = [{name: 'opaque'} for name in OPAQUE_FIELDS]
+        variants += [{'type': name, 'data': 'opaque'} for name in (
+            'image', 'document', 'audio', 'video', 'base64', 'input_image', 'input_audio', 'input_file')]
+        for hidden in variants:
+            for field in ('ordinary', 'password'):
+                with self.subTest(marker=tuple(hidden), field=field):
+                    rows = native('codex')+[self.catalog(tools=[{'parameters': {field: [hidden]}}])]
+                    adapter, _ = self.provider('codex', rows)
+                    self.assert_no_upload(adapter)
+
+    def test_tool_catalog_structure_and_call_argument_limits_precede_omission(self):
+        deep = 0
+        for _ in range(40): deep = [deep]
+        for bad in (deep, [None]*300, float('inf'), '\ud800'):
+            with self.subTest(value_type=type(bad).__name__):
+                rows = native('codex')+[self.catalog(tools=[{'password': bad}])]
+                adapter, _ = self.provider('codex', rows, bounds=Bounds(values=250))
+                self.assert_no_upload(adapter)
+        rows = native('codex')+[self.catalog()]
+        rows[3]['payload']['arguments'] = '{"password":1e999}'
+        adapter, _ = self.provider('codex', rows)
+        self.assert_no_upload(adapter)
+        for subtype in ('agent_message', 'configuration_update', 'context_compaction', 'compaction', 'unknown'):
+            row = self.catalog(); row['payload']['type'] = subtype
+            adapter, _ = self.provider('codex', native('codex')+[row])
+            self.assert_no_upload(adapter)
+
+    def test_tool_catalog_inline_media_carriers_refuse_but_readable_schema_names_pass(self):
+        urls = ('data:image/png;base64,QQ==', 'DATA:audio/wav;base64,QQ==',
+                ' \tDa\rta:application/octet-stream;base64,QQ==', 'data:text/plain,opaque')
+        for carrier in ('image_url', 'audio_url'):
+            for url in urls:
+                for wrapped in (False, True):
+                    for field in ('ordinary', 'password'):
+                        media = {'url': url} if wrapped else url
+                        rows = native('codex')+[self.catalog(tools=[{field: [{carrier: media}]}])]
+                        with self.subTest(carrier=carrier, wrapped=wrapped, field=field):
+                            adapter, _ = self.provider('codex', rows)
+                            self.assert_no_upload(adapter)
+        declaration = {'type': 'function', 'name': 'describe_media_url', 'parameters': {
+            'type': 'object', 'properties': {
+                'image_url': {'type': 'string', 'format': 'uri'},
+                'audio_url': {'type': 'object', 'properties': {'url': {'type': 'string'}}},
+                'input_audio': {'type': 'string'}, 'file_id': {'type': 'string'}},
+            'required': ['image_url']}, 'description': 'Use an image_url or audio_url field.'}
+        adapter, _ = self.provider('codex', native('codex')+[self.catalog(tools=[declaration])])
+        adapter.list_sessions('codex')
+        projected = Path(adapter.raw_files('codex', SID)[0]['path']).read_bytes()
+        self.assertNotIn(b'describe_media_url', projected)
+        for carrier in ('image_url', 'audio_url'):
+            adapter, _ = self.provider('codex', native('codex')+[
+                self.catalog(tools=[{carrier: 'https://example.test/public-reference'}])])
+            adapter.list_sessions('codex')
+
+    def test_tool_catalog_does_not_relax_fork_history_or_ordinal_refusal(self):
+        for header in ({'forked_from_id': SID}, {'history_base': {'thread_id': SID}},
+                       {'attached_thread': True}, {'source': {'subagent': 'review'}}):
+            rows = native('codex')+[self.catalog()]; rows[0]['payload'].update(header)
+            adapter, _ = self.provider('codex', rows)
+            self.assert_no_upload(adapter)
+        rows = native('codex')+[self.catalog()]; rows[0]['payload']['history_mode'] = 'paginated'
+        for ordinal, row in enumerate(rows): row['ordinal'] = ordinal
+        rows[-1]['ordinal'] = True
+        adapter, _ = self.provider('codex', rows)
+        self.assert_no_upload(adapter)
+
+    def test_tool_omission_policy_is_codex_only_and_replay_keeps_exact_ack_plan(self):
+        for provider in ('codex', 'claude'):
+            adapter, _ = self.provider(provider, native(provider))
+            previous = hashlib.sha256(encoded({'profile': adapter.profile,
+                'redaction_sha256': adapter.redactor.fingerprint})).hexdigest()
+            self.assertEqual(adapter.policy_fingerprint == previous, provider == 'claude')
+        rows = native('codex')+[self.catalog()]
+        adapter, path = self.provider('codex', rows)
+        peer, state_root = Peer(), self.root/'tool-state'
+        state = State(state_root)
+        try:
+            def run():
+                adapter, _ = self.provider('codex')
+                return Collector(state, Registry(peer.url, FakeTokens(), http=HTTP(attempts=1)),
+                    adapter, chunk_size=23).run(providers=['codex'], days=None)
+            peer.drop_view_once = True
+            self.assertEqual(run()['pending'], 1)
+            planned = copy.deepcopy(state.session('codex', SID))
+            state.close(); state = State(state_root)
+            self.assertEqual(run()['synced'], 1)
+            delivered = copy.deepcopy(state.session('codex', SID))
+            self.assertEqual(planned['view']['generation'], delivered['view']['generation'])
+            rows[-1]['payload']['tools'][0]['description'] = 'changed private catalog '+CANARY
+            self.provider('codex', rows)
+            self.assertEqual(run()['synced'], 1)
+            rewritten = state.session('codex', SID)
+            self.assertEqual(delivered['files']['main']['revision'], rewritten['files']['main']['revision'])
+            self.assertEqual(delivered['view']['generation'], rewritten['view']['generation'])
+            for artifact in peer.files.values():
+                self.assertNotIn(CANARY.encode(), artifact)
+                self.assertNotIn(b'catalog-private', artifact)
+            self.assertEqual(json.loads(path.read_bytes().splitlines()[-1]), rows[-1])
+        finally:
+            peer.close(); state.close()
+
+    def test_old_policy_ack_lineage_survives_unchanged_projected_bytes(self):
+        self.provider('codex', native('codex'))
+        peer, state_root = Peer(), self.root/'policy-state'
+        state = State(state_root)
+        try:
+            def run():
+                adapter, _ = self.provider('codex')
+                return Collector(state, Registry(peer.url, FakeTokens(), http=HTTP(attempts=1)),
+                    adapter, chunk_size=23).run(providers=['codex'], days=None)
+            def previous_policy(adapter):
+                return hashlib.sha256(encoded({'profile': adapter.profile,
+                    'redaction_sha256': adapter.redactor.fingerprint})).hexdigest()
+            with patch.object(WorkloadTextProvider, 'policy_fingerprint', property(previous_policy)):
+                self.assertEqual(run()['synced'], 1)
+            previous = copy.deepcopy(state.session('codex', SID))
+            state.close(); state = State(state_root)
+            self.assertEqual(run()['synced'], 1)
+            current = state.session('codex', SID)
+            self.assertEqual(previous['snapshot_id'], current['snapshot_id'])
+            self.assertEqual(previous['files'], current['files'])
+            self.assertEqual(previous['view'], current['view'])
+        finally:
+            peer.close(); state.close()
 
     def test_both_profiles_sanitize_all_artifacts_and_explicitly_omit_reasoning(self):
         for provider in ('codex','claude'):
