@@ -141,6 +141,40 @@ image to impersonate this source. Reuse the existing executor-selected real
 transcript for a fresh full provider preflight after exact-head review and CI;
 neither enrollment nor another model turn is required to qualify source parsing.
 
+## Codex Thread Settings Omission
+
+The Codex subset additionally recognizes exactly
+`event_msg` / `thread_settings_applied`, using the pinned
+[`ThreadSettingsAppliedEvent` and `ThreadSettingsSnapshot`](https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/protocol/src/protocol.rs#L2499).
+The event is closed to `type`, `thread_settings` and optional `thread_id`.
+The snapshot is closed to the emitted required/optional fields and typed
+permission, approval and collaboration envelopes. The relevant nested schemas
+are [PermissionProfile](https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/protocol/src/models.rs#L429),
+[raw filesystem entries](https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/protocol/src/permissions.rs#L195)
+and [CollaborationMode](https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/protocol/src/config_types.rs#L708).
+
+These envelopes are metadata validation, NOT a permission/configuration parser
+for the collector. No approval flags, model, paths, roots, plugins or settings
+are applied, resolved, followed or uploaded. The optional native thread ID may
+name the original task for a copied snapshot, as upstream documents; it is
+validated but never followed or used to derive account/owner authority. Existing
+main-header provenance/history and token-record affinity checks remain unchanged.
+
+All accepted settings become one fixed notice: "Native thread settings omitted;
+workload text is view-only." The whole-capture limits and shared opaque/media
+checks precede omission. Only sanitized notice coordinates are used; no snapshot
+body, ID, setting value or body hash enters wire/view metadata. This event does
+not replace the model/CWD metadata of a prior turn or assert that settings were
+actually applied by the collector. Unknown event/record kinds still refuse.
+
+The Codex fingerprint adds `thread_settings_omission: 1`; the profile name and
+auth/config/runner/bootstrap interfaces stay unchanged. The prior metadata
+policy can retain ACKs for identical sanitized bytes/view, and settings-only
+body edits do not invent a new revision. Runtime selection still requires an
+explicit reviewed pin and exact-head CI, then full provider preflight on the
+same already-created source. No new model turn or enrollment is needed for
+source qualification; a diagnostic is not a provider PASS or A8 evidence.
+
 ## State And Delivery
 
 The shared `PreparedProvider` contains the formerly Gemini-only explicit-root,
