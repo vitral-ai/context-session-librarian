@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import select
 import socket
 import subprocess
 import sys
@@ -17,6 +18,16 @@ from csl_workload_observation import identity
 MAX_PACKET = 96*1024
 MAX_BODY = 48*1024
 MAX_EVENTS = 8192
+
+
+# Only the commissioned launch-bound observer opts into this short IPC wait.
+LAUNCH_HANDSHAKE_SECONDS = .5
+
+
+def wait_readable(sock, deadline):
+    remaining = deadline - boot_clock()
+    return (remaining > 0 and bool(select.select([sock], [], [], remaining)[0])
+            and boot_clock() < deadline)
 
 
 def encode(value):
@@ -128,7 +139,8 @@ class Agent:
 
 
 class RemoteObservation(Channel):
-    def __init__(self, config, assignment, binding, expected_worker, *, selected_session=None):
+    def __init__(self, config, assignment, binding, expected_worker, *, selected_session=None,
+                 wait_for_prepared=False):
         from csl_workload_http import Origin
         context = assignment['context']
         session = config.observe_session if selected_session is None else identity(selected_session)
@@ -143,6 +155,7 @@ class RemoteObservation(Channel):
         self.url = Origin(config.origin).registry+self.path
         self.failed, self.call = False, None
         self.prepared = {}
+        self.wait_for_prepared = wait_for_prepared
 
     def readiness(self):
         for value in self.poll():
@@ -164,10 +177,15 @@ class RemoteObservation(Channel):
             if name == 'begin': self.call = str(uuid.uuid4())
             if name == 'request':
                 self.readiness()
+                if self.wait_for_prepared and self.call not in self.prepared:
+                    until = min(self.deadline, boot_clock() + LAUNCH_HANDSHAKE_SECONDS)
+                    while self.call not in self.prepared and wait_readable(self.sock, until):
+                        self.readiness()
                 ready = self.prepared.pop(self.call, None)
                 if (type(args[2]) is not bytes or len(args[2]) > MAX_BODY or ready is None
                         or ready.get('url') != args[0]
-                        or ready.get('digest') != hashlib.sha256(args[2]).hexdigest()): raise ValueError()
+                        or ready.get('digest') != hashlib.sha256(args[2]).hexdigest()
+                        or boot_clock() >= self.deadline): raise ValueError()
             self.send({'op': 'event', 'name': name, 'args': [encode(a) for a in args],
                        'worker': self.worker, 'seal': self.seal, 'call': self.call})
             if name == 'end': self.call = None

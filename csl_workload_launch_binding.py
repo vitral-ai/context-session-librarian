@@ -14,7 +14,8 @@ from csl_workload_auth import boot_clock
 from csl_canonical import strict_json
 from csl_workload_identity import canonical
 from csl_workload_observation import identity
-from csl_workload_observation_agent import Channel, RemoteObservation
+from csl_workload_observation_agent import (Channel, LAUNCH_HANDSHAKE_SECONDS, RemoteObservation,
+                                            wait_readable)
 from csl_workload_observation_driver import AcceptanceDriver, StoredDriver
 from csl_workload_observation_journal import sha
 
@@ -92,7 +93,7 @@ class PreparedLaunch:
 
 
 class LaunchObservation(Channel):
-    """Real worker admission and zero-wait grant, never a native-row fallback."""
+    """Real worker admission and deadline-bounded grant, never a native-row fallback."""
     def __init__(self, config, assignment, binding, expected_worker):
         if (set(assignment) != {'mode', 'worker', 'seal', 'deadline', 'launch', 'run', 'source', 'scope', 'binding', 'observer_fd'}
                 or assignment['mode'] != 'fresh-codex' or assignment['worker'] != expected_worker
@@ -170,6 +171,10 @@ class LaunchObservation(Channel):
 
     def grant(self):
         answer = receive(self.sock)
+        if answer is None:
+            until = min(self.deadline, boot_clock() + LAUNCH_HANDSHAKE_SECONDS)
+            if not wait_readable(self.sock, until): raise ValueError()
+            answer = receive(self.sock)
         if answer is None: raise ValueError()
         message, fds = answer
         try:
@@ -183,7 +188,7 @@ class LaunchObservation(Channel):
                     or assignment['context']['run'] != self.assignment['run']
                     or assignment['context']['source'] != self.assignment['source']): raise ValueError()
             self.remote = RemoteObservation(self.config, {**assignment, 'observer_fd': fds[0]},
-                self.binding, self.worker, selected_session=self.session)
+                self.binding, self.worker, selected_session=self.session, wait_for_prepared=True)
             if boot_clock() >= self.deadline: raise ValueError()
         finally:
             for fd in fds: os.close(fd)
