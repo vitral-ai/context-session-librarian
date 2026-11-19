@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "source": "d32063f96c2dff1dc96af839b3952abb6acfeda4",
+  "base_manifest": "sha256:8691a8fdc0ea6e00ebeb2e2a8fc56f9f607b718dd45555ffd38c8753cd8119e1",
+  "base_index": "sha256:be53797b9bbc0d5e807fe88e0ba606bdba2fb50eccfa71a834d5232af61eec80",
+  "archives": [
+    {"name":"codex-x86_64-unknown-linux-musl.tar.gz","size":117805733,"sha256":"9af4d751fce183faedea629437d5252dbf458eeb04130cf4f97be844621ea985","url":"https://github.com/openai/codex/releases/download/rust-v0.169.0/codex-x86_64-unknown-linux-musl.tar.gz","files":{"codex-x86_64-unknown-linux-musl":"bin/codex"},"directories":[]},
+    {"name":"codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz","size":27390073,"sha256":"cbed6a8d25e8268792b757767fbc76d4c62e84bcf8ee4a63f97547f0de3aaceb","url":"https://github.com/openai/codex/releases/download/rust-v0.169.0/codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz","files":{"codex-code-mode-host-x86_64-unknown-linux-musl":"bin/codex-code-mode-host"},"directories":[]},
+    {"name":"codex-exec-server-x86_64-unknown-linux-musl.tar.gz","size":27970552,"sha256":"96709e8cecc01c97369ba24d2adac7a528b3580c22f8966fa4cda701048abcde","url":"https://github.com/openai/codex/releases/download/rust-v0.169.0/codex-exec-server-x86_64-unknown-linux-musl.tar.gz","files":{"codex-exec-server-x86_64-unknown-linux-musl":"bin/codex-exec-server"},"directories":[]},
+    {"name":"bwrap-x86_64-unknown-linux-musl.tar.gz","size":258710,"sha256":"6eec6f2479d34fa2b7660d4f64ca3d9dd08a898920d5769cf1c3d4fd043f5d91","url":"https://github.com/openai/codex/releases/download/rust-v0.169.0/bwrap-x86_64-unknown-linux-musl.tar.gz","files":{"bwrap-x86_64-unknown-linux-musl":"codex-resources/bwrap"},"directories":[]},
+    {"name":"ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz","size":2265718,"sha256":"33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c","url":"https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz","directories":["ripgrep-15.2.0-x86_64-unknown-linux-musl","ripgrep-15.2.0-x86_64-unknown-linux-musl/complete","ripgrep-15.2.0-x86_64-unknown-linux-musl/doc"],"files":{
+      "ripgrep-15.2.0-x86_64-unknown-linux-musl/rg":"codex-path/rg",
+      "ripgrep-15.2.0-x86_64-unknown-linux-musl/COPYING":"licenses/ripgrep/COPYING",
+      "ripgrep-15.2.0-x86_64-unknown-linux-musl/LICENSE-MIT":"licenses/ripgrep/LICENSE-MIT",
+      "ripgrep-15.2.0-x86_64-unknown-linux-musl/UNLICENSE":"licenses/ripgrep/UNLICENSE",
+      "ripgrep-15.2.0-x86_64-unknown-linux-musl/README.md":null,
+      "ripgrep-15.2.0-x86_64-unknown-linux-musl/doc/CHANGELOG.md":null,
+      "ripgrep-15.2.0-x86_64-unknown-linux-musl/doc/FAQ.md":null,
+      "ripgrep-15.2.0-x86_64-unknown-linux-musl/doc/GUIDE.md":null,
+      "ripgrep-15.2.0-x86_64-unknown-linux-musl/doc/rg.1":null,
+      "ripgrep-15.2.0-x86_64-unknown-linux-musl/complete/rg.bash":null,
+      "ripgrep-15.2.0-x86_64-unknown-linux-musl/complete/rg.fish":null,
+      "ripgrep-15.2.0-x86_64-unknown-linux-musl/complete/_rg":null,
+      "ripgrep-15.2.0-x86_64-unknown-linux-musl/complete/_rg.ps1":null
+    }}
+  ],
+  "licenses": [
+    {"name":"CODEX-LICENSE","sha256":"d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc","url":"https://raw.githubusercontent.com/openai/codex/d32063f96c2dff1dc96af839b3952abb6acfeda4/LICENSE","target":"licenses/codex/LICENSE"},
+    {"name":"CODEX-NOTICE","sha256":"9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915","url":"https://raw.githubusercontent.com/openai/codex/d32063f96c2dff1dc96af839b3952abb6acfeda4/NOTICE","target":"licenses/codex/NOTICE"},
+    {"name":"BUBBLEWRAP-LICENSE","sha256":"b7993225104d90ddd8024fd838faf300bea5e83d91203eab98e29512acebd69c","url":"https://raw.githubusercontent.com/openai/codex/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/vendor/bubblewrap/COPYING","target":"licenses/bubblewrap/LICENSE"}
+  ]
+}
