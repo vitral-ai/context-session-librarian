@@ -75,13 +75,14 @@ helper never supplies a UUID or expected nonce. Parent approval selects only the
 helper's private observation configuration after independently checked auth/source
 preparation. The product worker configuration stays session-unselected.
 
-Before the first eligible session PUT, the worker checks the parent grant once,
-nonblockingly. It matches the original worker/seal/deadline/launch and its own
-validated birth before attaching the existing immutable Request-body observer.
-Absent, stale, late or mismatched grant loses evidence; the ORIGINAL request
-proceeds. Cold or slow binding can therefore make a legitimate run unqualified.
-There is no wait, replay, reupload, deadline renewal, prefix adoption or retry to
-make evidence qualify. Earlier failed coverage cannot be healed by a later pass.
+Before the first eligible session PUT, the explicit launch observer allows up
+to 500 ms for the parent grant, capped by the original worker deadline. It
+matches the original worker/seal/deadline/launch and its own validated birth
+before attaching the immutable Request-body observer. This mode also allows
+up to 500 ms per request for the matching prepared acknowledgement under the
+same deadline. After a missing, stale, late or mismatched reply, evidence is
+unavailable and the original request proceeds under its original deadline.
+Earlier failed coverage cannot be healed by replay, reupload or a later pass.
 
 Before any birth, a worker can find the intentionally empty source. Only that
 actual return before any Collector/registry call emits a zero-session-PUT notice

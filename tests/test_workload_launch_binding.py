@@ -223,6 +223,13 @@ class LaunchBindingTests(unittest.TestCase):
         self.assertEqual(sum(m == 'PUT' and p.endswith('/content') for m, p in self.peer.calls), 1)
         self.assertEqual(sum(m == 'PUT' and p.endswith('/view') for m, p in self.peer.calls), 1)
 
+    def test_real_worker_observes_first_put_without_fixture_handshake_padding(self):
+        driver, receipts = self.joined(ready=False)
+        self.assertIsNotNone(driver.result)
+        self.assertTrue(all(receipt.get('native_birth') == driver.birth for receipt in receipts))
+        self.assertEqual(sum(m == 'PUT' and p.endswith('/content') for m, p in self.peer.calls), 1)
+        self.assertEqual(sum(m == 'PUT' and p.endswith('/view') for m, p in self.peer.calls), 1)
+
     def test_multiple_qualified_sources_cannot_choose_first_uuid(self):
         driver, _ = self.joined(extra_source=True)
         self.assertIsNone(driver.result); self.assertIsNone(driver.birth)
