@@ -9,6 +9,7 @@ from csl_sync_state import SyncError
 from csl_text_workload import PROFILES
 from csl_workload_http import Origin
 from csl_workload_identity import CLIENT_ID, metadata
+from csl_workload_observation import identity as observation_identity
 
 with (Path(__file__).parent/'packaging/workload-collector/profiles.json').open() as _source:
     PROVIDER_PROFILES = json.load(_source)
@@ -47,6 +48,7 @@ class Configuration:
     flush_seconds: int
     spool_bytes: int
     ca_file: str | None
+    observe_session: str | None = None
 
     @classmethod
     def from_environment(cls, env):
@@ -67,4 +69,8 @@ class Configuration:
         # A public ConfigMap CA may use Kubernetes' normal symlink projection.
         # WorkloadHTTP still validates certificate and hostname when it loads it.
         if ca is not None and (not isinstance(ca, str) or not Path(ca).is_absolute() or not Path(ca).is_file()): refused()
-        return cls(origin, provider, profile, source, state, location, flush, spool, ca)
+        observe = env.get(PREFIX+'OBSERVE_SESSION')
+        if observe is not None:
+            try: observation_identity(observe)
+            except (ValueError, TypeError, AttributeError): refused()
+        return cls(origin, provider, profile, source, state, location, flush, spool, ca, observe)
