@@ -391,6 +391,8 @@ class Collector:
                 self.registry.call('PUT', path + '/view', body=payload, key=digest(payload))
                 local['view'].update(position=page['position'], last_seq=page['records'][-1]['seq'])
                 self.state.save_session(provider, native_id, local)
+                callback = getattr(self.registry, 'view_acknowledged', None)
+                if callback is not None: callback(path, local['view'])
             local.update(status='synced', last_synced_at=now(), last_error=None)
             local['verified_cache'] = getattr(self.providers, 'verified_cache', lambda *a: None)(provider, native_id)
             self.state.save_session(provider, native_id, local)
@@ -430,6 +432,8 @@ class Collector:
                               'mode': item['mode'], 'prefix': headers.get('X-Prefix-SHA256'),
                               'start': offset, 'end': end, 'sha256': headers['X-Content-SHA256']})
                 try:
+                    callback = getattr(self.registry, 'upload_planned', None)
+                    if callback is not None: callback(path, item['file_key'], checkpoint['revision'], offset, end)
                     receipt = self.registry.call('PUT', path + suffix, binary=data, headers=headers, key=key)
                 except SyncError as error:
                     if error.code == 'prefix_mismatch':
@@ -441,3 +445,5 @@ class Collector:
                 offset = end; empty = False
                 checkpoint.update(offset=offset, offset_sha256=h.hexdigest())
                 on_progress()
+                callback = getattr(self.registry, 'content_acknowledged', None)
+                if callback is not None: callback(path, item['file_key'], checkpoint)

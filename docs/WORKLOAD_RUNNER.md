@@ -6,6 +6,10 @@ Collector/journal/uploader. It does not build or activate a workload image,
 register credentials, approve a person, deploy a route or qualify A8.
 Existing desktop/raw CLI commands stay unchanged.
 
+The separate [default-off body-observation source](WORKLOAD_OBSERVATION.md)
+provides private, one-pass synthetic-canary evidence only. It never supplies
+delivery, producer-stop or final-flush authority.
+
 The source entry point is `python3 -S csl_workload_runner.py`. With no arguments
 it watches the configured transcript-only mount. Arguments after `--` are one
 literal producer command, launched once without a shell, retries, version probes

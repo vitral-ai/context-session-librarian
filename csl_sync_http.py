@@ -41,10 +41,14 @@ class HTTP:
         self.timeout, self.attempts, self.sleep = timeout, attempts, sleep
         self.opener = urllib.request.build_opener(NoRedirect())
 
+    def request_created(self, request):
+        """No-op boundary; workload evidence is explicitly enabled in its worker."""
+
     def request(self, url, method='GET', *, data=None, headers=None, retry=False):
         for attempt in range(self.attempts if retry else 1):
             try:
                 request = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+                self.request_created(request)
                 with self.opener.open(request, timeout=self.timeout) as response:
                     raw = response.read(MAX_RESPONSE + 1)
                     if len(raw) > MAX_RESPONSE:
