@@ -6,6 +6,12 @@ No qualified image receipt contains this correction. Default CLI/watch/chart
 behavior is unchanged; there is no new product CLI, network service, consent
 authority, deadline, request/replay/reupload or automatic enrollment.
 
+The subsequent dcf0310 source review also required two corrections: Linux
+PDEATHSIG creating-thread lifetime and parent acquisition past a worker cap.
+The creating launcher now remains alive in its off-control wait until the helper
+exits, preserving protection on true parent-process death. A normal launcher
+constructor return no longer destroys a healthy, already-armed helper.
+
 ## Private Driver Contract
 
 `AcceptanceDriver` requires independently reviewed `source` (runtime-content
@@ -89,6 +95,12 @@ parent's nonblocking reader accepts only an already-completed current seal and
 the original successful product status/plan/deadline/producer quiescence. It
 consumes before receipt cleanup. A missing/late seal yields None permanently;
 there is no later promotion, previous seal reuse or budget extension.
+The same original WORKER deadline is rechecked after IPC polling and immediately
+before publishing the fully validated/copied candidate. A stale caller time or
+the later drain/reap deadline cannot authorize late evidence. These checks never
+change product completion or wait for a seal. Tests force ARM before launcher
+return, cancellation, true parent death and clock crossings at acquisition and
+publication; they are owned controls, not a physical suspend or live run.
 
 Every run/worker clears the old result before I/O or launch. The parent retains
 an exact predecessor record hash; old worker/run/receipt/journal states cannot
@@ -114,7 +126,9 @@ that fixture padding is NOT product behavior or a latency/availability claim.
 Interruption, lost proof, unsafe storage, stale seal/predecessor, helper-plan
 mismatch, unsupported size and same-UID limitation controls remain separate.
 
-REAL NATIVE BINDING GAP: the current61 empty transcript root plus new one-shot
+REAL NATIVE OBSERVER BINDING GAP: collection itself identifies qualified native
+UUIDs from normal provider admission and does not require caller preselection.
+For this observer mode, the current61 empty transcript root plus new one-shot
 Codex invocation does not supply an independently approved session UUID before
 observation. This driver still REQUIRES that preselected UUID. No supported fresh
 native-binding mechanism is implemented here; it must not guess/adopt a session
