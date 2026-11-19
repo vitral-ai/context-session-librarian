@@ -299,7 +299,15 @@ def run_pass(config, deadline, composition=None, expected_worker=None):
         if type(cursor) is not int or not 0 <= cursor < max(1, len(selected)):
             raise SyncError('workload_runtime_record_refused')
         private_json(runtime/'sources.json', {'paths': list(selected), 'next_index': (cursor+1) % max(1, len(selected))})
-        if not selected: return {'ok': False, 'synced': 0, 'pending': 1, 'manifest': []}
+        if not selected:
+            result = {'ok': False, 'synced': 0, 'pending': 1, 'manifest': []}
+            if config.observe_session is None and composition is not None and composition.get('mode') == 'fresh-codex':
+                try:
+                    empty = LaunchObservation(config, composition, binding, expected_worker)
+                    try: result.update(empty.no_source())
+                    finally: empty.close()
+                except Exception: pass
+            return result
         if config.observe_session is None and composition is not None and composition.get('mode') == 'fresh-codex':
             try: http.observation = LaunchObservation(config, composition, binding, expected_worker)
             except Exception: http.observation = None

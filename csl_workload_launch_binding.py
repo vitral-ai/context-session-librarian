@@ -21,6 +21,7 @@ from csl_workload_observation_journal import sha
 LIMIT = 4096
 PROFILE = 'codex-0.169.0-text-v1'
 KERNEL = {'run_id', 'boot', 'guardian_pid', 'guardian_start', 'producer_pid', 'producer_start'}
+ASSIGNMENT_FACTS = ('worker', 'seal', 'launch', 'run', 'source', 'scope', 'binding')
 
 
 def kernel(value):
@@ -132,6 +133,15 @@ class LaunchObservation(Channel):
             self.declared = True
         except Exception: self.failed = True
 
+    def no_source(self):
+        # Only the actual empty-source return, before any Collector/registry call.
+        if (self.failed or self.birth is not None or self.remote is not None or self.roots
+                or self.declared or boot_clock() >= self.deadline): return {}
+        notice = {'event': 'no_source', 'session_puts': 0,
+                  **{k: self.assignment[k] for k in ASSIGNMENT_FACTS}}
+        send(self.sock, notice)
+        return {'native_no_source': notice}
+
     def admitted(self, adapter, accepted):
         try:
             if (self.failed or not self.declared or self.birth is not None or boot_clock() >= self.deadline
@@ -212,6 +222,7 @@ class LaunchAcceptanceDriver(AcceptanceDriver):
         self.writer = self.kernel = self.birth = self.binder = None
         self.closed, self.launch_used, self.launch_prepared, self.poisoned = False, False, False, False
         self.parent_sock = self.worker_sock = None
+        self.empty_notice = self.empty_receipt = None
 
     def prepare(self, config, expected_scope):
         try: return self._prepare(config, expected_scope)
@@ -276,7 +287,12 @@ class LaunchAcceptanceDriver(AcceptanceDriver):
         if self.agent is not None:
             self.poll()
             if not self.valid or self.awaiting_retention: self.invalidate(); return None
+        if self.expected_worker is not None and self.birth is None:
+            previous = (self.expected_worker, self.expected_seal)
+            if self.empty_notice != previous or self.empty_receipt != previous:
+                self.invalidate(); return None
         self.expected_worker, self.expected_seal, self.deadline = identity(sequence), str(uuid.uuid4()), deadline
+        self.empty_notice = self.empty_receipt = None
         self.finals.clear()
         self.parent_sock, self.worker_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         self.parent_sock.setblocking(False); self.worker_sock.setblocking(False)
@@ -295,6 +311,7 @@ class LaunchAcceptanceDriver(AcceptanceDriver):
 
     def bind(self, channel, sequence, seal, deadline):
         descriptors = []
+        empty = False
         try:
             proposal = None
             while self.current(sequence, seal, deadline):
@@ -308,13 +325,20 @@ class LaunchAcceptanceDriver(AcceptanceDriver):
                 if proposal is None:
                     proposal = receive(channel)
                     if proposal is not None: descriptors = proposal[1]
-                if proposal is not None and self.kernel is not None: break
+                if proposal is not None and (self.kernel is not None or proposal[0].get('event') == 'no_source'): break
                 time.sleep(.001)  # Off-control binder only, never a product wait.
             if proposal is None or not self.current(sequence, seal, deadline): raise ValueError()
             message, descriptors = proposal
             expected = {'event': 'admitted', 'worker': sequence, 'seal': seal, 'launch': self.launch,
                         'run': self.run, 'source': self.context['source'],
                         'scope': self.context['scope'], 'binding': self.context['binding']}
+            if message.get('event') == 'no_source':
+                expected.update(event='no_source', session_puts=0)
+                if (self.birth is not None or self.started or self.expected_plan is not None or descriptors
+                        or canonical(message) != canonical(expected)): raise ValueError()
+                self.empty_notice = (sequence, seal)
+                empty = True
+                return
             if set(message) != set(expected)|{'birth'} or any(message[k] != v for k, v in expected.items()): raise ValueError()
             birth = message['birth']
             if (type(birth) is not dict or set(birth) != {'session', 'relative', 'device', 'inode', 'policy'}
@@ -349,10 +373,32 @@ class LaunchAcceptanceDriver(AcceptanceDriver):
             if not self.current(sequence, seal, deadline): self.invalidate()
         except Exception: self.invalidate()
         finally:
-            self.writer.close_launch()
+            if not empty or self.kernel is not None: self.writer.close_launch()
             for fd in descriptors: os.close(fd)
             channel.close()
             if self.closed and self.agent is not None: self.agent.close()
+
+    def retain(self, receipt, sequence, *, now):
+        if type(receipt) is dict and 'native_no_source' in receipt:
+            try:
+                expected = {'event': 'no_source', 'session_puts': 0, 'worker': sequence,
+                    'seal': self.expected_seal, 'launch': self.launch, 'run': self.run,
+                    'source': self.context['source'], 'scope': self.context['scope'],
+                    'binding': self.context['binding']}
+                if (not self.current(sequence, self.expected_seal, self.deadline)
+                        or max(now, boot_clock()) >= self.deadline or self.birth is not None
+                        or self.started or self.expected_plan is not None
+                        or set(receipt) != {'sequence', 'scope', 'ok', 'synced', 'pending', 'manifest', 'native_no_source'}
+                        or receipt['sequence'] != sequence or receipt['scope'] != self.context['scope']
+                        or receipt['ok'] is not False or type(receipt['synced']) is not int or receipt['synced'] != 0
+                        or type(receipt['pending']) is not int or receipt['pending'] != 1
+                        or receipt['manifest'] != []
+                        or canonical(receipt['native_no_source']) != canonical(expected)): raise ValueError()
+                self.clear_result()
+                self.empty_receipt = (sequence, self.expected_seal)
+            except Exception: self.invalidate()
+            return
+        super().retain(receipt, sequence, now=now)
 
     def combined(self, receipt, sequence, now):
         if (self.birth is None or type(receipt) is not dict or receipt.get('native_birth') != self.birth

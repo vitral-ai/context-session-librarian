@@ -29,7 +29,8 @@ class LaunchBindingTests(unittest.TestCase):
 
     def joined(self, *, extra_source=False, absent_source=False, wrong_kernel=False,
                replace_root=False, replace_inode=False, mutate_final=None, ready=True, stalled=False,
-               corrupt=False, resource=None, cancelled=False):
+               corrupt=False, resource=None, cancelled=False, empty_passes=0, mutate_empty=None,
+               empty_worker_loss=False, empty_notice_loss=False):
         self.config = replace(self.config, observe_session=None, flush_seconds=5)
         root = self.config.transcript_root
         (root/'main.jsonl').unlink()
@@ -45,12 +46,16 @@ class LaunchBindingTests(unittest.TestCase):
         payload = self.root/'owned-fixture-input.json'
         payload.write_text(json.dumps(rows))
         exit_gate = self.root/'owned-producer-exit'
+        birth_gate = self.root/'owned-producer-birth'
+        if not empty_passes: birth_gate.touch()
         program = ('import json,sys,time;from pathlib import Path;'
             'p=Path(sys.argv[1]); rows=json.loads(Path(sys.argv[2]).read_text());'
+            '\nwhile not Path(sys.argv[4]).exists(): time.sleep(.001)'
+            '\n'
             'p.write_bytes(b"".join(json.dumps(r).encode()+b"\\n" for r in rows));'
             'end=time.monotonic()+8;'
             '\nwhile not Path(sys.argv[3]).exists() and time.monotonic()<end: time.sleep(.01)')
-        command = [sys.executable, '-S', '-c', program, str(root/'not-the-uuid.jsonl'), str(payload), str(exit_gate)]
+        command = [sys.executable, '-S', '-c', program, str(root/'not-the-uuid.jsonl'), str(payload), str(exit_gate), str(birth_gate)]
         lease.handoff(views, command)
         if replace_root:
             root.rename(self.root/'retained-old-root')
@@ -67,6 +72,7 @@ class LaunchBindingTests(unittest.TestCase):
         self.assertTrue(driver.launch_prepared)
         if cancelled: driver.invalidate()
         receipts = []
+        empties = []
         entered, release = threading.Event(), threading.Event()
         fstat = os.fstat
         def stalled_stat(fd):
@@ -75,13 +81,17 @@ class LaunchBindingTests(unittest.TestCase):
             return fstat(fd)
         real_popen = subprocess.Popen
         def launch(config, sequence, deadline, *, composition=None):
-            # Synthetic sole-producer fixture is ordered before its first pass.
-            until = min(deadline, boot_clock()+2)
-            while not (root/'not-the-uuid.jsonl').exists() and boot_clock() < until: time.sleep(.001)
+            empty = len(empties) < empty_passes
+            if not empty:
+                # Only positive birth fixtures wait for their owned producer.
+                until = min(deadline, boot_clock()+2)
+                while not (root/'not-the-uuid.jsonl').exists() and boot_clock() < until: time.sleep(.001)
             def process(argv, **kwargs):
                 if len(argv) >= 4 and argv[3] == '--worker':
-                    argv = [argv[0], '-B', '-S', str(Path(__file__).with_name('launch_worker_fixture.py')),
-                            *argv[4:], 'ready-fixture' if ready else 'no-wait']
+                    argv = ([argv[0], '-B', '-S', '-c', 'import os;os._exit(9)'] if empty and empty_worker_loss else
+                            [argv[0], '-B', '-S', str(Path(__file__).with_name('launch_worker_fixture.py')),
+                             *argv[4:], 'drop-empty-notice' if empty and empty_notice_loss else
+                             'ready-fixture' if ready else 'no-wait'])
                 return real_popen(argv, **kwargs)
             with patch('csl_workload_runner.subprocess.Popen', side_effect=process):
                 worker = PassProcess(config, sequence, deadline, composition=composition)
@@ -89,6 +99,11 @@ class LaunchBindingTests(unittest.TestCase):
             def receipt():
                 value = original()
                 final = exit_gate.exists()
+                if empty:
+                    self.assertFalse(any(m == 'PUT' and p.startswith('/sessions/') for m, p in self.peer.calls))
+                    empties.append(copy.deepcopy(value))
+                    if len(empties) == empty_passes: birth_gate.touch()
+                    if mutate_empty is not None: value = mutate_empty(value)
                 if value and value.get('observation_pending'):
                     until = min(deadline, boot_clock()+1)
                     while driver.valid and boot_clock() < until:
@@ -97,7 +112,7 @@ class LaunchBindingTests(unittest.TestCase):
                         time.sleep(.001)  # Fixture-only finished-seal availability.
                 if final and mutate_final is not None: value = mutate_final(value)
                 receipts.append(copy.deepcopy(value))
-                if not final:
+                if not final and not empty:
                     if replace_inode:
                         path = root/'not-the-uuid.jsonl'
                         data = path.read_bytes()
@@ -133,7 +148,7 @@ class LaunchBindingTests(unittest.TestCase):
             elapsed = boot_clock()-started
         finally:
             release.set()
-            exit_gate.touch(); driver.close()
+            birth_gate.touch(); exit_gate.touch(); driver.close()
             if driver.binder is not None and driver.binder.ident is not None: driver.binder.join(2)
             if driver.agent is not None:
                 driver.agent.launcher.join(2)
@@ -151,6 +166,50 @@ class LaunchBindingTests(unittest.TestCase):
             print(json.dumps({'fixture': 'launch_binder_storage_stall', 'elapsed_seconds': round(elapsed, 3),
                               'evidence': driver.result, 'producer_quiesced': result['producer_quiesced']}))
         return driver, receipts
+
+    def test_current_empty_passes_before_birth_preserve_first_upload_coverage(self):
+        driver, receipts = self.joined(empty_passes=2)
+        self.assertIsNotNone(driver.result)
+        self.assertEqual(driver.birth['session'], fixture.SID)
+        self.assertEqual(sum(m == 'PUT' and p.endswith('/content') for m, p in self.peer.calls), 1)
+        self.assertEqual(sum(m == 'PUT' and p.endswith('/view') for m, p in self.peer.calls), 1)
+        self.assertTrue(all(not r['ok'] and r['manifest'] == [] for r in receipts[:2]))
+
+    def test_crashed_prebirth_worker_cannot_be_healed_by_later_birth(self):
+        driver, receipts = self.joined(empty_passes=1, empty_worker_loss=True)
+        self.assertIsNone(receipts[0])
+        self.assertTrue(driver.poisoned)
+        self.assertIsNone(driver.birth); self.assertIsNone(driver.result)
+
+    def test_lost_prebirth_notice_cannot_be_healed_by_matching_receipt(self):
+        driver, receipts = self.joined(empty_passes=1, empty_notice_loss=True)
+        self.assertIn('native_no_source', receipts[0])
+        self.assertTrue(driver.poisoned)
+        self.assertIsNone(driver.birth); self.assertIsNone(driver.result)
+
+    def test_uncertain_or_wrong_prebirth_receipts_cannot_preserve_eligibility(self):
+        def missing(value):
+            value.pop('native_no_source'); return value
+        def wrong_seal(value):
+            value['native_no_source']['seal'] = str(uuid.uuid4()); return value
+        def wrong_run(value):
+            value['native_no_source']['run'] = str(uuid.uuid4()); return value
+        def missed_put(value):
+            value['native_no_source']['session_puts'] = 1; return value
+        def wrong_worker(value):
+            value['sequence'] = str(uuid.uuid4()); return value
+        def invalid_status(value):
+            value['pending'] = True; return value
+        for mutate in (lambda _: None, missing, wrong_seal, wrong_run, missed_put, wrong_worker, invalid_status):
+            with self.subTest(mutation=mutate.__name__):
+                # Each scenario owns a separate registry/state/producer run.
+                case = type(self)(self._testMethodName)
+                case.setUp()
+                try:
+                    driver, _ = case.joined(empty_passes=1, mutate_empty=mutate)
+                    self.assertTrue(driver.poisoned)
+                    self.assertIsNone(driver.birth); self.assertIsNone(driver.result)
+                finally: case.doCleanups()
 
     def test_actual_parent_provider_and_first_put_bind_without_preselected_uuid(self):
         driver, receipts = self.joined()

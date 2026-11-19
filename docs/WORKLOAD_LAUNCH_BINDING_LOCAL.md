@@ -83,6 +83,15 @@ proceeds. Cold or slow binding can therefore make a legitimate run unqualified.
 There is no wait, replay, reupload, deadline renewal, prefix adoption or retry to
 make evidence qualify. Earlier failed coverage cannot be healed by a later pass.
 
+Before any birth, a worker can find the intentionally empty source. Only that
+actual return before any Collector/registry call emits a zero-session-PUT notice
+and a matching private receipt bound to the current run/worker/seal/launch and
+owner/source/scope. Both must be received and checked before a new assignment.
+This keeps pre-birth eligibility, not upload evidence; its result stays `None`.
+Missing notices/receipts, worker failure, deadline expiry, nonzero PUTs, identity
+mismatch and any post-birth coverage gap still permanently invalidate evidence.
+The parent never waits for this notice or starts an extra pass to obtain it.
+
 Final worker receipts retain the parent-approved birth and kernel fact privately.
 The reader matches them against parent memory, then uses merged67's original
 product status, persisted ACK/plan/proof/EOF and same-deadline checks before
