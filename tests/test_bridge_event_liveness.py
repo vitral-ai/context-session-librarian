@@ -4,6 +4,7 @@ import sqlite3
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import test_bridge as bridge_fixture
@@ -28,20 +29,75 @@ class WaitLivenessTests(unittest.TestCase):
             db.executemany('INSERT INTO inbound(id,peer,body,delivery)VALUES(?,?,?,?)',
                 [(e['id'], 'peer', encode(e), delivery) for e in events])
 
-    def wait(self, timeout=.5):
+    def wait(self, timeout=.5, *, step_cost=.005):
         connector = Connector(self.fixture.home); self.addCleanup(connector.close)
         self.assertTrue(connector.client_only)
-        start = time.monotonic()
-        result = connector.local({'local_op': 'wait', 'agent': 'recipient', 'after': 0, 'timeout': timeout})
-        self.assertLess(time.monotonic() - start, timeout + .3)
+        # Exercise real SQLite/catalog/seed/refusal work, not a host throughput
+        # target. One known batch has a modeled monotonic cost; condition waits
+        # consume their actual requested duration without sleeping the CI worker.
+        clock = SimpleNamespace(now=100., waits=[], calls=0)
+        observe = connector.events.observe
+        def bounded_observe(*args):
+            clock.calls += 1
+            try:
+                return observe(*args)
+            finally:
+                clock.now += step_cost
+        def scheduled_wait(duration):
+            self.assertGreater(duration, 0)
+            clock.waits.append(duration)
+            clock.now += duration
+        with patch('csl_bridge_engine.time', SimpleNamespace(monotonic=lambda: clock.now)), \
+                patch.object(connector.changed, 'wait', side_effect=scheduled_wait), \
+                patch.object(connector.events, 'observe', side_effect=bounded_observe):
+            result = connector.local({'local_op': 'wait', 'agent': 'recipient', 'after': 0, 'timeout': timeout})
+        # The original deadline is never renewed; one already-started bounded
+        # observation can finish at the boundary before the loop checks it.
+        self.assertLessEqual(clock.now - 100., timeout + step_cost + 1e-9)
         self.assertEqual(self.fixture.native.effects, [])
+        connector.test_wait_clock = clock
         return result, connector
+
+    def test_original_deadline_retains_partial_catalog_and_next_wait_converges(self):
+        event = self.fixture.event(kind='progress', known_thread=True)
+        self.insert([dict(event, id=delivery_fixture.uid()) for _ in range(300)])
+        # A slow batch consumes the entire original window. Returning no event
+        # is correct; do not demand 300 rows of throughput inside .5 wall seconds.
+        result, connector = self.wait(step_cost=.5)
+        self.assertEqual(result['events'], [])
+        self.assertEqual(connector.test_wait_clock.calls, 1)
+        self.assertEqual(connector.test_wait_clock.waits, [])
+        self.assertEqual(self.store.rows('SELECT watermark FROM event_catalog_meta'), [{'watermark': 128}])
+        self.assertEqual(self.store.rows("SELECT count(*) AS n FROM inbound WHERE delivery='pending'"), [{'n': 300}])
+        connector.close()
+        result, _ = self.wait()
+        self.assertEqual(len(result['events']), 1)
+        self.assertEqual(self.store.rows('SELECT watermark FROM event_catalog_meta'), [{'watermark': 300}])
+
+    def test_real_clock_local_work_stops_at_original_deadline(self):
+        from csl_bridge_event_delivery import EventLocalWork
+        connector = Connector(self.fixture.home); self.addCleanup(connector.close)
+        timeout = .5
+        # Isolate the scheduler's real wait/deadline from variable SQLite cost.
+        # Existing .8-second ceiling stays unchanged; there is no threshold bump.
+        with patch.object(connector.events, 'observe', side_effect=EventLocalWork('Synthetic local batch')) as observe:
+            start = time.monotonic()
+            result = connector.local({'local_op': 'wait', 'agent': 'recipient', 'after': 0, 'timeout': timeout})
+            elapsed = time.monotonic() - start
+        self.assertEqual(result['events'], [])
+        self.assertGreaterEqual(elapsed, timeout)
+        self.assertLess(elapsed, timeout + .3)
+        self.assertGreater(observe.call_count, 1)
+        self.assertLessEqual(observe.call_count, 60)
+        self.assertEqual(self.fixture.native.effects, [])
 
     def test_catalog_300_progress_rows_in_first_client_only_wait(self):
         event = self.fixture.event(kind='progress', known_thread=True)
         self.insert([dict(event, id=delivery_fixture.uid()) for _ in range(300)])
-        result, _ = self.wait()
+        result, connector = self.wait()
         self.assertEqual(len(result['events']), 1)
+        self.assertEqual(connector.test_wait_clock.calls, 3)
+        self.assertEqual(connector.test_wait_clock.waits, [.01, .01])
         self.assertEqual(self.store.rows('SELECT watermark FROM event_catalog_meta')[0]['watermark'], 300)
 
     def test_130_alias_seed_in_first_client_only_wait(self):
