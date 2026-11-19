@@ -156,9 +156,14 @@ class Journal:
         """Scan IDs before the window; load only eligible payloads (at most 256)."""
         deadlines = deadlines or {}
         now, selected = time.monotonic(), []
+        # Retained watch traffic must not delay an ordinary message handoff.
+        priority = ("CASE WHEN json_extract(payload,'$.type')='event' OR "
+                    "json_extract(payload,'$.request.op') IN ('followup','send_message') OR "
+                    "(json_extract(payload,'$.request.op')='mail' AND "
+                    "json_extract(payload,'$.request.action')='send') THEN 0 ELSE 1 END")
         with self.db() as db:
             cursor = db.execute("SELECT id FROM rpc WHERE direction='out' AND peer=? "
-                                "AND state!='done' ORDER BY created",(peer,))
+                                "AND state!='done' ORDER BY " + priority + ",created,id",(peer,))
             for row in cursor:
                 if deadlines.get(row['id'],0) <= now:
                     selected.append(row['id'])
@@ -169,7 +174,7 @@ class Journal:
             marks = ','.join('?' for _ in selected)
             return [dict(row) for row in db.execute(
                 "SELECT * FROM rpc WHERE direction='out' AND peer=? AND state!='done' "
-                "AND id IN (" + marks + ") ORDER BY created",[peer,*selected])]
+                "AND id IN (" + marks + ") ORDER BY " + priority + ",created,id",[peer,*selected])]
 
     def prune(self, days=30):
         """Compact old payloads; permanent small tombstones still refuse ID reuse."""
