@@ -1,0 +1,23 @@
+# The named context MUST be the reviewed local OCI layout at inputs.json's
+# immutable amd64 manifest. It is not a registry-published image name.
+FROM reviewed_collector AS install
+USER 0:0
+COPY packaging/codex-sole-producer/install.py packaging/codex-sole-producer/inputs.json /build/
+COPY --from=native_inputs codex-x86_64-unknown-linux-musl.tar.gz codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz codex-exec-server-x86_64-unknown-linux-musl.tar.gz bwrap-x86_64-unknown-linux-musl.tar.gz ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz CODEX-LICENSE CODEX-NOTICE BUBBLEWRAP-LICENSE /inputs/
+RUN --network=none python3 -B -I /build/install.py /inputs /out
+
+FROM reviewed_collector
+USER 0:0
+COPY --from=install /out /opt/vitral/codex
+COPY packaging/codex-sole-producer/prepare.py /opt/vitral/codex/prepare.py
+COPY packaging/codex-sole-producer/csl-codex-prepare /usr/local/bin/csl-codex-prepare
+RUN chmod 0444 /opt/vitral/codex/prepare.py \
+    && chmod 0555 /usr/local/bin/csl-codex-prepare \
+    && install -d -m 0700 -o 10001 -g 10001 /agent-private /agent-private/.codex \
+    && install -d -m 0750 -o 10001 -g 10001 /agent-private/.codex/sessions
+ENV HOME=/agent-private CODEX_HOME=/agent-private/.codex
+USER 10001:10001
+RUN --network=none python3 -B -I -c 'import subprocess; v=subprocess.check_output(["/opt/vitral/codex/bin/codex","--version"],text=True,timeout=5).strip(); assert v=="codex-cli 0.169.0"; print(v)'
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/csl-codex-prepare"]
+CMD []

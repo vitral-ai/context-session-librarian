@@ -1,0 +1,11 @@
+**
+!packaging
+packaging/**
+!packaging/codex-sole-producer
+packaging/codex-sole-producer/**
+!packaging/codex-sole-producer/Containerfile
+!packaging/codex-sole-producer/Containerfile.dockerignore
+!packaging/codex-sole-producer/inputs.json
+!packaging/codex-sole-producer/install.py
+!packaging/codex-sole-producer/prepare.py
+!packaging/codex-sole-producer/csl-codex-prepare
