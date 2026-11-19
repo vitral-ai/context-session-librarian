@@ -27,6 +27,6 @@
   "licenses": [
     {"name":"CODEX-LICENSE","sha256":"d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc","url":"https://raw.githubusercontent.com/openai/codex/d32063f96c2dff1dc96af839b3952abb6acfeda4/LICENSE","target":"licenses/codex/LICENSE"},
     {"name":"CODEX-NOTICE","sha256":"9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915","url":"https://raw.githubusercontent.com/openai/codex/d32063f96c2dff1dc96af839b3952abb6acfeda4/NOTICE","target":"licenses/codex/NOTICE"},
-    {"name":"BUBBLEWRAP-LICENSE","sha256":"b7993225104d90ddd8024fd838faf300bea5e83d91203eab98e29512acebd69c","url":"https://raw.githubusercontent.com/openai/codex/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/vendor/bubblewrap/LICENSE","target":"licenses/bubblewrap/LICENSE"}
+    {"name":"BUBBLEWRAP-LICENSE","sha256":"b7993225104d90ddd8024fd838faf300bea5e83d91203eab98e29512acebd69c","url":"https://raw.githubusercontent.com/openai/codex/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/vendor/bubblewrap/COPYING","target":"licenses/bubblewrap/LICENSE"}
   ]
 }

@@ -72,6 +72,8 @@ def unpack(stream, row, output, total):
                     raise ValueError('member refused')
                 if not 0 <= member.size <= TAR_LIMIT or member.isdir() and member.size:
                     raise ValueError('member bound refused')
+                if not 0 <= member.offset_data <= length-member.size:
+                    raise ValueError('payload range refused')
                 total += member.size
                 if total > OUTPUT_LIMIT: raise ValueError('output bound refused')
                 members[name] = member
@@ -81,13 +83,22 @@ def unpack(stream, row, output, total):
                 destination = output/target
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 executable = not target.startswith('licenses/')
-                with archive.extractfile(members[name]) as source, destination.open('xb') as sink:
+                # Metadata is fully validated. Payload buffering must not pass
+                # through MetadataReader (ExFileObject sizes vary by Python).
+                member = members[name]
+                plain.seek(member.offset_data)
+                remaining = member.size
+                with destination.open('xb') as sink:
                     if executable:
-                        header = source.read(20)
+                        if remaining < 20: raise ValueError('ELF size refused')
+                        header = plain.read(20)
                         if (header[:6] != b'\x7fELF\x02\x01' or header[18:20] != b'\x3e\x00'):
                             raise ValueError('ELF target refused')
-                        sink.write(header)
-                    while data := source.read(CHUNK): sink.write(data)
+                        sink.write(header); remaining -= len(header)
+                    while remaining:
+                        data = plain.read(min(CHUNK, remaining))
+                        if not data: raise ValueError('payload truncated')
+                        sink.write(data); remaining -= len(data)
                 destination.chmod(0o555 if executable else 0o444)
     return total
 

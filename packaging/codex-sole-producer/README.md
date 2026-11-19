@@ -25,6 +25,11 @@ was downloaded or executed on the author guest. Sources:
   Corresponding sources remain pinned above; no redistribution-compliance or
   support claim for optional voice/app-server features is made here.
 
+The pinned bubblewrap `LICENSE` Git entry is a symlink containing `COPYING`.
+Its raw URL returns those seven link bytes, even though GitHub's Contents API
+may dereference it. Download the regular `COPYING` path at the SAME commit;
+the expected 25383-byte license SHA remains unchanged. No fallback/repin.
+
 Before sending the named public-input context to BuildKit:
 
 ```sh
@@ -39,6 +44,14 @@ metadata reads at 64 KiB and inventory at 32 members. Reject unlisted/duplicate/
 missing members, traversal, links, devices, FIFOs, sparse/PAX records and non-
 amd64 ELF payloads. Manually copy only closed selected files; no `extractall`.
 Assembly uses a private staging tree and does not replace an existing output.
+After the full closed inventory is validated, copy each regular payload by
+its parsed offset/size from the bounded decompressed spool, in <=64 KiB chunks
+with range/EOF checks. Payload buffering never uses the capped metadata reader.
+Root's actual target-Python 3.12 manual assembly passed before this separation;
+host Python 3.14's `ExFileObject` readinto requested 128 KiB of ordinary payload
+through that reader. This separation retains the 64 KiB metadata cap and
+oversized-PAX refusal; it does not claim blanket Python 3.14 runtime/image/native
+qualification.
 License text is verified and retained verbatim; unused reviewed rg docs are
 validated but not installed. `native-manifest.json` records assembled file hashes.
 

@@ -80,6 +80,41 @@ class InputsTests(unittest.TestCase):
         unpack.assert_not_called(); self.assertFalse(self.output.exists())
         self.assertEqual(sorted(path.name for path in self.root.iterdir()), ['inputs'])
 
+    def test_bubblewrap_url_uses_regular_target_and_symlink_bytes_refuse(self):
+        lock = json.loads((OVERLAY/'inputs.json').read_bytes())
+        row = next(row for row in lock['licenses'] if row['name'] == 'BUBBLEWRAP-LICENSE')
+        self.assertEqual(row['url'], 'https://raw.githubusercontent.com/openai/codex/'
+            'd32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/vendor/bubblewrap/COPYING')
+        self.assertEqual(row['sha256'], 'b7993225104d90ddd8024fd838faf300bea5e83d91203eab98e29512acebd69c')
+        self.assertEqual(hashlib.sha256(b'COPYING').hexdigest(),
+                         '400d38e5cfee181230373a8b02d38f50271a5bf62c62410382efddb8e8b19e22')
+        spec = self.archive(); (self.inputs/'LICENSE').unlink()
+        (self.inputs/row['name']).write_bytes(b'COPYING'); spec['licenses'] = [row]
+        with patch.object(self.install, 'unpack') as unpack, self.assertRaises(ValueError):
+            self.install.install(self.inputs, self.output, spec)
+        unpack.assert_not_called(); self.assertFalse(self.output.exists())
+        self.assertEqual((self.inputs/row['name']).read_bytes(), b'COPYING')
+
+    def test_large_regular_payload_does_not_pass_through_metadata_reader(self):
+        payload = elf()+b'public synthetic payload\n'*50001
+        self.assertGreater(len(payload), 131072)
+        spec = self.archive([('codex', payload, tarfile.REGTYPE)])
+        original, requested = self.install.MetadataReader.read, []
+        def metadata_only(reader, size):
+            requested.append(size)
+            # This short-name USTAR fixture has only 512-byte metadata blocks.
+            # Payload buffering, including 3.14's larger readinto, must not use it.
+            if size > 512: raise AssertionError('payload used metadata reader')
+            return original(reader, size)
+        with patch.object(self.install.MetadataReader, 'read', metadata_only):
+            self.install.install(self.inputs, self.output, spec)
+        self.assertTrue(requested); self.assertLessEqual(max(requested), 512)
+        self.assertEqual((self.output/'bin/codex').read_bytes(), payload)
+        manifest = json.loads((self.output/'native-manifest.json').read_bytes())
+        self.assertEqual(manifest['sha256']['bin/codex'], hashlib.sha256(payload).hexdigest())
+        self.assertEqual(self.install.CHUNK, 65536)
+        with self.assertRaises(ValueError): self.install.MetadataReader(io.BytesIO()).read(131072)
+
     def test_wrong_size_and_extra_inputs_fail_without_replacing_anything(self):
         spec = self.archive(); original = (self.inputs/'native.tar.gz').read_bytes()
         spec['archives'][0]['size'] += 1
