@@ -49,7 +49,7 @@ def arguments(argv):
 def readonly(path): return bool(os.statvfs(path).f_flag & os.ST_RDONLY)
 
 
-def validate(env):
+def validate(env, *, prepared=None):
     from csl_workload_config import Configuration
     config = Configuration.from_environment(env)
     if (env.get('HOME') != str(HOME) or env.get('CODEX_HOME') != str(NATIVE)
@@ -70,10 +70,25 @@ def validate(env):
             or identity(STATE) in {identity(TRANSCRIPTS), identity(HOME), identity(NATIVE)}
             or readonly(STATE) or not readonly(TRANSCRIPTS) or readonly(native)):
         raise Refused('mount aliases')
-    with os.scandir(TRANSCRIPTS) as entries:
-        if next(entries, None) is not None: raise Refused('source not fresh')
-    if (identity(native), identity(TRANSCRIPTS)) != (native_id, transcript_id):
-        raise Refused('mount changed')
+    directory = None
+    try:
+        if prepared is not None:
+            from csl_workload_launch_binding import PreparedLaunch
+            if not isinstance(prepared, PreparedLaunch): raise Refused('root lease')
+            try:
+                directory = os.open(TRANSCRIPTS, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                info = os.fstat(directory)
+                if (info.st_dev, info.st_ino) != transcript_id: prepared.failed = True
+            except OSError: prepared.failed = True
+            if prepared.failed and directory is not None:
+                os.close(directory); directory = None
+        with os.scandir(TRANSCRIPTS if directory is None else directory) as entries:
+            if next(entries, None) is not None: raise Refused('source not fresh')
+        if (identity(native), identity(TRANSCRIPTS)) != (native_id, transcript_id):
+            raise Refused('mount changed')
+        if prepared is not None and not prepared.failed: prepared.capture(directory, (native_id, transcript_id))
+    finally:
+        if directory is not None: os.close(directory)
     return native_id, transcript_id
 
 
@@ -89,13 +104,29 @@ def stop_pending():
     return signal.SIGTERM if signal.SIGTERM in pending else signal.SIGINT if signal.SIGINT in pending else None
 
 
-def prepare(argv, env, *, now=clock, validator=validate, run=None, wait=signal.sigtimedwait):
+def prepare(argv, env, *, now=clock, validator=validate, run=None, wait=signal.sigtimedwait, launch=None):
+    if launch is not None:
+        from csl_workload_launch_binding import LaunchAcceptanceDriver
+        if not isinstance(launch, LaunchAcceptanceDriver): raise Refused('launch binding')
+    try:
+        return _prepare(argv, env, now=now, validator=validator, run=run, wait=wait, launch=launch)
+    finally:
+        if launch is not None: launch.close()
+
+
+def _prepare(argv, env, *, now, validator, run, wait, launch):
     # The process owns this signal mask until exit. Tests use isolated children.
     signal.pthread_sigmask(signal.SIG_BLOCK, SIGNALS)
     started = now()
     seconds, values = arguments(argv)
     deadline = started+seconds
-    prepared_views = validator(env)
+    if launch is not None:
+        from csl_workload_launch_binding import LaunchAcceptanceDriver
+        if not isinstance(launch, LaunchAcceptanceDriver) or validator is not validate or run is not None:
+            raise Refused('launch binding')
+    def validate_views():
+        return validator(env) if launch is None else validator(env, prepared=launch.prepared)
+    prepared_views = validate_views()
     check_deadline(deadline, now)
     while True:
         check_deadline(deadline, now)
@@ -105,7 +136,7 @@ def prepare(argv, env, *, now=clock, validator=validate, run=None, wait=signal.s
         if notification is None: continue
         if notification.si_signo in STOPS: raise Cancelled(notification.si_signo)
         if notification.si_signo != signal.SIGUSR1: raise Refused('signal')
-        if validator(env) != prepared_views: raise Refused('mount changed')
+        if validate_views() != prepared_views: raise Refused('mount changed')
         check_deadline(deadline, now)
         stop = stop_pending()
         if stop: raise Cancelled(stop)
@@ -113,13 +144,19 @@ def prepare(argv, env, *, now=clock, validator=validate, run=None, wait=signal.s
         for signum in STOPS: signal.signal(signum, cancel)
         signal.pthread_sigmask(signal.SIG_UNBLOCK, SIGNALS)
         check_deadline(deadline, now)
-        if run is None:
+        if run is None and launch is None:
             from csl_workload_runner import main as run
         # No interpreter exec gap: cancel remains installed until Runner installs
         # its own handlers. The exec-only child checks this same deadline later.
         check_deadline(deadline, now)
-        return run(['--', PYTHON, '-E', '-s', '-S', SCRIPT, '--native-exec',
-                    repr(deadline), encode_views(prepared_views), '--', *values])
+        command = [PYTHON, '-E', '-s', '-S', SCRIPT, '--native-exec',
+                   repr(deadline), encode_views(prepared_views), '--', *values]
+        if launch is not None:
+            from csl_workload_config import Configuration
+            from csl_workload_runner import Runner
+            launch.prepared.handoff(prepared_views, command)
+            return Runner(Configuration.from_environment(env), observation_driver=launch).run(command)
+        return run(['--', *command])
 
 
 def native_exec(argv, env, *, now=clock, validator=validate, execute=os.execve):

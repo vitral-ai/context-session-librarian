@@ -72,7 +72,7 @@ class StructureBudget:
             raise SyncError('workload_record_refused')
 
 
-def opened_source(root, relative):
+def opened_source(root, relative, *, capture=None):
     """Open beneath an explicit root using anchored, no-symlink directory FDs."""
     if not isinstance(relative, str):
         raise SyncError('workload_source_refused')
@@ -86,6 +86,7 @@ def opened_source(root, relative):
         if root.resolve() != root:
             raise SyncError('workload_source_refused')
         directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        if capture is not None: capture.root(directory)
         for part in parts.parts[:-1]:
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
             os.close(directory)
@@ -102,12 +103,12 @@ def opened_source(root, relative):
             os.close(directory)
 
 
-def read_complete(root, relative, bounds):
+def read_complete(root, relative, bounds, *, capture=None):
     records, digest, length, lines = [], hashlib.sha256(), 0, 0
     budget = StructureBudget(bounds)
     budget.check(records)
     try:
-        with opened_source(root, relative) as source:
+        with (opened_source(root, relative) if capture is None else opened_source(root, relative, capture=capture)) as source:
             initial = os.fstat(source.fileno())
             if initial.st_size > bounds.source_bytes:
                 raise SyncError('workload_source_limit')
@@ -153,9 +154,9 @@ def read_complete(root, relative, bounds):
         raise SyncError('workload_record_refused') from None
 
 
-def verify_prefix(root, relative, cursor):
+def verify_prefix(root, relative, cursor, *, capture=None):
     """Revalidate the captured prefix, allowing a producer to append meanwhile."""
-    with opened_source(root, relative) as source:
+    with (opened_source(root, relative) if capture is None else opened_source(root, relative, capture=capture)) as source:
         info = os.fstat(source.fileno())
         if (info.st_dev != cursor['device'] or info.st_ino != cursor['inode']
                 or info.st_size < cursor['complete_length']):

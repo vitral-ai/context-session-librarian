@@ -135,3 +135,7 @@ native-binding mechanism is implemented here; it must not guess/adopt a session
 from an observer receipt, another run, edited native rows or home scanning.
 Thus this source does NOT close fresh-native packaged A8. It adds no model turn,
 native probe, credential copy, identity reset or actual image/Pod/cloud operation.
+
+The separately developed private `LaunchAcceptanceDriver` source integration is
+documented in [fresh Codex binding](WORKLOAD_LAUNCH_BINDING_LOCAL.md). It does not
+retroactively qualify this preselected driver, an existing image or a live run.
