@@ -28,6 +28,7 @@ from csl_workload_identity import WorkloadKey, canonical, metadata
 from csl_workload_stream import Bounds, opened_source, verify_prefix
 from csl_workload_state import child, read_record
 from csl_workload_producer import Producer, recover as recover_producer
+from csl_workload_observation import Observation, receipt_valid
 
 POLL_SECONDS = 0.1
 PASS_SECONDS = 60
@@ -65,6 +66,7 @@ def environment(config):
     result = {PREFIX+key: value for key, value in values.items()}
     result.update({'VITRAL_LOCATION_'+key.upper(): value for key, value in config.location.items()})
     if config.ca_file is not None: result[PREFIX+'TRUST_CA'] = config.ca_file
+    if config.observe_session is not None: result[PREFIX+'OBSERVE_SESSION'] = config.observe_session
     return result
 
 
@@ -120,6 +122,7 @@ class DeadlineHTTP(WorkloadHTTP):
             raise SyncError('workload_flush_deadline')
         super().__init__(origin, **options)
         self.deadline = deadline
+        self.observation = None
         context = next(handler._context for handler in self.opener.handlers
                        if isinstance(handler, urllib.request.HTTPSHandler))
         def check():
@@ -157,6 +160,11 @@ class DeadlineHTTP(WorkloadHTTP):
             # Covers response bodies and HTTP-error reads as well as headers.
             if boot_clock() >= self.deadline: raise SyncError('workload_flush_deadline')
 
+    def request_created(self, request):
+        if (self.observation is not None and request.get_method() == 'PUT'
+                and request.full_url.startswith(self.origin.registry + '/sessions/')):
+            self.observation.event('request', request.full_url, 'PUT', request.data)
+
 
 class ProofRegistry(Registry):
     """Fresh final proof of the exact existing plan, never a new generation."""
@@ -165,10 +173,26 @@ class ProofRegistry(Registry):
         self.plans = {}
 
     def call(self, method, path, **kwargs):
-        result = super().call(method, path, **kwargs)
+        observation = getattr(self.http, 'observation', None)
+        if observation is not None:
+            observation.event('begin', method, path, kwargs.get('body'), kwargs.get('binary'), kwargs.get('key'))
+        try: result = super().call(method, path, **kwargs)
+        except Exception:
+            if observation is not None: observation.event('end', method, path, False)
+            raise
+        if observation is not None: observation.event('end', method, path, True)
         if method == 'PUT' and path.startswith('/sessions/') and len(path.split('/')) == 4:
             self.plans[path] = json.loads(json.dumps(kwargs['body']))
         return result
+
+    def upload_planned(self, *args):
+        if getattr(self.http, 'observation', None) is not None: self.http.observation.event('upload_planned', *args)
+
+    def content_acknowledged(self, *args):
+        if getattr(self.http, 'observation', None) is not None: self.http.observation.event('content_acked', *args)
+
+    def view_acknowledged(self, *args):
+        if getattr(self.http, 'observation', None) is not None: self.http.observation.event('view_acked', *args)
 
     def prove(self, state, provider):
         if not self.plans: raise SyncError('workload_final_proof_refused')
@@ -213,6 +237,8 @@ class ProofRegistry(Registry):
                     or view['last_seq'] != plan['view']['last_seq'] or not isinstance(result.get('sync'), dict)
                     or result['sync'].get('complete') is not True):
                 raise SyncError('workload_final_proof_refused')
+            if getattr(self.http, 'observation', None) is not None:
+                self.http.observation.event('proven', path, plan)
 
 
 def source_manifest(config, adapter):
@@ -254,6 +280,8 @@ def run_pass(config, deadline):
         if previous is None and ((sync/'state.sqlite').exists() or (runtime/'sources.json').exists() or populated_projection):
             raise SyncError('workload_runtime_binding_changed')
         private_json(runtime/'binding.json', binding)
+        if config.observe_session is not None:
+            http.observation = Observation(config.origin, config.provider, config.observe_session)
         selected = sources(config.transcript_root)
         known = read_record(runtime/'sources.json') or {'paths': []}
         if not isinstance(known.get('paths'), list) or not set(known['paths']) <= set(selected):
@@ -278,7 +306,9 @@ def run_pass(config, deadline):
             if result['pending']: return {'ok': False, 'synced': result['synced'], 'pending': result['pending'], 'manifest': []}
             registry.prove(state, config.provider)
             manifest = source_manifest(config, adapter)
-            return {'ok': True, 'synced': result['synced'], 'pending': 0, 'manifest': manifest}
+            result = {'ok': True, 'synced': result['synced'], 'pending': 0, 'manifest': manifest}
+            if http.observation is not None: result['observation'] = http.observation.receipt()
+            return result
         finally:
             state.close()
 
@@ -313,6 +343,9 @@ class PassProcess:
                 or not isinstance(value.get('manifest'), list) or len(value['manifest']) > 32
                 or value['ok'] and (not value['manifest'] or value['synced'] != len(value['manifest']) or value['pending'] != 0)):
             return None
+        if self.config.observe_session is not None:
+            observed = value.get('observation')
+            value['observation'] = observed if value['ok'] and receipt_valid(observed) else None
         return value
 
     def remove_receipt(self):
@@ -463,6 +496,9 @@ def worker_main(receipt, parent, deadline):
     try: result = run_pass(config, deadline)
     except Exception: result = {'ok': False, 'synced': 0, 'pending': 1, 'manifest': []}
     if boot_clock() >= deadline: result.update(ok=False, pending=1)
+    if config.observe_session is not None:
+        observed = result.get('observation')
+        result['observation'] = observed if result['ok'] and receipt_valid(observed) else None
     private_json(receipt, {'sequence': receipt.stem, 'scope': scope(config), **result})
 
 
