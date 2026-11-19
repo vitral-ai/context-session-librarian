@@ -1,9 +1,44 @@
 name: Workload image source
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
 permissions:
   contents: read
+# Superseded PR revisions must not consume a second complete validation run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  collector-image:
+  changes:
+    name: Select applicable source contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      relevant: ${{ github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true' }}
+    steps:
+      - name: Read changed paths without executing candidate code
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d
+        with:
+          filters: |
+            relevant:
+              - "csl*.py"
+              - "packaging/**"
+              - "LICENSE"
+              - "scripts/check_workload_build_context.py"
+              - "tests/test_workload_image.py"
+              - ".github/workflows/workload-image.yml"
+
+  collector-image-execution:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    name: collector-image execution
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -61,3 +96,21 @@ jobs:
           assert r["complete"] is False and r["pending"] is True
           assert r["producer_quiesced"] is True and r["writer_exit"] == 0
           assert r["worker_reaped"] is True and r["synced"] == 0'
+
+  collector-image:
+    name: collector-image
+    if: always()
+    needs: [changes, collector-image-execution]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require successful selection and all applicable execution
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          printf '%s\n' "$NEEDS" | jq -e '
+            .changes.result == "success" and
+            ((.changes.outputs.relevant == "true" and .["collector-image-execution"].result == "success") or
+             (.changes.outputs.relevant == "false" and .["collector-image-execution"].result == "skipped"))
+          ' > /dev/null
