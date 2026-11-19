@@ -86,6 +86,37 @@ class WorkloadImageTests(unittest.TestCase):
             index = ignores.index('!'+directory)
             self.assertEqual(ignores[index+1], directory+'/**')
 
+    def test_assembled_image_codec_smoke_covers_merged_native_metadata_without_network(self):
+        with tempfile.TemporaryDirectory(prefix='image-codec-') as temporary:
+            output = Path(temporary)/'runtime'
+            module('assemble').assemble(ROOT, output)
+            code = ('import runpy,sys; sys.path.insert(0,sys.argv[1]); '
+                    'm=runpy.run_path(sys.argv[2]); assert m["check_codec"]()')
+            env = {'PATH': os.defpath, 'PYTHONDONTWRITEBYTECODE': '1'}
+            args = [sys.executable, '-B', '-E', '-s', '-S', '-c', code, str(output),
+                    str(IMAGE/'check-runtime.py')]
+            # A stale packaged codec must fail even when imports/profiles still match.
+            for name in (None, 'TOOL_DECLARATIONS_NOTICE', 'WORLD_STATE_NOTICE',
+                         'TOKEN_USAGE_NOTICE', 'THREAD_SETTINGS_NOTICE'):
+                target = output/'csl_text_workload.py'
+                original = target.read_bytes()
+                if name:
+                    text = original.decode()
+                    self.assertEqual(len(re.findall(r'^'+name+r' = ', text, re.M)), 1)
+                    text = re.sub(r'^'+name+r' = .*$', name+" = 'STALE_CODEC_NOTICE'", text, flags=re.M)
+                    target.chmod(0o600); target.write_text(text)
+                try:
+                    result = subprocess.run(args, cwd=temporary, env=env, capture_output=True, timeout=10)
+                    with self.subTest(stale=name):
+                        self.assertEqual(result.returncode == 0, name is None, result.stderr.decode())
+                        self.assertEqual(result.stdout, b'')
+                finally:
+                    target.chmod(0o600); target.write_bytes(original); target.chmod(0o444)
+        tree = ast.parse((IMAGE/'check-runtime.py').read_bytes())
+        check = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'check')
+        self.assertTrue(any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                            and node.func.id == 'check_codec' for node in ast.walk(check)))
+
     @unittest.skipUnless(chart_fixture.HELM, 'Helm required for real rendered image configuration')
     def test_rendered_both_modes_and_profiles_reach_assembled_image_parser(self):
         with tempfile.TemporaryDirectory(prefix='image-rendered-abi-') as temporary:

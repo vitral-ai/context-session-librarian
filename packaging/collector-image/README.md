@@ -16,6 +16,117 @@ image digest, platform, Python/TLS and helper versions when it is built. Tags in
 the commands above are local only; packaging requires a reviewed image digest.
 No image push or deployment is performed by the workflow.
 
+## Exact-source Lane F handoff
+
+The recipe already copies the codec containing merged #57, #58 and #59; no
+runtime inventory, provider/profile, base or helper pin change is needed for
+these records. Its in-image smoke now projects a bounded synthetic paginated
+Codex stream with catalog, world state, usage and thread settings records. It
+requires all four fixed omission notices, sanitized coordinates and no metadata
+or canary leakage. It neither reads a transcript nor runs a harness. The existing
+build step and no-network image CI lane execute this smoke. A successful import
+alone, the unchanged profile name, or an earlier e00 image is not this evidence.
+
+The authorized build operator starts in the exact **reviewed clean commit** for
+this contribution (record the full SHA from the PR, not a moving branch). Keep
+`EVIDENCE` outside the checkout, empty and owner-private; do not put credentials,
+transcripts or collector STATE there. For a Linux/amd64 qualification:
+
+```sh
+SOURCE=$(git rev-parse --verify HEAD)
+test -z "$(git status --porcelain --untracked-files=all)"
+git merge-base --is-ancestor 79fcf62a55ce4740db36c61e33ff449b9ab822f1 "$SOURCE"
+TAG="csl-workload:lanef-$SOURCE"
+python3 -B -I packaging/collector-image/assemble.py "$PWD" "$EVIDENCE/expected-runtime"
+python3 -B -S scripts/check_workload_build_context.py
+docker build --platform linux/amd64 --progress plain \
+  --file packaging/collector-image/Containerfile --tag "$TAG" \
+  --label "org.opencontainers.image.revision=$SOURCE" \
+  --iidfile "$EVIDENCE/image-id" . >"$EVIDENCE/build.log" 2>&1
+IMAGE=$(cat "$EVIDENCE/image-id")
+docker image inspect "$IMAGE" >"$EVIDENCE/image-inspect.json"
+docker run --rm --network none --read-only --cap-drop ALL \
+  --security-opt no-new-privileges --memory 256m --cpus 1 --pids-limit 128 \
+  --tmpfs /tmp:rw,nosuid,nodev,size=64m --entrypoint /bin/cat "$IMAGE" \
+  /opt/vitral/collector/runtime-manifest.json >"$EVIDENCE/runtime-manifest.json"
+cmp "$EVIDENCE/expected-runtime/runtime-manifest.json" "$EVIDENCE/runtime-manifest.json"
+docker run --rm --network none --read-only --cap-drop ALL \
+  --security-opt no-new-privileges --memory 256m --cpus 1 --pids-limit 128 \
+  --tmpfs /tmp:rw,nosuid,nodev,size=64m --entrypoint /usr/local/bin/python3 "$IMAGE" \
+  -B -E -s -S /opt/vitral/collector/check-runtime.py >"$EVIDENCE/runtime-smoke.json"
+docker save --output "$EVIDENCE/collector-image.tar" "$TAG"
+sha256sum "$EVIDENCE/collector-image.tar" >"$EVIDENCE/archive.sha256"
+```
+
+Run these commands fail-fast (for example in a shell with `set -eu`). Do not
+continue after a failed context/build/manifest/smoke check or substitute a
+previous artifact. Record `SOURCE`, inspection `.Os`, `.Architecture`, `.Id`,
+`.RepoDigests`, revision label, source manifest and the smoke's Python, machine,
+helper and TLS versions. Compare entry-point and check-script bytes against the
+same source too: they are explicit recipe inputs outside the assembled source
+manifest. Export them using the same no-network `/bin/cat` container pattern
+from `/usr/local/bin/csl-workload-collector` and
+`/opt/vitral/collector/check-runtime.py`, and use `cmp` against this checkout.
+Record the helper binary's SHA-256 separately from its pinned source archive.
+
+The iidfile is a **local image/config identity**, not automatically a registry
+manifest digest. A saved archive's SHA-256 is only that archive's receipt.
+`.RepoDigests` may be empty. Never fill a digest-required Helm image value with
+either of those substitutes. The existing authorized kind operator can import
+the exact archive into the existing cluster, inspect its immutable manifest
+reference in that runtime and bind the fixture to it. No new cluster, daemon,
+privilege workaround or public registry push follows from these commands.
+Cloud tests likewise need an actually available reviewed manifest for the
+target architecture; missing distribution/descriptor evidence remains pending.
+Pinned inputs make the build procedure repeatable, not a promise of identical
+OCI digests across builders or architectures. Keep e00's receipts unchanged.
+
+## Real producer and marker procedure
+
+Env4 remains the sole enrollment/collector executor. Reuse its person-approved
+replica-private STATE and exact configured one-origin HTTPS route, with normal
+hostname/CA verification. Do not import keys, tokens or journals into a new
+volume, reset STATE, mount a harness home, or start a second collector. A fresh
+replica needs its own existing person-approval flow. Record the selected source,
+artifact, profile and private-volume binding separately from browser evidence.
+
+For an already authorized future real producer scenario, use a predeclared
+public run label and an exact expected marker list, such as
+`VITRAL_A8_LANEF_R1_0001`, `VITRAL_A8_LANEF_R1_0002`,
+`VITRAL_A8_LANEF_R1_FINAL`. The synthetic redaction canary is `sk-proj-` followed
+by 32 `Q` characters, never a real secret. The real agent writes native complete
+records normally; do not append/edit/filter its rollout or substitute a synthetic
+writer and call it real-agent evidence. This procedure commissions no new model
+turn: current parsing and collection reuse the already-created source.
+
+Observe each marker's complete-record, registry ACK and foreground visibility
+times independently; targets remain 3 seconds to ACK plus 2 seconds to UI.
+Check canary absence across sanitized content, metadata, view, package refusal,
+UI and retained logs, without dumping the corpus. Keep the expected marker
+inventory independent from observed rows. Real paths/IDs/text are not debug
+output. No screenshots of login, profiles or credentials.
+
+Final completion requires the **actual declared writer** under the existing
+literal-argv guardian, not an inert command launched against someone else's
+source. Witness that group stopped, then complete EOF, then fresh distinct
+content and view ACKs for that exact final capture within the original at-most
+20-second BOOTTIME drain; reserve at least 30 seconds termination grace and
+satisfy the chart's writer-stop + flush + overhead arithmetic. Repeated
+signals cannot renew the budget. Outage, partial EOF, missing/mismatched ACK or
+unknown writer outcome is pending/incomplete, with durable state preserved.
+
+The collector image deliberately contains no Codex executable or harness login.
+The chart's separate external writer is not owned by the collector guardian,
+and the current runner accepts no external stop-witness input. Thus this
+image's bare-watch lane can prove live collection and bounded final ACK drain,
+but **must remain `complete:false,pending:true`** even if an external writer
+appears idle or stopped. `-- python3 -c pass` cannot close that gap. A real
+sole-producer completion qualification needs an actual supported producer
+environment under the guardian or separately reviewed external-witness wiring;
+do not silently add credentials, install a harness or invent containment.
+Keep plain-process source, synthetic container, real kind and cloud receipts
+separate. None alone establishes integrated A8 acceptance.
+
 ## Inputs and entry point
 
 - Official `python:3.12.16-bookworm` build index:
