@@ -59,6 +59,7 @@ def clean_receipts(runtime):
 def scope(config):
     value = {'version': 1, 'origin': config.origin, 'provider': config.provider,
              'profile': config.profile, 'transcript_root': str(config.transcript_root), 'location': config.location}
+    if config.expect_session is not None: value['expect_session'] = config.expect_session
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
@@ -70,6 +71,7 @@ def environment(config):
     result.update({'VITRAL_LOCATION_'+key.upper(): value for key, value in config.location.items()})
     if config.ca_file is not None: result[PREFIX+'TRUST_CA'] = config.ca_file
     if config.observe_session is not None: result[PREFIX+'OBSERVE_SESSION'] = config.observe_session
+    if config.expect_session is not None: result[PREFIX+'EXPECT_SESSION'] = config.expect_session
     return result
 
 
@@ -109,6 +111,15 @@ def sources(root, *, files=32):
     except (OSError, UnicodeError):
         raise SyncError('workload_source_refused') from None
     return tuple(sorted(result))
+
+
+def bound_sources(config):
+    """Owner-pinned session: only <project>/<expected>.jsonl may exist before any upload."""
+    selected = sources(config.transcript_root)
+    if config.expect_session is not None and any(
+            len(path.split('/')) != 2 or path.split('/')[1] != config.expect_session+'.jsonl' for path in selected):
+        raise SyncError('workload_session_binding_refused')
+    return selected
 
 
 def bounds(config):
@@ -291,7 +302,7 @@ def run_pass(config, deadline, composition=None, expected_worker=None):
                 except Exception:
                     # Bad/lost instrumentation is never a product admission error.
                     http.observation = None
-        selected = sources(config.transcript_root)
+        selected = bound_sources(config)
         known = read_record(runtime/'sources.json') or {'paths': []}
         if not isinstance(known.get('paths'), list) or not set(known['paths']) <= set(selected):
             raise SyncError('workload_source_disappeared')
@@ -316,6 +327,7 @@ def run_pass(config, deadline, composition=None, expected_worker=None):
         projection = child(config.state_root, 'projection')
         adapter = (WorkloadGeminiProvider(inputs, projection, bounds=limits) if config.provider == 'gemini'
                    else WorkloadTextProvider(config.provider, inputs, projection, bounds=limits,
+                        expected_session=config.expect_session,
                         capture=http.observation if isinstance(http.observation, LaunchObservation) else None))
         state = State(sync)
         try:

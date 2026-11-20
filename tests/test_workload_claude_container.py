@@ -20,6 +20,9 @@ from csl_sync_state import SyncError
 
 ROOT = Path(__file__).resolve().parents[1]
 OVERLAY = ROOT/'packaging/claude-sole-producer'
+SID = '0b9f6b2a-1c3d-4e5f-8a7b-9c0d1e2f3a4b'
+E = {'VITRAL_COLLECTOR_EXPECT_SESSION': SID}
+PIN = ['--session-id', SID]
 
 
 def module(name):
@@ -122,12 +125,12 @@ class GateTests(unittest.TestCase):
         calls = []
         def execute(*args): calls.append(args); raise RuntimeError('fixture exec boundary')
         with self.assertRaisesRegex(RuntimeError, 'fixture exec boundary'):
-            self.gate.native_exec(['10.0', '1:2:1:2', '--', *values], {}, now=lambda: 1,
+            self.gate.native_exec(['10.0', '1:2:1:2', '--', *values, *PIN], E, now=lambda: 1,
                                  validator=lambda env: ((1, 2), (1, 2)), execute=execute)
-        self.assertEqual(calls, [(self.gate.CLAUDE, [self.gate.CLAUDE, *values], {})])
+        self.assertEqual(calls, [(self.gate.CLAUDE, [self.gate.CLAUDE, *values, *PIN], E)])
         for deadline in ('0', 'nan', 'inf', '-1', '2000'):
             with self.assertRaises((self.gate.Refused, ValueError)):
-                self.gate.native_exec([deadline, '1:2:1:2', '--', 'x'], {}, now=lambda: 1,
+                self.gate.native_exec([deadline, '1:2:1:2', '--', 'x', *PIN], E, now=lambda: 1,
                                      validator=lambda env: ((1, 2), (1, 2)), execute=execute)
         self.assertEqual(len(calls), 1)
         clock = [1]
@@ -135,13 +138,28 @@ class GateTests(unittest.TestCase):
             clock[0] = 11
             return ((1, 2), (1, 2))
         with self.assertRaises(self.gate.Refused):
-            self.gate.native_exec(['10.0', '1:2:1:2', '--', 'x'], {}, now=lambda: clock[0], validator=late, execute=execute)
+            self.gate.native_exec(['10.0', '1:2:1:2', '--', 'x', *PIN], E, now=lambda: clock[0], validator=late, execute=execute)
         self.assertEqual(len(calls), 1)
+
+    def test_session_binding_requires_exactly_the_owner_pinned_fresh_session(self):
+        self.assertEqual(self.gate.session_binding(['-p', 'x', *PIN], E), SID)
+        other = '1b9f6b2a-1c3d-4e5f-8a7b-9c0d1e2f3a4b'
+        for values, env in ((['-p', 'x'], E), ([*PIN], {}), (['--session-id', other], E),
+                            ([*PIN, *PIN], E), ([*PIN, '--resume', SID], E), ([*PIN, '-c'], E),
+                            ([*PIN, '--fork-session'], E), (['--session-id='+SID], E),
+                            ([*PIN, '--resume='+SID], E), (['--session-id'], E)):
+            with self.subTest(values=values), self.assertRaises(self.gate.Refused):
+                self.gate.session_binding(values, env)
+        execute = Mock()
+        with self.assertRaisesRegex(self.gate.Refused, 'session binding'):
+            self.gate.native_exec(['10.0', '1:2:1:2', '--', '-p', 'x'], E, now=lambda: 1,
+                                 validator=lambda _: ((1, 2), (1, 2)), execute=execute)
+        execute.assert_not_called()
 
     def test_pre_exec_rejects_root_replacement_before_native_command(self):
         execute = Mock()
         with self.assertRaisesRegex(self.gate.Refused, 'mount changed'):
-            self.gate.native_exec(['10.0', '1:2:1:2', '--', 'literal'], {},
+            self.gate.native_exec(['10.0', '1:2:1:2', '--', 'literal', *PIN], E,
                                  now=lambda: 1, validator=lambda _: ((1, 3), (1, 3)),
                                  execute=execute)
         execute.assert_not_called()
@@ -160,7 +178,7 @@ def validate(env):
 def run(argv):
  if sys.argv[5]=='cancel': os.kill(os.getpid(),signal.SIGTERM)
  handed.write_text(json.dumps(argv)); return 0
-try: result=g.prepare(['--prepare-seconds','1' if sys.argv[4]=='idle' else '10','--','space value',';no shell','$(no exec)'],{},now=g.clock if sys.argv[4]=='idle' else lambda:now[0],validator=validate,run=run)
+try: result=g.prepare(['--prepare-seconds','1' if sys.argv[4]=='idle' else '10','--','space value',';no shell','$(no exec)','--session-id','0b9f6b2a-1c3d-4e5f-8a7b-9c0d1e2f3a4b'],{'VITRAL_COLLECTOR_EXPECT_SESSION':'0b9f6b2a-1c3d-4e5f-8a7b-9c0d1e2f3a4b'},now=g.clock if sys.argv[4]=='idle' else lambda:now[0],validator=validate,run=run)
 except g.Cancelled as e: result=128+e.signum
 except g.Refused: result=2
 os._exit(result)
@@ -189,7 +207,7 @@ os._exit(result)
         self.assertEqual(process.returncode, 0, errors); self.assertEqual(output+errors, b'')
         argv = json.loads(handed.read_text())
         self.assertEqual(argv, ['--', self.gate.PYTHON, '-E', '-s', '-S', self.gate.SCRIPT,
-                               '--native-exec', '11.0', '1:2:1:2', '--', 'space value', ';no shell', '$(no exec)'])
+                               '--native-exec', '11.0', '1:2:1:2', '--', 'space value', ';no shell', '$(no exec)', *PIN])
 
     def test_term_before_usr1_and_coqueued_term_win_without_handoff(self):
         for coqueued, signum in ((False, signal.SIGTERM), (True, signal.SIGTERM),
@@ -218,7 +236,7 @@ os._exit(result)
             'VITRAL_COLLECTOR_ORIGIN': 'https://identity.example.test',
             'VITRAL_COLLECTOR_PROVIDER': 'claude', 'VITRAL_COLLECTOR_PROFILE': 'claude-2.1.308-text-v1',
             'VITRAL_COLLECTOR_TRANSCRIPT_ROOT': str(source), 'VITRAL_COLLECTOR_STATE': str(state),
-            'VITRAL_COLLECTOR_REDACTION': 'required'}
+            'VITRAL_COLLECTOR_REDACTION': 'required', 'VITRAL_COLLECTOR_EXPECT_SESSION': SID}
         env.update({'VITRAL_LOCATION_'+name.upper(): value for name, value in {
             'label': 'fixture', 'provider': 'kubernetes', 'cluster': 'kind', 'namespace': 'test',
             'workload': 'fixture', 'replica': 'one'}.items()})

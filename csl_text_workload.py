@@ -236,10 +236,14 @@ def blocks(value, *, claude=False):
 
 
 class WorkloadTextProvider(PreparedProvider):
-    def __init__(self, provider, sources, store, **options):
+    expected_session = None
+
+    def __init__(self, provider, sources, store, *, expected_session=None, **options):
         if not isinstance(provider, str) or provider not in PROFILES:
             raise SyncError('unsupported_provider')
+        if expected_session is not None and provider != 'claude': raise SyncError('unsupported_provider')
         self.provider, self.profile = provider, PROFILES[provider]
+        self.expected_session = expected_session
         super().__init__(sources, store, **options)
 
     @property
@@ -456,6 +460,8 @@ class WorkloadTextProvider(PreparedProvider):
                 view.append(row)
         identifier(sid)
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', sid): refused()
+        if self.expected_session is not None and sid != self.expected_session:
+            raise SyncError('workload_session_binding_refused')
         if model is not None and not isinstance(model, str): refused()
         metadata = {'provider': self.provider, 'native_id': sid, 'title': (title or sid)[:200],
             'cwd': None, 'repository': None, 'created_at': created, 'updated_at': updated, 'model': model,

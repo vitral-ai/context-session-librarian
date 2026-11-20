@@ -49,6 +49,7 @@ class Configuration:
     spool_bytes: int
     ca_file: str | None
     observe_session: str | None = None
+    expect_session: str | None = None
 
     @classmethod
     def from_environment(cls, env):
@@ -73,4 +74,9 @@ class Configuration:
         if observe is not None:
             try: observation_identity(observe)
             except (ValueError, TypeError, AttributeError): refused()
-        return cls(origin, provider, profile, source, state, location, flush, spool, ca, observe)
+        expect = env.get(PREFIX+'EXPECT_SESSION')
+        # Owner-pinned native session (Claude --session-id): only that session may be collected.
+        if expect is not None and (provider != 'claude' or observe is not None or not isinstance(expect, str)
+                or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', expect)):
+            refused()
+        return cls(origin, provider, profile, source, state, location, flush, spool, ca, observe, expect)

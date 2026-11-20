@@ -730,6 +730,13 @@ class WorkloadTextTests(unittest.TestCase):
         self.assertNotIn(CANARY,view);self.assertNotIn('private',view)
         self.assertEqual(sum(row['kind']=='tool_result' for row in adapter.view_records('claude',SID)['records']),1)
 
+    def test_expected_session_refuses_any_other_native_session(self):
+        adapter,_=self.provider('claude',native('claude'),expected_session=SID)
+        self.assertEqual([row['native_id'] for row in adapter.list_sessions('claude')],[SID])
+        adapter,_=self.provider('claude',native('claude'),expected_session='0b9f6b2a-1c3d-4e5f-8a7b-9c0d1e2f3a4b')
+        with self.assertRaisesRegex(SyncError,'^workload_session_binding_refused$'):adapter.list_sessions('claude')
+        with self.assertRaisesRegex(SyncError,'^unsupported_provider$'):self.provider('codex',native('codex'),expected_session=SID)
+
     def test_unselected_raw_structure_is_bounded_before_projection(self):
         for provider in ('codex','claude'):
             rows=native(provider);rows[0]['discarded_metadata']=[None]*200

@@ -35,6 +35,17 @@ class ConfigurationTests(unittest.TestCase):
                 self.assertEqual(config.profile, profile)
                 self.assertNotIn('canary', repr(config))
 
+    def test_expected_session_is_claude_only_canonical_uuid_and_not_with_observation(self):
+        claude = {**self.env, PREFIX+'PROVIDER': 'claude', PREFIX+'PROFILE': PROVIDER_PROFILES['claude']}
+        sid = '0b9f6b2a-1c3d-4e5f-8a7b-9c0d1e2f3a4b'
+        self.assertEqual(Configuration.from_environment({**claude, PREFIX+'EXPECT_SESSION': sid}).expect_session, sid)
+        self.assertIsNone(Configuration.from_environment(claude).expect_session)
+        for env in ({**self.env, PREFIX+'EXPECT_SESSION': sid}, {**claude, PREFIX+'EXPECT_SESSION': sid.upper()},
+                    {**claude, PREFIX+'EXPECT_SESSION': 'not-a-uuid'}, {**claude, PREFIX+'EXPECT_SESSION': sid[:-1]+'/'},
+                    {**claude, PREFIX+'EXPECT_SESSION': sid, PREFIX+'OBSERVE_SESSION': 'claude:'+sid}):
+            with self.subTest(env=env.get(PREFIX+'EXPECT_SESSION')), self.assertRaises(SyncError):
+                Configuration.from_environment(env)
+
     def test_missing_foreign_profiles_and_redaction_opt_out_refuse(self):
         for field, value in (('PROFILE', None), ('PROFILE', 'auto'), ('PROFILE', PROVIDER_PROFILES['claude']),
                               ('PROVIDER', 'antigravity'), ('PROVIDER', 'unknown'), ('CLIENT_ID', 'another-client'),
