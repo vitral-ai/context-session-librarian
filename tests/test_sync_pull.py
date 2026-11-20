@@ -85,6 +85,30 @@ class PullTests(unittest.TestCase):
         with self.assertRaises(SyncError) as error: pull(self.registry('token-a'), 'sess-a', self.root / 'out')
         self.assertEqual(error.exception.code, 'output_exists')
 
+    def test_existing_directory_keeps_its_mode_and_new_one_is_private(self):
+        existing = self.root / 'Downloads'; existing.mkdir(mode=0o755); existing.chmod(0o755)
+        result = pull(self.registry('token-a'), 'sess-a', existing)
+        self.assertEqual(existing.stat().st_mode & 0o777, 0o755); self.assertEqual(Path(result['path']).stat().st_mode & 0o777, 0o600)
+        fresh = self.root / 'new' / 'dir'
+        pull(self.registry('token-a'), 'sess-a', fresh)
+        self.assertEqual(fresh.stat().st_mode & 0o777, 0o700)
+
+    def test_pull_runs_while_sync_collector_lock_is_held(self):
+        import argparse
+        from unittest.mock import patch
+        from csl_sync import command
+        from csl_sync_state import State, exclusive
+        home = self.root / 'sync'; state = State(home); state.set('settings', {'enabled': True, 'endpoint': self.endpoint}); state.close()
+        class Signed(Tokens):
+            def status(self): return {'signed_in': True}
+        args = argparse.Namespace(sync_home=home, sync_action='pull', session_id='sess-a', out_dir=self.root / 'out')
+        out = io.StringIO()
+        with exclusive(home), patch('csl_sync.Tokens', lambda root, settings: Signed('token-a')):
+            from contextlib import redirect_stdout
+            with redirect_stdout(out): command(args, None)
+        self.assertEqual(json.loads(out.getvalue())['session_id'], 'sess-a')
+        self.assertTrue((self.root / 'out' / 'sess-a.zip').exists())
+
     def test_non_zip_body_and_oversize_leave_no_file(self):
         import csl_sync
         original = csl_sync.MAX_PULL

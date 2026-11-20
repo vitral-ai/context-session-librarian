@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 import sys
 import tempfile
 import time
@@ -14,7 +15,7 @@ import urllib.parse
 from csl_sync_auth import Tokens, discover
 from csl_sync_engine import Collector, PROVIDERS, Providers
 from csl_sync_http import Registry, checked_url
-from csl_sync_state import State, SyncError, exclusive, now, private_directory, private_json
+from csl_sync_state import State, SyncError, exclusive, now, private_json
 from csl_sync_watch import pass_lock
 
 WARNING = ('Raw sync uploads the complete transcript bytes and supported companion files, '
@@ -42,6 +43,19 @@ def command(args, csl):
             from csl_sync_watch import watch
             import csl_sync_providers
             watch(args, state, CachedProviders(csl_sync_providers, state.root))
+            return
+        if action == 'pull':
+            # Read-only download with this device's own sign-in. It must not take the
+            # collector lock, or it would fail on every host where sync watch runs;
+            # token refresh serializes on its own lock.
+            settings = state.get('settings', {})
+            if not settings.get('enabled'):
+                raise SyncError('sign_in_required')
+            tokens = Tokens(state.root, settings)
+            if not tokens.status()['signed_in']:
+                raise SyncError('sign_in_required')
+            print(json.dumps(pull(Registry(settings['endpoint'], tokens), args.session_id,
+                                  args.out_dir or state.root / 'pulled'), separators=(',', ':')))
             return
         with pass_lock(state.root):
             if action in ('include', 'exclude'):
@@ -96,9 +110,6 @@ def command(args, csl):
                 result = Collector(state, registry, None).register()
                 print(json.dumps({'device_id': state.get('device_id'), 'registered': True}))
                 return
-            if action == 'pull':
-                print(json.dumps(pull(registry, args.session_id, args.out_dir or state.root / 'pulled'), separators=(',', ':')))
-                return
             providers = Providers(state.root)
             collector = Collector(state, registry, providers)
             result = collector.run(days=None if args.all else args.days, providers=args.providers or PROVIDERS)
@@ -122,6 +133,19 @@ MAX_PULL = 2 * 1024 ** 3
 SESSION_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}')
 
 
+def output_directory(path):
+    """Use an existing directory as it is; only a directory we create gets mode 0700."""
+    path = Path(path).expanduser().absolute()
+    if path.is_symlink():
+        raise SyncError('unsafe_output_directory')
+    if not path.exists():
+        path.mkdir(parents=True, mode=0o700)
+    info = path.stat()
+    if info.st_uid != os.getuid() or not stat.S_ISDIR(info.st_mode):
+        raise SyncError('unsafe_output_directory')
+    return path
+
+
 def pull(registry, session_id, out_dir):
     """Fetch one package the signed-in account owns into a private file.
 
@@ -130,7 +154,7 @@ def pull(registry, session_id, out_dir):
     """
     if SESSION_ID.fullmatch(session_id) is None:
         raise SyncError('invalid_session_id')
-    directory = private_directory(out_dir)
+    directory = output_directory(out_dir)
     target = directory / (session_id + '.zip')
     if target.exists() or target.is_symlink():
         raise SyncError('output_exists')
