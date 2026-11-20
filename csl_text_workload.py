@@ -26,7 +26,10 @@ PROVENANCE_FIELDS = {'csl_conversion', 'csl_source_provider', 'csl_source_sessio
                      'parent_thread_id'}
 TEXT_BLOCKS = {'text', 'input_text', 'output_text'}
 CLAUDE_META = {'custom-title', 'file-history-snapshot', 'queue-operation', 'progress',
-               'system', 'summary', 'last-prompt', 'agent-name', 'bridge_status'}
+               'system', 'summary', 'last-prompt', 'agent-name', 'bridge_status',
+               # Observed in real 2.1.308 `-p` transcripts; auxiliary only, no field is copied.
+               'attachment', 'atis-latch', 'api-request-shape', 'api-request-blob', 'api-request',
+               'cost-state'}
 CODEX_EVENTS = {'task_started', 'task_complete', 'item_started', 'item_completed',
                 'thread_name_updated', 'user_message', 'agent_message', 'token_count',
                 'agent_reasoning', 'agent_reasoning_raw_content', 'turn_aborted',
