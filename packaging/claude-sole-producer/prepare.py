@@ -49,6 +49,21 @@ def arguments(argv):
     return seconds, values
 
 
+RESUME = {'--resume', '-r', '--continue', '-c', '--fork-session', '--from-pr'}
+
+
+def session_binding(values, env):
+    """The literal argv must pin exactly the owner-expected fresh session."""
+    expected = env.get('VITRAL_COLLECTOR_EXPECT_SESSION')
+    if (not isinstance(expected, str) or values.count('--session-id') != 1
+            or any(value in RESUME or value.split('=', 1)[0] in RESUME | {'--session-id'} and '=' in value
+                   for value in values)):
+        raise Refused('session binding')
+    index = values.index('--session-id')
+    if index+1 >= len(values) or values[index+1] != expected: raise Refused('session binding')
+    return expected
+
+
 def readonly(path): return bool(os.statvfs(path).f_flag & os.ST_RDONLY)
 
 
@@ -57,6 +72,7 @@ def validate(env):
     config = Configuration.from_environment(env)
     if (env.get('HOME') != str(HOME) or env.get('CLAUDE_CONFIG_DIR') != str(NATIVE)
             or config.provider != 'claude' or config.profile != 'claude-2.1.308-text-v1'
+            or config.expect_session is None
             or config.transcript_root != TRANSCRIPTS or config.state_root != STATE): raise Refused('layout')
     for path in (HOME, NATIVE):
         info = path.lstat()
@@ -96,6 +112,7 @@ def prepare(argv, env, *, now=clock, validator=validate, run=None, wait=signal.s
     # The process owns this signal mask until exit. Tests use isolated children.
     signal.pthread_sigmask(signal.SIG_BLOCK, SIGNALS)
     seconds, values = arguments(argv)
+    session_binding(values, env)
     deadline = now()+seconds
     stop = stop_pending()
     if stop: raise Cancelled(stop)
@@ -134,6 +151,7 @@ def native_exec(argv, env, *, now=clock, validator=validate, execute=os.execve):
     deadline = float(argv[0])
     # Reuse the literal-argument bounds without opening an alternate command.
     _, values = arguments(['--', *argv[3:]])
+    session_binding(values, env)
     check_deadline(deadline, now)
     if encode_views(validator(env)) != argv[1]: raise Refused('mount changed')
     check_deadline(deadline, now)

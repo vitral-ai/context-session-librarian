@@ -254,6 +254,22 @@ class LifecycleTests(unittest.TestCase):
              patch('csl_workload_runner.os.getppid', return_value=123):
             with self.assertRaisesRegex(SyncError, '^workload_parent_unavailable$'): parent_death(124)
 
+    def test_expected_session_admits_only_the_pinned_project_file(self):
+        from csl_workload_runner import bound_sources
+        sid = '0b9f6b2a-1c3d-4e5f-8a7b-9c0d1e2f3a4b'
+        config = replace(self.config, provider='claude', profile='claude-2.1.308-text-v1', expect_session=sid)
+        source = config.transcript_root
+        (source/'-work').mkdir(); (source/'-work'/(sid+'.jsonl')).write_bytes(b'')
+        (source/'-work'/sid).mkdir(); (source/'-work'/sid/'tool-results.txt').write_bytes(b'not jsonl')
+        self.assertEqual(bound_sources(config), ('-work/'+sid+'.jsonl',))
+        for extra in ('-work/11111111-2222-4333-8444-555555555555.jsonl', sid+'.jsonl',
+                      '-work/'+sid+'/subagents/agent-1.jsonl'):
+            path = source/extra; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'')
+            with self.subTest(extra=extra), self.assertRaisesRegex(SyncError, '^workload_session_binding_refused$'):
+                bound_sources(config)
+            path.unlink()
+        self.assertEqual(bound_sources(replace(config, expect_session=None)), ('-work/'+sid+'.jsonl',))
+
     def test_only_bounded_declared_jsonl_files_and_no_symlinks_are_discovered(self):
         source = self.config.transcript_root
         (source/'ignored.db').write_bytes(b'not read')
