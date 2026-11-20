@@ -1,11 +1,16 @@
 """Explicit opt-in sync CLI. No startup side effects, daemon or provider parsing."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
+import stat
 import sys
+import tempfile
 import time
+import urllib.parse
 
 from csl_sync_auth import Tokens, discover
 from csl_sync_engine import Collector, PROVIDERS, Providers
@@ -38,6 +43,19 @@ def command(args, csl):
             from csl_sync_watch import watch
             import csl_sync_providers
             watch(args, state, CachedProviders(csl_sync_providers, state.root))
+            return
+        if action == 'pull':
+            # Read-only download with this device's own sign-in. It must not take the
+            # collector lock, or it would fail on every host where sync watch runs;
+            # token refresh serializes on its own lock.
+            settings = state.get('settings', {})
+            if not settings.get('enabled'):
+                raise SyncError('sign_in_required')
+            tokens = Tokens(state.root, settings)
+            if not tokens.status()['signed_in']:
+                raise SyncError('sign_in_required')
+            print(json.dumps(pull(Registry(settings['endpoint'], tokens), args.session_id,
+                                  args.out_dir or state.root / 'pulled'), separators=(',', ':')))
             return
         with pass_lock(state.root):
             if action in ('include', 'exclude'):
@@ -111,6 +129,58 @@ def command(args, csl):
         if state is not None: state.close()
 
 
+MAX_PULL = 2 * 1024 ** 3
+SESSION_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}')
+
+
+def output_directory(path):
+    """Use an existing directory as it is; only a directory we create gets mode 0700."""
+    path = Path(path).expanduser().absolute()
+    if path.is_symlink():
+        raise SyncError('unsafe_output_directory')
+    if not path.exists():
+        path.mkdir(parents=True, mode=0o700)
+    info = path.stat()
+    if info.st_uid != os.getuid() or not stat.S_ISDIR(info.st_mode):
+        raise SyncError('unsafe_output_directory')
+    return path
+
+
+def pull(registry, session_id, out_dir):
+    """Fetch one package the signed-in account owns into a private file.
+
+    The registry derives the owner from this device's own token, so another
+    account's session id is not_found. Nothing is written for a refused request.
+    """
+    if SESSION_ID.fullmatch(session_id) is None:
+        raise SyncError('invalid_session_id')
+    directory = output_directory(out_dir)
+    target = directory / (session_id + '.zip')
+    # The same session can be resumed again (or retried after a failed import): replace
+    # a previous pull of it atomically, but never follow a symlink or replace a non-file.
+    if target.is_symlink() or (target.exists() and not target.is_file()):
+        raise SyncError('unsafe_output_file')
+    fd, temporary = tempfile.mkstemp(prefix='.pull-', suffix='.part', dir=directory)
+    try:
+        os.fchmod(fd, 0o600)
+        digest = hashlib.sha256()
+        class Sink:
+            def write(self, chunk):
+                digest.update(chunk)
+                os.write(fd, chunk)
+        size = registry.download('/sessions/' + urllib.parse.quote(session_id, safe='') + '/package', Sink(), MAX_PULL)
+        os.fsync(fd)
+        os.close(fd); fd = None
+        with open(temporary, 'rb') as check:
+            if check.read(4) != b'PK\x03\x04':
+                raise SyncError('invalid_server_response')
+        os.replace(temporary, target); temporary = None
+    finally:
+        if fd is not None: os.close(fd)
+        if temporary is not None: os.unlink(temporary)
+    return {'session_id': session_id, 'path': str(target), 'bytes': size, 'sha256': digest.hexdigest()}
+
+
 def positive(value):
     value = int(value)
     if not 1 <= value <= 86400: raise argparse.ArgumentTypeError('Choose a value from 1 to 86400')
@@ -151,6 +221,9 @@ def add_commands(subparsers, csl):
     signin.add_argument('--manual-browser', action='store_true', help='Write the authorization URL to a private state file, never logs; open it in your own system browser.')
     actions.add_parser('status', help='Local cached IDs, byte counts, pending states and last error; never tokens or transcript text.')
     actions.add_parser('register-device', help='Register this signed-in installation without uploading sessions.')
+    pull_parser = actions.add_parser('pull', help='Download one of this signed-in account\'s sessions as a package ZIP for csl import. Uses this installation\'s own sign-in; no token in arguments or output.')
+    pull_parser.add_argument('session_id')
+    pull_parser.add_argument('--out-dir', type=Path, help='Private output directory (default: <sync home>/pulled); created with mode 0700.')
     actions.add_parser('sign-out', help='Disable this local installation and erase stored tokens; stop watch first. Does not revoke remotely.')
     for action in ('include','exclude'):
         selector = actions.add_parser(action, help='Local selection only; never deletes remote content.')
