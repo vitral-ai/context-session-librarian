@@ -100,3 +100,14 @@ kubectl exec job/<release>-collector -- sh -c 'kill -USR1 1'             # start
 `--enroll` runs the existing person-approved device flow for this replica's own
 STATE. It prints only the public code, verification URI and the final state.
 It is one-shot, so a spent or expired attempt needs a fresh pod.
+
+## Terminal-host mode (collector phase 2)
+
+`mode: terminalHost` renders one StatefulSet running the vitralai container-terminal
+image (`host-agent/packaging/container`). Its shared tmux terminal runs `terminalHost.args`,
+for example Claude Code, and people can watch it live in Vitral (view-only by default).
+A root init container makes the per-replica PVC `0700` for uid 10001 (no `fsGroup`).
+`terminalHost.expectedOwner` pins the approving account, and the credential named by
+`terminalHost.credentialKey` comes from `terminalHost.credentialSecret` into the workload only.
+The host's device code appears in the pod log. Keep the PVC: a replacement pod reuses the
+enrolled identity and host record without a new code.

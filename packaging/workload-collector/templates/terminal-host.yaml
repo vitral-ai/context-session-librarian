@@ -1,0 +1,98 @@
+{{- if and (kindIs "bool" .Values.enabled) .Values.enabled (eq .Values.mode "terminalHost") }}
+{{- /*
+Collector phase 2: one container-terminal host (vitralai host-agent container mode)
+with the workload (for example Claude Code) running in its shared tmux terminal.
+The host enrolls through the person-approved device flow (code in the pod log),
+pins the expected owner, and keeps its identity on a per-replica PVC.
+*/}}
+{{- $t := .Values.terminalHost -}}
+{{- if not (regexMatch "^[a-f0-9]{24}$" $t.expectedOwner) -}}
+{{- fail "terminalHost.expectedOwner must be the approving owner's account id" -}}
+{{- end -}}
+{{- if empty $t.args -}}
+{{- fail "terminalHost.args must hold the workload argv for the shared terminal" -}}
+{{- end -}}
+{{- if not (has $t.path (list "host-agent" "tunnel")) -}}
+{{- fail "terminalHost.path must be host-agent or tunnel" -}}
+{{- end -}}
+{{- if and $t.credentialSecret (not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" $t.credentialSecret)) -}}
+{{- fail "terminalHost.credentialSecret must name an existing Secret" -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "workload.name" . }}
+spec:
+  serviceName: {{ include "workload.name" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "workload.name" . }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "workload.name" . }}
+    spec:
+      automountServiceAccountToken: false
+      # No fs group on purpose: a group-writable volume is refused by the host agent as an insecure parent.
+      terminationGracePeriodSeconds: {{ int .Values.terminationGracePeriodSeconds }}
+      initContainers:
+        - name: volume-owner
+          image: {{ include "workload.image" $t.image }}
+          command: ["/bin/sh", "-c", "chown {{ int .Values.collector.uid }}:{{ int .Values.collector.uid }} /vitral-host && chmod 0700 /vitral-host"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "FOWNER"]
+          volumeMounts:
+            - name: vitral-host
+              mountPath: /vitral-host
+      containers:
+        - name: agent
+          image: {{ include "workload.image" $t.image }}
+          imagePullPolicy: IfNotPresent
+          args: {{ $t.args | toJson }}
+          securityContext:
+            runAsUser: {{ int .Values.collector.uid }}
+            runAsGroup: {{ int .Values.collector.uid }}
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: VITRAL_TERMINAL_PATH
+              value: {{ $t.path | quote }}
+            - name: VITRAL_EXPECTED_OWNER
+              value: {{ $t.expectedOwner | quote }}
+            - name: VITRAL_LABEL
+              value: {{ .Values.location.label | quote }}
+{{- if $t.credentialSecret }}
+            - name: VITRAL_WORKLOAD_ENV_KEYS
+              value: {{ $t.credentialKey | quote }}
+            - name: {{ $t.credentialKey }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $t.credentialSecret | quote }}
+                  key: {{ $t.credentialKey | quote }}
+{{- end }}
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+          volumeMounts:
+            - name: vitral-host
+              mountPath: /vitral-host
+  volumeClaimTemplates:
+    - metadata:
+        name: vitral-host
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ $t.storage | quote }}
+{{- end }}

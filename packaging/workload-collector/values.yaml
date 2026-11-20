@@ -36,3 +36,13 @@ soleProducer:
   credentialKey: token
   prepareSeconds: 900
   args: []
+# Collector phase 2: one container-terminal host (vitralai host-agent container mode)
+# whose shared tmux terminal runs the workload. Device code in the pod log.
+terminalHost:
+  image: ""
+  path: host-agent
+  expectedOwner: ""
+  credentialSecret: ""
+  credentialKey: CLAUDE_CODE_OAUTH_TOKEN
+  storage: 1Gi
+  args: []

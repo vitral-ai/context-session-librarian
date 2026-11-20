@@ -224,6 +224,33 @@ class WorkloadChartTests(unittest.TestCase):
             with self.subTest(settings=settings):
                 self.assertNotEqual(self.sole(**settings).returncode, 0)
 
+    def terminal(self, **settings):
+        values = {'mode': 'terminalHost', 'terminalHost.image': f'test/bakeoff@sha256:{DIGEST}',
+                  'terminalHost.expectedOwner': '6afcc9f6a9f8fcd9d5db8018', 'terminalHost.credentialSecret': 'agent-env',
+                  'terminalHost.args': '{claude,--dangerously-skip-permissions}'}
+        return self.render(**(values | settings))
+
+    def test_terminal_host_statefulset_pins_owner_keeps_identity_and_hides_the_credential(self):
+        result = self.terminal()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout
+        self.assertEqual(re.findall(r'^kind: (\S+)$', out, re.M), ['StatefulSet'])
+        for line in ('          args: ["claude","--dangerously-skip-permissions"]',
+                     '            - name: VITRAL_EXPECTED_OWNER\n              value: "6afcc9f6a9f8fcd9d5db8018"',
+                     '            - name: VITRAL_WORKLOAD_ENV_KEYS\n              value: "CLAUDE_CODE_OAUTH_TOKEN"',
+                     '                secretKeyRef:\n                  name: "agent-env"\n                  key: "CLAUDE_CODE_OAUTH_TOKEN"',
+                     'chown 10001:10001 /vitral-host && chmod 0700 /vitral-host', '        accessModes: ["ReadWriteOnce"]',
+                     '      automountServiceAccountToken: false'):
+            self.assertIn(line, out)
+        self.assertNotIn('fsGroup:', out)
+
+    def test_terminal_host_refuses_missing_owner_args_or_unknown_path(self):
+        for settings in ({'terminalHost.expectedOwner': ''}, {'terminalHost.expectedOwner': 'operative1'},
+                         {'terminalHost.args': 'null'}, {'terminalHost.path': 'ssh'},
+                         {'terminalHost.image': 'test/bakeoff:latest'}, {'terminalHost.credentialSecret': 'Bad_Name'}):
+            with self.subTest(settings=settings):
+                self.assertNotEqual(self.terminal(**settings).returncode, 0)
+
     def test_daemonset_uses_only_explicit_readonly_claim_and_private_state(self):
         result = self.render(mode='daemonSet', **{'daemonSet.narrowSameOwnerExport': 'true',
                                                 'daemonSet.existingClaim': 'approved-transcripts'})
