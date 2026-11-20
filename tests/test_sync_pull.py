@@ -109,6 +109,24 @@ class PullTests(unittest.TestCase):
         self.assertEqual(json.loads(out.getvalue())['session_id'], 'sess-a')
         self.assertTrue((self.root / 'out' / 'sess-a.zip').exists())
 
+    def test_backend_composed_line_parses_and_pull_output_is_the_import_input(self):
+        # Mirrors vitralai fastapi-backend/tests/fixtures/resume-command-v1.json (the line the
+        # backend composes for "Resume on machine"). Fails if the flags or the ZIP path change.
+        import shlex
+        from unittest.mock import patch
+        import codex_sessions
+        line = 'csl sync pull sess-a --out-dir ~/.csl-resume && csl import ~/.csl-resume/sess-a.zip --cwd /work/project --open'
+        pull_line, import_line = [shlex.split(part) for part in line.split(' && ')]
+        home = self.root / 'home'; home.mkdir()
+        with patch.dict(os.environ, {'HOME': str(home)}):
+            parser = codex_sessions.build_parser()
+            pulled = parser.parse_args(pull_line[1:]); imported = parser.parse_args(import_line[1:])
+            self.assertEqual((pulled.command, pulled.sync_action, pulled.session_id), ('sync', 'pull', 'sess-a'))
+            self.assertEqual((imported.command, imported.cwd, imported.open), ('import', Path('/work/project'), True))
+            result = pull(self.registry('token-a'), pulled.session_id, pulled.out_dir)
+            self.assertEqual(Path(result['path']), Path(imported.bundle).expanduser())
+            self.assertEqual(Path(result['path']), home / '.csl-resume' / 'sess-a.zip')
+
     def test_non_zip_body_and_oversize_leave_no_file(self):
         import csl_sync
         original = csl_sync.MAX_PULL
