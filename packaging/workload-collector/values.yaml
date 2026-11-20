@@ -42,6 +42,9 @@ terminalHost:
   image: ""
   path: host-agent
   expectedOwner: ""
+  # Optional: point the host at another stack (e.g. local Tilt); empty keeps the image's DEV defaults.
+  issuer: ""
+  gatewayUrl: ""
   credentialSecret: ""
   credentialKey: CLAUDE_CODE_OAUTH_TOKEN
   storage: 1Gi

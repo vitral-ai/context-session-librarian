@@ -111,3 +111,5 @@ A root init container makes the per-replica PVC `0700` for uid 10001 (no `fsGrou
 `terminalHost.credentialKey` comes from `terminalHost.credentialSecret` into the workload only.
 The host's device code appears in the pod log. Keep the PVC: a replacement pod reuses the
 enrolled identity and host record without a new code.
+To use another stack (for example local Tilt), set `terminalHost.issuer` and
+`terminalHost.gatewayUrl` together; when both are empty, the image's DEV defaults apply.

@@ -15,6 +15,15 @@ pins the expected owner, and keeps its identity on a per-replica PVC.
 {{- if not (has $t.path (list "host-agent" "tunnel")) -}}
 {{- fail "terminalHost.path must be host-agent or tunnel" -}}
 {{- end -}}
+{{- if and $t.issuer (not (regexMatch "^https?://[^\\s\"]+$" $t.issuer)) -}}
+{{- fail "terminalHost.issuer must be an http(s) URL" -}}
+{{- end -}}
+{{- if and $t.gatewayUrl (not (regexMatch "^wss?://[^\\s\"]+$" $t.gatewayUrl)) -}}
+{{- fail "terminalHost.gatewayUrl must be a ws(s) URL" -}}
+{{- end -}}
+{{- if ne (empty $t.issuer) (empty $t.gatewayUrl) -}}
+{{- fail "terminalHost.issuer and terminalHost.gatewayUrl are set together" -}}
+{{- end -}}
 {{- if and $t.credentialSecret (not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" $t.credentialSecret)) -}}
 {{- fail "terminalHost.credentialSecret must name an existing Secret" -}}
 {{- end -}}
@@ -69,6 +78,12 @@ spec:
               value: {{ $t.expectedOwner | quote }}
             - name: VITRAL_LABEL
               value: {{ .Values.location.label | quote }}
+{{- if $t.issuer }}
+            - name: VITRAL_ISSUER
+              value: {{ $t.issuer | quote }}
+            - name: VITRAL_GATEWAY_URL
+              value: {{ $t.gatewayUrl | quote }}
+{{- end }}
 {{- if $t.credentialSecret }}
             - name: VITRAL_WORKLOAD_ENV_KEYS
               value: {{ $t.credentialKey | quote }}
