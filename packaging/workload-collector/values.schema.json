@@ -3,70 +3,184 @@
   "type": "object",
   "allOf": [
     {
-      "if": {"required": ["enabled"], "properties": {"enabled": {"const": true}}},
+      "if": {
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "const": true
+          }
+        }
+      },
       "then": {
-        "required": ["transcripts"],
+        "required": [
+          "transcripts"
+        ],
         "properties": {
           "transcripts": {
-            "required": ["profile"],
-            "properties": {"profile": {"minLength": 1}}
+            "required": [
+              "profile"
+            ],
+            "properties": {
+              "profile": {
+                "minLength": 1
+              }
+            }
           }
         }
       }
     }
   ],
   "properties": {
-    "enabled": {"type": "boolean"},
-    "mode": {"enum": ["sidecar", "daemonSet"]},
+    "enabled": {
+      "type": "boolean"
+    },
+    "mode": {
+      "enum": [
+        "sidecar",
+        "daemonSet",
+        "soleProducer"
+      ]
+    },
     "collector": {
       "type": "object",
       "properties": {
-        "image": {"type": "string"},
-        "uid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
-        "stateLimit": {"type": "string", "minLength": 1},
-        "spoolLimitBytes": {"type": "integer", "minimum": 1, "maximum": 536870912},
-        "flushSeconds": {"type": "integer", "minimum": 1, "maximum": 20}
+        "image": {
+          "type": "string"
+        },
+        "uid": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "stateLimit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "spoolLimitBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 536870912
+        },
+        "flushSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        }
       }
     },
     "transcripts": {
       "type": "object",
       "properties": {
-        "provider": {"type": "string"},
-        "profile": {"type": "string"},
-        "sizeLimit": {"type": "string", "minLength": 1}
+        "provider": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "sizeLimit": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "identity": {
       "type": "object",
       "properties": {
-        "origin": {"type": "string"},
-        "caConfigMap": {"type": "string"}
+        "origin": {
+          "type": "string"
+        },
+        "caConfigMap": {
+          "type": "string"
+        }
       }
     },
     "location": {
       "type": "object",
       "properties": {
-        "provider": {"type": "string"},
-        "label": {"type": "string"},
-        "cluster": {"type": "string"},
-        "workload": {"type": "string"}
+        "provider": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "cluster": {
+          "type": "string"
+        },
+        "workload": {
+          "type": "string"
+        }
       }
     },
     "writer": {
       "type": "object",
       "properties": {
-        "image": {"type": "string"},
-        "command": {"type": "array", "items": {"type": "string", "minLength": 1}},
-        "args": {"type": "array", "items": {"type": "string"}},
-        "shutdownSeconds": {"type": "integer", "minimum": 0, "maximum": 120}
+        "image": {
+          "type": "string"
+        },
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "shutdownSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120
+        }
       }
     },
-    "terminationGracePeriodSeconds": {"type": "integer", "minimum": 30, "maximum": 300},
+    "terminationGracePeriodSeconds": {
+      "type": "integer",
+      "minimum": 30,
+      "maximum": 300
+    },
     "daemonSet": {
       "type": "object",
       "properties": {
-        "narrowSameOwnerExport": {"type": "boolean"},
-        "existingClaim": {"type": "string"}
+        "narrowSameOwnerExport": {
+          "type": "boolean"
+        },
+        "existingClaim": {
+          "type": "string"
+        }
+      }
+    },
+    "soleProducer": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "string"
+        },
+        "expectSession": {
+          "type": "string"
+        },
+        "credentialSecret": {
+          "type": "string"
+        },
+        "credentialKey": {
+          "type": "string"
+        },
+        "prepareSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1800
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     }
   }

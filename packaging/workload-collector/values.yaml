@@ -27,3 +27,12 @@ terminationGracePeriodSeconds: 40
 daemonSet:
   narrowSameOwnerExport: false
   existingClaim: ""
+# One-container Job: the reviewed Claude sole-producer gate (packaging/claude-sole-producer)
+# runs claude under the Runner, so final flush completes. Enroll and start through kubectl exec.
+soleProducer:
+  image: ""
+  expectSession: ""
+  credentialSecret: ""
+  credentialKey: token
+  prepareSeconds: 900
+  args: []

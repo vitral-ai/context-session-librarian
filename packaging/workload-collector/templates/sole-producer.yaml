@@ -1,0 +1,86 @@
+{{- if and (kindIs "bool" .Values.enabled) .Values.enabled (eq .Values.mode "soleProducer") }}
+{{- include "workload.validate" . }}
+{{- /*
+One-container Job for the Claude sole-producer gate (packaging/claude-sole-producer).
+The gate validates the RW native projects mount and its RO /transcripts alias (same
+emptyDir), waits for one USR1, then hands the literal claude argv to the Runner,
+which owns producer stop, EOF and the final flush. Operator steps, via kubectl exec:
+  enroll: csl-workload-collector --enroll     (prints only the public code; approve it)
+  start:  sh -c 'kill -USR1 1'
+The image needs a writable private home (/agent-private), so the root filesystem is not
+read-only in this mode; collector state and transcripts are separate emptyDir volumes.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "workload.name" . }}
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "workload.name" . }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: {{ int .Values.collector.uid }}
+        runAsGroup: {{ int .Values.collector.uid }}
+        fsGroup: {{ int .Values.collector.uid }}
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: {{ int .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: producer
+          image: {{ include "workload.image" .Values.soleProducer.image }}
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/csl-claude-prepare"]
+          args: {{ concat (list "--prepare-seconds" (.Values.soleProducer.prepareSeconds | int | toString) "--") .Values.soleProducer.args | toJson }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          env:{{ include "workload.env" . | indent 10 }}
+            - name: VITRAL_COLLECTOR_EXPECT_SESSION
+              value: {{ .Values.soleProducer.expectSession | quote }}
+            - name: CLAUDE_CODE_OAUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.soleProducer.credentialSecret | quote }}
+                  key: {{ .Values.soleProducer.credentialKey | quote }}
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+          volumeMounts:
+            - name: transcript
+              mountPath: /agent-private/.claude/projects
+            - name: transcript
+              mountPath: /transcripts
+              readOnly: true
+            - name: collector-state
+              mountPath: /collector-state
+{{- if .Values.identity.caConfigMap }}
+            - name: collector-trust
+              mountPath: /collector-trust
+              readOnly: true
+{{- end }}
+      volumes:
+        - name: transcript
+          emptyDir:
+            sizeLimit: {{ .Values.transcripts.sizeLimit | quote }}
+        - name: collector-state
+          emptyDir:
+            sizeLimit: {{ .Values.collector.stateLimit | quote }}
+{{- if .Values.identity.caConfigMap }}
+        - name: collector-trust
+          configMap:
+            name: {{ .Values.identity.caConfigMap | quote }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+{{- end }}
+{{- end }}

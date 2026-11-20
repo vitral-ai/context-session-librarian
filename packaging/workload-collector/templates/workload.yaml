@@ -4,7 +4,7 @@
 {{- if not (kindIs "bool" .Values.daemonSet.narrowSameOwnerExport) }}
 {{- fail "daemonSet.narrowSameOwnerExport must be a boolean" }}
 {{- end }}
-{{- if .Values.enabled }}
+{{- if and .Values.enabled (ne .Values.mode "soleProducer") }}
 {{- include "workload.validate" . }}
 {{- if and (eq .Values.mode "daemonSet") (not (and .Values.daemonSet.narrowSameOwnerExport .Values.daemonSet.existingClaim)) }}
 {{- fail "DaemonSet requires an explicitly qualified same-owner transcript-only claim" }}
