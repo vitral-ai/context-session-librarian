@@ -156,8 +156,10 @@ def pull(registry, session_id, out_dir):
         raise SyncError('invalid_session_id')
     directory = output_directory(out_dir)
     target = directory / (session_id + '.zip')
-    if target.exists() or target.is_symlink():
-        raise SyncError('output_exists')
+    # The same session can be resumed again (or retried after a failed import): replace
+    # a previous pull of it atomically, but never follow a symlink or replace a non-file.
+    if target.is_symlink() or (target.exists() and not target.is_file()):
+        raise SyncError('unsafe_output_file')
     fd, temporary = tempfile.mkstemp(prefix='.pull-', suffix='.part', dir=directory)
     try:
         os.fchmod(fd, 0o600)
@@ -172,8 +174,7 @@ def pull(registry, session_id, out_dir):
         with open(temporary, 'rb') as check:
             if check.read(4) != b'PK\x03\x04':
                 raise SyncError('invalid_server_response')
-        os.link(temporary, target)
-        os.unlink(temporary); temporary = None
+        os.replace(temporary, target); temporary = None
     finally:
         if fd is not None: os.close(fd)
         if temporary is not None: os.unlink(temporary)

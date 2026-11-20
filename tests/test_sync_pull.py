@@ -81,9 +81,18 @@ class PullTests(unittest.TestCase):
             with self.assertRaises(SyncError) as error: pull(self.registry('token-a'), bad, self.root / 'out')
             self.assertEqual(error.exception.code, 'invalid_session_id')
         self.assertFalse(any('..' in path for path, _ in self.seen))
-        pull(self.registry('token-a'), 'sess-a', self.root / 'out')
-        with self.assertRaises(SyncError) as error: pull(self.registry('token-a'), 'sess-a', self.root / 'out')
-        self.assertEqual(error.exception.code, 'output_exists')
+        # A second pull of the same session (re-resume, or retry after a failed import) replaces the file.
+        first = pull(self.registry('token-a'), 'sess-a', self.root / 'out')
+        again = pull(self.registry('token-a'), 'sess-a', self.root / 'out')
+        self.assertEqual(first['path'], again['path']); self.assertEqual(Path(again['path']).read_bytes(), package())
+        self.assertEqual(list((self.root / 'out').glob('.pull-*')), [])
+        # It never follows a symlink or replaces a directory at the target.
+        link = self.root / 'out' / 'sess-b.zip'; link.symlink_to(self.root / 'elsewhere')
+        with self.assertRaises(SyncError) as error: pull(self.registry('token-a'), 'sess-b', self.root / 'out')
+        self.assertEqual(error.exception.code, 'unsafe_output_file'); self.assertFalse((self.root / 'elsewhere').exists())
+        (self.root / 'out' / 'sess-c.zip').mkdir()
+        with self.assertRaises(SyncError) as error: pull(self.registry('token-a'), 'sess-c', self.root / 'out')
+        self.assertEqual(error.exception.code, 'unsafe_output_file')
 
     def test_existing_directory_keeps_its_mode_and_new_one_is_private(self):
         existing = self.root / 'Downloads'; existing.mkdir(mode=0o755); existing.chmod(0o755)

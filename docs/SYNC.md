@@ -64,8 +64,10 @@ csl import ~/.csl-resume/SESSION_ID.zip --cwd ~/work/project --open
 ```
 
 The file is written with mode 0600. A directory that does not exist is created
-with mode 0700; an existing directory keeps its mode. It never overwrites an
-existing file, is refused if the body is not a ZIP or exceeds 2 GiB, and runs
+with mode 0700; an existing directory keeps its mode. Pulling the same session again replaces
+its earlier file atomically (a symlink or directory at that name is refused), so a
+re-resume or a retry after a failed import works. It is refused if the body is
+not a ZIP or exceeds 2 GiB, and runs
 while `csl sync watch` is running (it does not take the collector lock).
 `csl import ... --open` then starts the matching native CLI (`claude --resume` or
 `codex resume`) on the imported copy. Imports allocate fresh session identities.
