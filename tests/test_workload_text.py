@@ -714,6 +714,22 @@ class WorkloadTextTests(unittest.TestCase):
         adapter,_=self.provider('claude',rows);adapter.list_sessions('claude')
         self.assertEqual(sum(row['kind']=='tool_result' for row in adapter.view_records('claude',SID)['records']),1)
 
+    def test_claude_2_1_308_print_mode_auxiliary_records_are_dropped_not_copied(self):
+        # Record shapes observed in a real 2.1.308 `claude -p` transcript; values synthetic.
+        rows=native('claude')
+        aux=[{'type':'attachment','uuid':'att1','parentUuid':rows[0]['uuid'],'sessionId':SID,'version':'2.1.308',
+              'attachment':{'type':'text','content':'private attachment '+CANARY},'rendered':'private '+CANARY,'renderedRole':'user'},
+             {'type':'atis-latch','sessionId':SID,'atis':{'private':CANARY}},
+             {'type':'api-request-shape','sessionId':SID,'version':'2.1.308','shape':{'k':CANARY},'shapeHash':'h'},
+             {'type':'api-request-blob','sessionId':SID,'hash':'h'},
+             {'type':'api-request','sessionId':SID,'version':'2.1.308','id':'r1','params':{'system':'private '+CANARY}},
+             {'type':'cost-state','sessionId':SID,'totalCostUSD':0.01,'modelUsage':{}}]
+        rows[1:1]=aux; rows[len(aux)+1]['parentUuid']='att1'
+        adapter,_=self.provider('claude',rows);adapter.list_sessions('claude')
+        view=json.dumps(adapter.view_records('claude',SID))
+        self.assertNotIn(CANARY,view);self.assertNotIn('private',view)
+        self.assertEqual(sum(row['kind']=='tool_result' for row in adapter.view_records('claude',SID)['records']),1)
+
     def test_unselected_raw_structure_is_bounded_before_projection(self):
         for provider in ('codex','claude'):
             rows=native(provider);rows[0]['discarded_metadata']=[None]*200
