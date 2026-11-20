@@ -243,9 +243,21 @@ class WorkloadChartTests(unittest.TestCase):
                      '      automountServiceAccountToken: false'):
             self.assertIn(line, out)
         self.assertNotIn('fsGroup:', out)
+        self.assertNotIn('VITRAL_ISSUER', out)
+
+    def test_terminal_host_can_target_another_stack(self):
+        result = self.terminal(**{'terminalHost.issuer': 'http://10.0.0.5:8000/native-auth/v1',
+                                  'terminalHost.gatewayUrl': 'ws://10.0.0.5:8000/terminal-host/v1/connect'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('            - name: VITRAL_ISSUER\n              value: "http://10.0.0.5:8000/native-auth/v1"\n'
+                      '            - name: VITRAL_GATEWAY_URL\n              value: "ws://10.0.0.5:8000/terminal-host/v1/connect"',
+                      result.stdout)
 
     def test_terminal_host_refuses_missing_owner_args_or_unknown_path(self):
         for settings in ({'terminalHost.expectedOwner': ''}, {'terminalHost.expectedOwner': 'operative1'},
+                         {'terminalHost.issuer': 'ftp://x/native-auth/v1', 'terminalHost.gatewayUrl': 'wss://x/c'},
+                         {'terminalHost.issuer': 'https://x/native-auth/v1'},
+                         {'terminalHost.issuer': 'https://x/native-auth/v1', 'terminalHost.gatewayUrl': 'https://x/c'},
                          {'terminalHost.args': 'null'}, {'terminalHost.path': 'ssh'},
                          {'terminalHost.image': 'test/bakeoff:latest'}, {'terminalHost.credentialSecret': 'Bad_Name'}):
             with self.subTest(settings=settings):
