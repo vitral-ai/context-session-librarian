@@ -1,0 +1,12 @@
+**
+!packaging
+packaging/**
+!packaging/claude-sole-producer
+packaging/claude-sole-producer/**
+!packaging/claude-sole-producer/Containerfile
+!packaging/claude-sole-producer/Containerfile.dockerignore
+!packaging/claude-sole-producer/inputs.json
+!packaging/claude-sole-producer/install.py
+!packaging/claude-sole-producer/prepare.py
+!packaging/claude-sole-producer/version_check.py
+!packaging/claude-sole-producer/csl-claude-prepare
