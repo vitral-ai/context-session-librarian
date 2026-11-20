@@ -101,7 +101,7 @@ class InstallTests(unittest.TestCase):
 
     def test_recipe_pins_parent_and_closed_context(self):
         recipe = (OVERLAY/'Containerfile').read_text()
-        self.assertIn('a8/collector@sha256:0fab3de834b93e63ec1008cbca51e250230de99b29c0dd6cb6b4418a3fd37305', recipe)
+        self.assertIn('a8/collector@sha256:07a751363f3b5f2eb931a1c2c62d8825916e5e76277d503f00c85baa68127aef', recipe)
         self.assertTrue(recipe.endswith('ENTRYPOINT ["/usr/local/bin/csl-claude-prepare"]\nCMD []\n'))
         ignore = (OVERLAY/'Containerfile.dockerignore').read_text().splitlines()
         self.assertEqual(ignore[0], '**')

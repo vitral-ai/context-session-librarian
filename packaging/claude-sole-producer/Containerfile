@@ -1,5 +1,5 @@
-# Parent: A8 collector built from CSL 9425f3be (session binding), immutable manifest.
-ARG COLLECTOR=crvitralsandbox33a9abb2.azurecr.io/a8/collector@sha256:0fab3de834b93e63ec1008cbca51e250230de99b29c0dd6cb6b4418a3fd37305
+# Parent: A8 collector built from CSL d1255a0c (keep-alive transport), immutable manifest.
+ARG COLLECTOR=crvitralsandbox33a9abb2.azurecr.io/a8/collector@sha256:07a751363f3b5f2eb931a1c2c62d8825916e5e76277d503f00c85baa68127aef
 FROM ${COLLECTOR} AS install
 USER 0:0
 COPY packaging/claude-sole-producer/install.py packaging/claude-sole-producer/inputs.json /build/
