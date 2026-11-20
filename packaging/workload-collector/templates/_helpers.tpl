@@ -14,8 +14,29 @@
 {{- end -}}
 
 {{- define "workload.validate" -}}
-{{- if not (has .Values.mode (list "sidecar" "daemonSet")) -}}
-{{- fail "mode must be sidecar or daemonSet" -}}
+{{- if not (has .Values.mode (list "sidecar" "daemonSet" "soleProducer")) -}}
+{{- fail "mode must be sidecar, daemonSet or soleProducer" -}}
+{{- end -}}
+{{- if eq .Values.mode "soleProducer" -}}
+{{- if ne .Values.transcripts.provider "claude" -}}
+{{- fail "soleProducer mode is qualified for the Claude sole-producer image only" -}}
+{{- end -}}
+{{- if not (regexMatch "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" .Values.soleProducer.expectSession) -}}
+{{- fail "soleProducer.expectSession must be a fresh lowercase UUID4" -}}
+{{- end -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" .Values.soleProducer.credentialSecret) -}}
+{{- fail "soleProducer.credentialSecret must name an existing Secret" -}}
+{{- end -}}
+{{- $args := .Values.soleProducer.args -}}
+{{- $pin := 0 -}}
+{{- range $i, $arg := $args -}}
+{{- if and (eq $arg "--session-id") (lt (add $i 1) (len $args)) (eq (index $args (add $i 1)) $.Values.soleProducer.expectSession) -}}
+{{- $pin = add $pin 1 -}}
+{{- end -}}
+{{- end -}}
+{{- if ne (int $pin) 1 -}}
+{{- fail "soleProducer.args must pin claude with exactly one --session-id equal to soleProducer.expectSession" -}}
+{{- end -}}
 {{- end -}}
 {{- if not (regexMatch "^https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$" .Values.identity.origin) -}}
 {{- fail "identity.origin must be one exact HTTPS origin without a path, query or credentials" -}}
@@ -72,7 +93,27 @@ securityContext:
   runAsNonRoot: true
   capabilities:
     drop: ["ALL"]
-env:
+env:{{ include "workload.env" . }}
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+volumeMounts:
+  - name: transcript
+    mountPath: /transcripts
+    readOnly: true
+  - name: collector-state
+    mountPath: /collector-state
+{{- if .Values.identity.caConfigMap }}
+  - name: collector-trust
+    mountPath: /collector-trust
+    readOnly: true
+{{- end }}
+{{- end -}}
+
+{{- define "workload.env" }}
   - name: VITRAL_COLLECTOR_CLIENT_ID
     value: vitral-workload-collector
   - name: VITRAL_COLLECTOR_ORIGIN
@@ -110,22 +151,5 @@ env:
 {{- if .Values.identity.caConfigMap }}
   - name: VITRAL_COLLECTOR_TRUST_CA
     value: /collector-trust/ca.crt
-{{- end }}
-resources:
-  requests:
-    cpu: 50m
-    memory: 64Mi
-  limits:
-    memory: 256Mi
-volumeMounts:
-  - name: transcript
-    mountPath: /transcripts
-    readOnly: true
-  - name: collector-state
-    mountPath: /collector-state
-{{- if .Values.identity.caConfigMap }}
-  - name: collector-trust
-    mountPath: /collector-trust
-    readOnly: true
 {{- end }}
 {{- end -}}

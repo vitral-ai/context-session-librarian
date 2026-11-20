@@ -191,6 +191,39 @@ class WorkloadChartTests(unittest.TestCase):
                             self.assertEqual(config.flush_seconds, int(flush or '20'))
                             self.assertEqual((config.provider, config.profile), (provider, profile))
 
+    def sole(self, **settings):
+        sid = '0b9f6b2a-1c3d-4e5f-8a7b-9c0d1e2f3a4b'
+        values = {'mode': 'soleProducer', 'transcripts.provider': 'claude', 'transcripts.profile': PROFILES['claude'],
+                  'soleProducer.image': f'test/producer@sha256:{DIGEST}', 'soleProducer.expectSession': sid,
+                  'soleProducer.credentialSecret': 'claude-token', 'soleProducer.args': '{-p,hello,--session-id,' + sid + '}'}
+        return self.render(**(values | settings))
+
+    def test_sole_producer_job_gates_claude_with_rw_and_ro_alias_of_one_volume(self):
+        result = self.sole()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout
+        self.assertEqual(re.findall(r'^kind: (\S+)$', out, re.M), ['Job'])
+        for line in ('  backoffLimit: 0', '      restartPolicy: Never', '      automountServiceAccountToken: false',
+                     '          command: ["/usr/local/bin/csl-claude-prepare"]',
+                     '          args: ["--prepare-seconds","900","--","-p","hello","--session-id","0b9f6b2a-1c3d-4e5f-8a7b-9c0d1e2f3a4b"]',
+                     '            - name: transcript\n              mountPath: /agent-private/.claude/projects\n'
+                     '            - name: transcript\n              mountPath: /transcripts\n              readOnly: true\n',
+                     '            - name: VITRAL_COLLECTOR_EXPECT_SESSION\n              value: "0b9f6b2a-1c3d-4e5f-8a7b-9c0d1e2f3a4b"',
+                     '                secretKeyRef:\n                  name: "claude-token"\n                  key: "token"',
+                     '            - name: VITRAL_COLLECTOR_PROVIDER\n              value: "claude"'):
+            self.assertIn(line, out)
+        self.assertEqual(out.count('mountPath: /agent-private/.claude/projects\n              readOnly'), 0)
+        self.assertNotIn('supervisor', out)
+
+    def test_sole_producer_refuses_other_providers_bad_session_missing_secret_or_args(self):
+        for settings in ({'transcripts.provider': 'codex', 'transcripts.profile': PROFILES['codex']},
+                         {'soleProducer.expectSession': 'not-a-uuid'}, {'soleProducer.expectSession': '0B9F6B2A-1C3D-4E5F-8A7B-9C0D1E2F3A4B'},
+                         {'soleProducer.credentialSecret': ''}, {'soleProducer.args': '{}'}, {'soleProducer.args': '{-p,hello}'},
+                         {'soleProducer.args': '{-p,hello,--session-id,1b9f6b2a-1c3d-4e5f-8a7b-9c0d1e2f3a4b}'},
+                         {'soleProducer.image': 'test/producer:latest'}):
+            with self.subTest(settings=settings):
+                self.assertNotEqual(self.sole(**settings).returncode, 0)
+
     def test_daemonset_uses_only_explicit_readonly_claim_and_private_state(self):
         result = self.render(mode='daemonSet', **{'daemonSet.narrowSameOwnerExport': 'true',
                                                 'daemonSet.existingClaim': 'approved-transcripts'})

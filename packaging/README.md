@@ -76,3 +76,27 @@ the local identity and registry fixtures, and synthetic transcript data.
 Measure complete-record write to ACK (3 seconds) and foreground UI visibility
 after ACK (2 seconds) separately. Keep a final harness demonstration and
 Azure Container Apps qualification as separate evidence.
+
+## Sole-producer mode (Claude)
+
+`mode: soleProducer` renders one Job instead of the sidecar or DaemonSet. Its
+single container is the reviewed [Claude sole-producer image](claude-sole-producer/README.md).
+It mounts one transcript `emptyDir` read-write at the native projects path and
+read-only at `/transcripts`, and the gate checks that alias. On one USR1 the gate
+hands the literal claude argv to the Runner, which owns producer stop, EOF and the
+final flush: the completion path that A8 qualified. Set `soleProducer.image`
+(digest-pinned), `soleProducer.expectSession` (fresh UUID4),
+`soleProducer.credentialSecret` (an existing Secret holding the Claude credential)
+and `soleProducer.args`. The args must include exactly one `--session-id`
+equal to `expectSession`; only that session is collected.
+
+Operate it with `kubectl exec`, never through shared logs:
+
+```sh
+kubectl exec job/<release>-collector -- csl-workload-collector --enroll   # prints the public code; approve it
+kubectl exec job/<release>-collector -- sh -c 'kill -USR1 1'             # start the agent
+```
+
+`--enroll` runs the existing person-approved device flow for this replica's own
+STATE. It prints only the public code, verification URI and the final state.
+It is one-shot, so a spent or expired attempt needs a fresh pod.

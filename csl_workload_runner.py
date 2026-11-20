@@ -37,6 +37,8 @@ from csl_workload_launch_binding import LaunchAcceptanceDriver, LaunchObservatio
 
 POLL_SECONDS = 0.1
 MAX_DRAIN = 256*1024
+# Slower than the server's interval on purpose: each poll that meets a transient 5xx voids the code.
+ENROLL_POLL_SECONDS = 10
 PASS_SECONDS = 60
 WRITER_SECONDS = 5
 REAP_SECONDS = 0.5
@@ -679,9 +681,39 @@ def worker_main(receipt, parent, deadline, observation_fd=None):
     private_json(receipt, {'sequence': receipt.stem, 'scope': scope(config), **result})
 
 
+def enroll(config, *, out=sys.stdout, sleep=time.sleep, timeout=600):
+    """Person-approved device enrollment for this replica's own STATE.
+
+    Prints only the public consent (code, verification URI, lifetime) and the
+    final state; keys and tokens never leave STATE. One-shot: an existing
+    journal refuses a new begin, and there is no automatic re-enrollment."""
+    config = checked_config(config)
+    http = WorkloadHTTP(config.origin, attempts=1, ca_file=config.ca_file)
+    tokens = WorkloadTokens(child(config.state_root, 'auth'), config.origin, config.location, http=http,
+                            key=WorkloadKey(config.state_root/'identity'))
+    def emit(value): out.write(json.dumps(value, separators=(',', ':')) + '\n'); out.flush()
+    if tokens.status()['state'] == 'ready':
+        emit({'state': 'ready'}); return 0
+    try:
+        emit({'consent': tokens.begin(timeout=timeout)})
+    except SyncError as error:
+        emit({'state': 'refused', 'code': error.code}); return 2
+    while True:
+        try:
+            state = tokens.poll()['state']
+        except SyncError as error:
+            emit({'state': 'refused', 'code': error.code}); return 2
+        if state == 'ready':
+            identity = tokens.status()
+            emit({'state': 'ready', 'account_id': identity['account_id'], 'device_id': identity['device_id']}); return 0
+        sleep(ENROLL_POLL_SECONDS)
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
+        if argv == ['--enroll']:
+            return enroll(Configuration.from_environment(os.environ))
         if len(argv) in (4, 5) and argv[0] == '--worker':
             worker_main(argv[1], int(argv[2]), float(argv[3]), int(argv[4]) if len(argv) == 5 else None); return 0
         if argv and argv[0] != '--': raise SyncError('workload_command_refused')

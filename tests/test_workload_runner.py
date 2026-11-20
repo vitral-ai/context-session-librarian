@@ -857,3 +857,42 @@ class KeepAliveTransportTests(unittest.TestCase):
         self.assertEqual(len(connections), 2)
         with self.assertRaises(SyncError):
             client.request('https://127.0.0.1:' + str(server.server_port) + '/session-registry/v1/other-host')
+
+
+class EnrollCommandTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='workload-enroll-'); self.addCleanup(self.tmp.cleanup)
+        self.config = config_at(Path(self.tmp.name))
+
+    def run_enroll(self, tokens):
+        import io as _io
+        import csl_workload_runner as module
+        out = _io.StringIO()
+        with patch.object(module, 'WorkloadTokens', lambda *a, **k: tokens):
+            code = module.enroll(self.config, out=out, sleep=lambda _: None)
+        return code, [json.loads(line) for line in out.getvalue().splitlines()]
+
+    def test_prints_only_public_consent_then_ready_and_never_tokens(self):
+        polls = iter([{'state': 'pending'}, {'state': 'ready'}])
+        tokens = Mock()
+        tokens.status.side_effect = [{'state': 'signed_out', 'account_id': None, 'device_id': None},
+                                     {'state': 'ready', 'account_id': 'a'*24, 'device_id': 'ses_x'}]
+        tokens.begin.return_value = {'user_code': 'ABCD-EFGH', 'verification_uri': 'https://x/device', 'expires_in': 600, 'interval': 5}
+        tokens.poll.side_effect = lambda: next(polls)
+        code, lines = self.run_enroll(tokens)
+        self.assertEqual(code, 0)
+        self.assertEqual(lines[0], {'consent': tokens.begin.return_value})
+        self.assertEqual(lines[-1], {'state': 'ready', 'account_id': 'a'*24, 'device_id': 'ses_x'})
+        self.assertNotIn('token', json.dumps(lines).replace('user_code', ''))
+
+    def test_refusals_report_the_code_and_ready_state_does_not_begin_again(self):
+        tokens = Mock(); tokens.status.return_value = {'state': 'signed_out', 'account_id': None, 'device_id': None}
+        tokens.begin.side_effect = SyncError('http_502')
+        self.assertEqual(self.run_enroll(tokens), (2, [{'state': 'refused', 'code': 'http_502'}]))
+        tokens = Mock(); tokens.status.return_value = {'state': 'signed_out', 'account_id': None, 'device_id': None}
+        tokens.begin.return_value = {'user_code': 'ABCD-EFGH', 'verification_uri': 'u', 'expires_in': 600, 'interval': 5}
+        tokens.poll.side_effect = SyncError('workload_approval_expired')
+        self.assertEqual(self.run_enroll(tokens)[1][-1], {'state': 'refused', 'code': 'workload_approval_expired'})
+        tokens = Mock(); tokens.status.return_value = {'state': 'ready', 'account_id': 'a', 'device_id': 'd'}
+        self.assertEqual(self.run_enroll(tokens), (0, [{'state': 'ready'}]))
+        tokens.begin.assert_not_called()
