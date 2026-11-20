@@ -815,3 +815,45 @@ class UploaderTests(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+
+
+class KeepAliveTransportTests(unittest.TestCase):
+    def test_one_tls_connection_is_reused_within_a_pass_and_errors_drop_it(self):
+        import http.server
+        tmp = tempfile.TemporaryDirectory(prefix='workload-keepalive-'); self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name); cert, tls_key = root/'ca.crt', root/'tls.pem'
+        subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+            '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost', '-keyout', str(tls_key), '-out', str(cert)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        connections = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.1'
+            def setup(self):
+                super().setup(); connections.append(self.client_address)
+            def log_message(self, *args): pass
+            def do_GET(self):
+                self.rfile.read(int(self.headers.get('Content-Length') or 0))
+                status, body = (404, b'{"error":{"code":"not_found"}}') if self.path.endswith('/missing') else (200, b'{"ok":true}')
+                self.send_response(status); self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
+            do_PUT = do_GET
+
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); tls.load_cert_chain(cert, tls_key)
+        server.socket = tls.wrap_socket(server.socket, server_side=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        origin = 'https://localhost:' + str(server.server_port)
+        client = DeadlineHTTP(origin, boot_clock()+30, ca_file=str(cert), attempts=1)
+        base = origin + '/session-registry/v1'
+        for path in ('/a', '/b', '/c'):
+            self.assertEqual(client.request(base + path, 'PUT', data=b'{}'), {'ok': True})
+        self.assertEqual(len(connections), 1)
+        with self.assertRaises(SyncError) as refused:
+            client.request(base + '/missing')
+        self.assertEqual(refused.exception.code, 'not_found')
+        self.assertEqual(client.request(base + '/d'), {'ok': True})
+        self.assertEqual(len(connections), 2)
+        with self.assertRaises(SyncError):
+            client.request('https://127.0.0.1:' + str(server.server_port) + '/session-registry/v1/other-host')
