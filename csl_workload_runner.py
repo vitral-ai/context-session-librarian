@@ -3,6 +3,7 @@ from contextlib import contextmanager
 import ctypes
 import hashlib
 import http.client
+import io
 import json
 import math
 import os
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import time
 import uuid
+import urllib.error
 import urllib.request
 import urllib.parse
 
@@ -34,6 +36,7 @@ from csl_workload_observation_agent import RemoteObservation
 from csl_workload_launch_binding import LaunchAcceptanceDriver, LaunchObservation
 
 POLL_SECONDS = 0.1
+MAX_DRAIN = 256*1024
 PASS_SECONDS = 60
 WRITER_SECONDS = 5
 REAP_SECONDS = 0.5
@@ -158,12 +161,56 @@ class DeadlineHTTP(WorkloadHTTP):
             def https_open(self, request):
                 return self.do_open(Connection, request, context=self._context)
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(), Handler(context=context))
-        opener = self.opener
+        origin = urllib.parse.urlsplit(self.origin.value)
+        host, port = origin.hostname, origin.port or 443
+
+        class Body:
+            """Response body on the kept-alive connection; drained on exit so it can be reused."""
+            def __init__(self, guard, response): self.guard, self.response = guard, response
+            def read(self, size=-1): return self.response.read(size)
+            def __enter__(self): return self
+            def __exit__(self, *exc):
+                try:
+                    if not self.response.isclosed() and len(self.response.read(MAX_DRAIN + 1)) > MAX_DRAIN:
+                        self.guard.drop()
+                except Exception:
+                    self.guard.drop()
+                return False
+
         class Guard:
+            """One HTTPS connection per pass (no per-request TLS handshake). Same deadline
+            checks, exact origin, TLS context and no-redirect rule as the urllib opener."""
+            def __init__(self): self.connection = None
+            def drop(self):
+                if self.connection is not None: self.connection.close()
+                self.connection = None
             def open(self, request, timeout):
                 remaining = deadline-boot_clock()
                 if remaining <= 0: raise SyncError('workload_flush_deadline')
-                return opener.open(request, timeout=min(timeout, remaining))
+                url = urllib.parse.urlsplit(request.full_url)
+                if url.scheme != 'https' or url.hostname != host or (url.port or 443) != port or url.fragment:
+                    raise SyncError('workload_origin_refused')
+                limit = min(timeout, remaining)
+                if self.connection is None:
+                    self.connection = Connection(host, port, timeout=limit, context=context)
+                else:
+                    self.connection.timeout = limit
+                    if self.connection.sock is not None: self.connection.sock.settimeout(limit)
+                path = url.path + ('?' + url.query if url.query else '')
+                try:
+                    self.connection.request(request.get_method(), path, body=request.data,
+                                            headers=dict(request.header_items()))
+                    response = self.connection.getresponse()
+                except BaseException:
+                    self.drop(); raise
+                if response.status >= 300:
+                    # Redirects stay refused; the error body is read here and the connection dropped.
+                    try: raw = response.read(MAX_DRAIN)
+                    except Exception: raw = b''
+                    headers, status, reason = response.headers, response.status, response.reason
+                    self.drop()
+                    raise urllib.error.HTTPError(request.full_url, status, reason, headers, io.BytesIO(raw))
+                return Body(self, response)
         self.opener = Guard()
 
     def request(self, *args, **kwargs):
