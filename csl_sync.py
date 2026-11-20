@@ -1,16 +1,20 @@
 """Explicit opt-in sync CLI. No startup side effects, daemon or provider parsing."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import sys
+import tempfile
 import time
+import urllib.parse
 
 from csl_sync_auth import Tokens, discover
 from csl_sync_engine import Collector, PROVIDERS, Providers
 from csl_sync_http import Registry, checked_url
-from csl_sync_state import State, SyncError, exclusive, now, private_json
+from csl_sync_state import State, SyncError, exclusive, now, private_directory, private_json
 from csl_sync_watch import pass_lock
 
 WARNING = ('Raw sync uploads the complete transcript bytes and supported companion files, '
@@ -92,6 +96,9 @@ def command(args, csl):
                 result = Collector(state, registry, None).register()
                 print(json.dumps({'device_id': state.get('device_id'), 'registered': True}))
                 return
+            if action == 'pull':
+                print(json.dumps(pull(registry, args.session_id, args.out_dir or state.root / 'pulled'), separators=(',', ':')))
+                return
             providers = Providers(state.root)
             collector = Collector(state, registry, providers)
             result = collector.run(days=None if args.all else args.days, providers=args.providers or PROVIDERS)
@@ -109,6 +116,44 @@ def command(args, csl):
         raise SystemExit(2) from None
     finally:
         if state is not None: state.close()
+
+
+MAX_PULL = 2 * 1024 ** 3
+SESSION_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}')
+
+
+def pull(registry, session_id, out_dir):
+    """Fetch one package the signed-in account owns into a private file.
+
+    The registry derives the owner from this device's own token, so another
+    account's session id is not_found. Nothing is written for a refused request.
+    """
+    if SESSION_ID.fullmatch(session_id) is None:
+        raise SyncError('invalid_session_id')
+    directory = private_directory(out_dir)
+    target = directory / (session_id + '.zip')
+    if target.exists() or target.is_symlink():
+        raise SyncError('output_exists')
+    fd, temporary = tempfile.mkstemp(prefix='.pull-', suffix='.part', dir=directory)
+    try:
+        os.fchmod(fd, 0o600)
+        digest = hashlib.sha256()
+        class Sink:
+            def write(self, chunk):
+                digest.update(chunk)
+                os.write(fd, chunk)
+        size = registry.download('/sessions/' + urllib.parse.quote(session_id, safe='') + '/package', Sink(), MAX_PULL)
+        os.fsync(fd)
+        os.close(fd); fd = None
+        with open(temporary, 'rb') as check:
+            if check.read(4) != b'PK\x03\x04':
+                raise SyncError('invalid_server_response')
+        os.link(temporary, target)
+        os.unlink(temporary); temporary = None
+    finally:
+        if fd is not None: os.close(fd)
+        if temporary is not None: os.unlink(temporary)
+    return {'session_id': session_id, 'path': str(target), 'bytes': size, 'sha256': digest.hexdigest()}
 
 
 def positive(value):
@@ -151,6 +196,9 @@ def add_commands(subparsers, csl):
     signin.add_argument('--manual-browser', action='store_true', help='Write the authorization URL to a private state file, never logs; open it in your own system browser.')
     actions.add_parser('status', help='Local cached IDs, byte counts, pending states and last error; never tokens or transcript text.')
     actions.add_parser('register-device', help='Register this signed-in installation without uploading sessions.')
+    pull_parser = actions.add_parser('pull', help='Download one of this signed-in account\'s sessions as a package ZIP for csl import. Uses this installation\'s own sign-in; no token in arguments or output.')
+    pull_parser.add_argument('session_id')
+    pull_parser.add_argument('--out-dir', type=Path, help='Private output directory (default: <sync home>/pulled); created with mode 0700.')
     actions.add_parser('sign-out', help='Disable this local installation and erase stored tokens; stop watch first. Does not revoke remotely.')
     for action in ('include','exclude'):
         selector = actions.add_parser(action, help='Local selection only; never deletes remote content.')

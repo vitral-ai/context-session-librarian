@@ -84,6 +84,37 @@ class HTTP:
             self.sleep(failure.retry_after if failure.retry_after is not None else min(2 ** attempt, 8))
 
 
+    def download(self, url, headers, sink, limit):
+        """Stream one bounded binary body (never JSON-decoded, never logged)."""
+        try:
+            request = urllib.request.Request(url, method='GET', headers=headers or {})
+            self.request_created(request)
+            with self.opener.open(request, timeout=self.timeout) as response:
+                total = 0
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        return total
+                    total += len(chunk)
+                    if total > limit:
+                        raise SyncError('response_limit_exceeded')
+                    sink.write(chunk)
+        except urllib.error.HTTPError as error:
+            try:
+                value = json.loads(error.read(256 * 1024))
+                detail = value.get('error', {})
+                code = detail.get('code') if isinstance(detail, dict) else detail
+            except (ValueError, UnicodeError, AttributeError):
+                code = None
+            finally:
+                error.close()
+            if not isinstance(code, str) or code not in self.error_codes:
+                code = 'http_' + str(error.code)
+            raise SyncError(code, status=error.code, retryable=error.code in (408, 429, 500, 502, 503, 504)) from None
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException):
+            raise SyncError('registry_unavailable', retryable=True) from None
+
+
 class Registry:
     def __init__(self, endpoint, tokens, *, http=None):
         self.endpoint = checked_url(endpoint)
@@ -109,6 +140,23 @@ class Registry:
             try:
                 return self.http.request(self.endpoint + path, method, data=binary, headers=supplied,
                                          retry=(method in ('GET', 'PUT', 'DELETE') or bool(key)))
+            except SyncError as error:
+                if error.code == 'session_revoked':
+                    self.tokens.revoke_locally()
+                    raise
+                if error.status != 401 or auth_attempt:
+                    raise
+                self.tokens.access_token(force_refresh=True)
+
+    def download(self, path, sink, limit):
+        """GET a binary body with the signed-in device's own access token."""
+        if not path.startswith('/'):
+            raise SyncError('invalid_registry_path')
+        headers = {'X-Request-ID': str(uuid.uuid4()), 'X-App-Version': VERSION}
+        for auth_attempt in range(2):
+            headers['Authorization'] = 'Bearer ' + self.tokens.access_token()
+            try:
+                return self.http.download(self.endpoint + path, headers, sink, limit)
             except SyncError as error:
                 if error.code == 'session_revoked':
                     self.tokens.revoke_locally()

@@ -51,6 +51,28 @@ configured at sign-in with `--refresh-replay-grace-seconds 30` (maximum 30; defa
 `refresh_outcome_unknown` requires a new browser sign-in. `invalid_grant` or
 revocation clears stored credentials and stops collection.
 
+## Pull a session onto this machine
+
+`csl sync pull SESSION_ID` downloads one session package the signed-in account
+owns, using this installation's own sign-in. The registry derives the owner from
+that token, so another account's session id is refused (`not_found`) and nothing
+is written. No token appears in arguments, output or shell history.
+
+```sh
+csl sync pull SESSION_ID --out-dir ~/.csl-resume
+csl import ~/.csl-resume/SESSION_ID.zip --cwd ~/work/project --open
+```
+
+The file is created in a private (0700) directory with mode 0600, never
+overwrites an existing file, and is refused if it is not a ZIP or exceeds 2 GiB.
+`csl import ... --open` then starts the matching native CLI (`claude --resume` or
+`codex resume`) on the imported copy. Imports allocate fresh session identities.
+
+Prerequisite on a container or headless host: sign in and register the device
+first (`csl sync sign-in --manual-browser --callback-port PORT ...`, with that
+loopback port forwarded to a browser you control, then `csl sync register-device`).
+A device-code sign-in is not available yet.
+
 ## Scope and status
 
 ```sh
