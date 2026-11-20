@@ -1,0 +1,23 @@
+# Parent: the inspected corrected A8 collector (CSL 6efd169a), immutable manifest.
+ARG COLLECTOR=crvitralsandbox33a9abb2.azurecr.io/a8/collector@sha256:040d512144779297fd6620c8b523f73d9e35efe879908e9c4599129704cb57c1
+FROM ${COLLECTOR} AS install
+USER 0:0
+COPY packaging/claude-sole-producer/install.py packaging/claude-sole-producer/inputs.json /build/
+RUN python3 -B -I /build/install.py /build/inputs.json /out
+
+FROM ${COLLECTOR}
+USER 0:0
+COPY --from=install /out /opt/vitral/claude
+COPY packaging/claude-sole-producer/prepare.py /opt/vitral/claude/prepare.py
+COPY packaging/claude-sole-producer/version_check.py /build/version_check.py
+COPY packaging/claude-sole-producer/csl-claude-prepare /usr/local/bin/csl-claude-prepare
+RUN chmod 0444 /opt/vitral/claude/prepare.py /build/version_check.py \
+    && chmod 0555 /usr/local/bin/csl-claude-prepare \
+    && install -d -m 0700 -o 10001 -g 10001 /agent-private /agent-private/.claude \
+    && install -d -m 0750 -o 10001 -g 10001 /agent-private/.claude/projects
+ENV HOME=/agent-private CLAUDE_CONFIG_DIR=/agent-private/.claude DISABLE_AUTOUPDATER=1
+USER 10001:10001
+RUN python3 -B -I /build/version_check.py
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/csl-claude-prepare"]
+CMD []

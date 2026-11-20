@@ -1,0 +1,9 @@
+{
+  "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.308.tgz",
+  "size": 132044055,
+  "sha256": "f329748feb169a1bcddb578f0195af810a1a5287ebf629728464821490b04333",
+  "integrity": "sha512-ffUryevpH7POStPJ/xpUI5R1ozYbH9o/Dbh/xPSmyVJehELnRMZmRnejdQmq0TejOW/SbNnJFhCGMgwIsOqFTQ==",
+  "members": {"package/claude": 292232560, "package/LICENSE.md": 147, "package/package.json": 289, "package/README.md": 150},
+  "install": {"package/claude": "bin/claude", "package/LICENSE.md": "licenses/LICENSE.md"},
+  "version": "2.1.308 (Claude Code)"
+}
