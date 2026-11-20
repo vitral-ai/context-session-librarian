@@ -34,7 +34,7 @@ spec:
         app.kubernetes.io/name: {{ include "workload.name" . }}
     spec:
       automountServiceAccountToken: false
-      # No fsGroup: a group-writable volume is refused by the host agent as an insecure parent.
+      # No fs group on purpose: a group-writable volume is refused by the host agent as an insecure parent.
       terminationGracePeriodSeconds: {{ int .Values.terminationGracePeriodSeconds }}
       initContainers:
         - name: volume-owner
