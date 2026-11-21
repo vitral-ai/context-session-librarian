@@ -62,7 +62,6 @@ class PreparedProvider:
                 raise SyncError(self.duplicate_code)
             if self.capture is None: verify_prefix(root, relative, cursor)
             else: verify_prefix(root, relative, cursor, capture=self.capture)
-            # Preserve Gemini's existing source-key mapping across the extraction.
             source_key = str(Path(root).absolute()) + '/' + relative
             path = self.store.publish(source_key, output)
             self.store.checkpoint(source_key, cursor, self.policy_fingerprint, output)

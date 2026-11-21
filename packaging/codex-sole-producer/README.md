@@ -4,7 +4,7 @@ Source-only, Codex 0.169.0 first. This is NOT the default collector/watch chart,
 a published artifact, login, model turn, deployment or A8 result. The generic
 collector and all of its product modules stay unchanged. Env4 owns Job wiring
 and actual execution, env7 owns acceptance, and root commissions live actions.
-Claude/Gemini require separate artifact, normal-login and native qualifications.
+Claude requires separate artifact, normal-login and native qualifications.
 
 ## Immutable inputs and offline assembly
 

@@ -30,7 +30,6 @@ DIGEST = '1' * 64
 PROFILES = {
     'codex': 'codex-0.169.0-text-v1',
     'claude': 'claude-2.1.308-text-v1',
-    'gemini': 'gemini-cli-0.68.0-jsonl-text-v1',
 }
 
 
@@ -152,7 +151,7 @@ class WorkloadChartTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn(f'name: VITRAL_COLLECTOR_PROFILE\n              value: "{profile}"',
                                   result.stdout)
-            for wrong in ('auto', PROFILES['gemini'], 'false', '42'):
+            for wrong in ('auto', 'unqualified-text-v1', 'false', '42'):
                 result = self.render(mode=mode, **options, **{'transcripts.profile': wrong})
                 self.assertNotEqual(result.returncode, 0, result.stdout)
             result = self.render(mode=mode, omit=('transcripts.profile',), **options)
@@ -300,7 +299,7 @@ class ContainerAppsProfileTests(unittest.TestCase):
 
     def test_launcher_refuses_missing_auto_mismatch_and_unknown_provider(self):
         for provider, profile in (('codex', None), ('codex', 'auto'), ('codex', PROFILES['claude']),
-                                  ('antigravity', PROFILES['gemini']), (None, PROFILES['codex'])):
+                                  ('antigravity', PROFILES['codex']), (None, PROFILES['codex'])):
             with self.subTest(provider=provider, profile=profile):
                 settings = {}
                 if provider is not None:

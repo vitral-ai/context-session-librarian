@@ -1,11 +1,11 @@
 """Explicit-source Codex/Claude workload text projections, never native packages."""
+from datetime import datetime
 from itertools import chain
 import hashlib
 import re
 from urllib.parse import urlsplit
 
 from csl_canonical import strict_json
-from csl_gemini_workload import identifier, timestamp
 from csl_sync_providers import _view
 from csl_sync_state import SyncError
 from csl_workload_provider import PreparedProvider
@@ -39,6 +39,22 @@ CODEX_EVENTS = {'task_started', 'task_complete', 'item_started', 'item_completed
 
 def refused():
     raise SyncError('workload_text_format_refused')
+
+
+def identifier(value):
+    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', value):
+        refused()
+    return value
+
+
+def timestamp(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        return value if parsed.tzinfo is not None else None
+    except ValueError:
+        return None
 
 
 def selected(value, names):

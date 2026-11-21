@@ -34,9 +34,8 @@ only accepted pairs. Enabled workloads reject absent, automatic, or mismatched
 profiles before launch. The packaging does not execute the harness or inspect
 its home to infer a version or transcript layout.
 The transcript mount `/transcripts` contains only the selected provider's
-declared source layout. For Gemini CLI, export only the approved chats
-subtree for the qualified native format. Do not mount its home or project
-registry to discover transcripts. Gemini CLI and Antigravity are distinct.
+declared source layout. Do not mount the harness home or a project
+registry to discover transcripts.
 The image owns path confinement, complete-record
 sanitization, deterministic ACK offsets and bounded stop behavior. It refuses
 unsupported formats or endpoint changes instead of falling back to raw sync.

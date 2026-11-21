@@ -18,7 +18,6 @@ import urllib.error
 import urllib.request
 import urllib.parse
 
-from csl_gemini_workload import WorkloadGeminiProvider
 from csl_sync_engine import Collector, digest
 from csl_sync_http import Registry, NoRedirect
 from csl_sync_state import State, SyncError, exclusive, private_json
@@ -374,10 +373,9 @@ def run_pass(config, deadline, composition=None, expected_worker=None):
         ordered = selected[cursor:]+selected[:cursor]
         inputs = tuple((config.transcript_root, path) for path in ordered)
         projection = child(config.state_root, 'projection')
-        adapter = (WorkloadGeminiProvider(inputs, projection, bounds=limits) if config.provider == 'gemini'
-                   else WorkloadTextProvider(config.provider, inputs, projection, bounds=limits,
+        adapter = WorkloadTextProvider(config.provider, inputs, projection, bounds=limits,
                         expected_session=config.expect_session,
-                        capture=http.observation if isinstance(http.observation, LaunchObservation) else None))
+                        capture=http.observation if isinstance(http.observation, LaunchObservation) else None)
         state = State(sync)
         try:
             state.set('device_id', identity['device_id'])
