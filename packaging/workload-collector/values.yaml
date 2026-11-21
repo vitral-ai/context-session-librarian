@@ -45,6 +45,9 @@ terminalHost:
   # Optional: point the host at another stack (e.g. local Tilt); empty keeps the image's DEV defaults.
   issuer: ""
   gatewayUrl: ""
+  # Optional: a collector native sidecar streams the shared terminal's Claude transcripts
+  # (transcript emptyDir at /agent-transcripts; the workload links CLAUDE_CONFIG_DIR/projects to it).
+  collector: false
   credentialSecret: ""
   credentialKey: CLAUDE_CODE_OAUTH_TOKEN
   storage: 1Gi
