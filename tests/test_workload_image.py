@@ -58,7 +58,7 @@ class WorkloadImageTests(unittest.TestCase):
                     'm=json.load(open(sys.argv[1]+"/runtime-manifest.json")); '
                     '[importlib.import_module(n[:-3]) for n in m["sha256"] if n.endswith(".py")]; '
                     'from csl_workload_config import PROVIDER_PROFILES; '
-                    'assert set(PROVIDER_PROFILES)=={"codex","claude","gemini"}; '
+                    'assert set(PROVIDER_PROFILES)=={"codex","claude","antigravity"}; '
                     'from csl_workload_observation_driver import runtime_fingerprint; '
                     'assert runtime_fingerprint()==sys.argv[2]')
             result = subprocess.run([sys.executable, '-E', '-s', '-S', '-c', code, str(output), runtime_fingerprint()],

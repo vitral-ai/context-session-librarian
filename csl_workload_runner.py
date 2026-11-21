@@ -18,10 +18,11 @@ import urllib.error
 import urllib.request
 import urllib.parse
 
-from csl_gemini_workload import WorkloadGeminiProvider
 from csl_sync_engine import Collector, digest
 from csl_sync_http import Registry, NoRedirect
 from csl_sync_state import State, SyncError, exclusive, private_json
+from csl_antigravity import FormatError as AntigravityFormatError, inventory as antigravity_inventory
+from csl_antigravity_workload import WorkloadAntigravityProvider, source_id as antigravity_source_id
 from csl_text_workload import WorkloadTextProvider
 from csl_workload_auth import WorkloadTokens, boot_clock
 from csl_workload_config import Configuration, PREFIX
@@ -86,7 +87,7 @@ def checked_config(config):
     return Configuration.from_environment(environment(config))
 
 
-def sources(root, *, files=32):
+def sources(root, *, files=32, suffix='.jsonl'):
     """Bounded transcript-only mount walk; no symlink, home or referenced-file discovery."""
     result, visited = [], 0
     def walk(fd, prefix='', depth=0):
@@ -105,7 +106,7 @@ def sources(root, *, files=32):
                     finally: os.close(sub)
                 elif not stat.S_ISREG(info.st_mode):
                     raise SyncError('workload_source_refused')
-                elif entry.name.endswith('.jsonl'):
+                elif entry.name.endswith(suffix):
                     result.append(relative)
                     if len(result) > files: raise SyncError('workload_source_limit')
     try:
@@ -118,9 +119,14 @@ def sources(root, *, files=32):
     return tuple(sorted(result))
 
 
+def source_suffix(config):
+    # Antigravity keeps one SQLite DB per conversation; only conversations/<uuid>.db is a source.
+    return '.db' if config.provider == 'antigravity' else '.jsonl'
+
+
 def bound_sources(config):
     """Owner-pinned session: only <project>/<expected>.jsonl may exist before any upload."""
-    selected = sources(config.transcript_root)
+    selected = sources(config.transcript_root, suffix=source_suffix(config))
     if config.expect_session is not None and any(
             len(path.split('/')) != 2 or path.split('/')[1] != config.expect_session+'.jsonl' for path in selected):
         raise SyncError('workload_session_binding_refused')
@@ -309,6 +315,14 @@ def source_manifest(config, adapter):
     manifest = []
     for (_, relative), entry in zip(adapter.sources, adapter.prepared.values()):
         cursor = entry['source_cursor']
+        if config.provider == 'antigravity':
+            # Rewrite-mode SQLite: the DB/WAL inventory must still equal the projected snapshot.
+            try: current = antigravity_inventory(config.transcript_root, antigravity_source_id(relative))
+            except AntigravityFormatError: raise SyncError('source_changed') from None
+            if [{key: item[key] for key in ('file_key', 'complete_length', 'sha256')} for item in current] != cursor['files']:
+                raise SyncError('source_changed')
+            manifest.append({'path': relative, **cursor})
+            continue
         if cursor['partial']: raise SyncError('workload_source_incomplete')
         verify_prefix(config.transcript_root, relative, cursor)
         with opened_source(config.transcript_root, relative) as source:
@@ -316,7 +330,7 @@ def source_manifest(config, adapter):
             if info.st_size != cursor['complete_length'] or (info.st_dev, info.st_ino) != (cursor['device'], cursor['inode']):
                 raise SyncError('source_changed')
         manifest.append({'path': relative, **cursor})
-    if sources(config.transcript_root) != tuple(sorted(row['path'] for row in manifest)):
+    if sources(config.transcript_root, suffix=source_suffix(config)) != tuple(sorted(row['path'] for row in manifest)):
         raise SyncError('source_changed')
     return manifest
 
@@ -374,8 +388,9 @@ def run_pass(config, deadline, composition=None, expected_worker=None):
         ordered = selected[cursor:]+selected[:cursor]
         inputs = tuple((config.transcript_root, path) for path in ordered)
         projection = child(config.state_root, 'projection')
-        adapter = (WorkloadGeminiProvider(inputs, projection, bounds=limits) if config.provider == 'gemini'
-                   else WorkloadTextProvider(config.provider, inputs, projection, bounds=limits,
+        adapter = (WorkloadAntigravityProvider(inputs, projection, bounds=limits)
+                   if config.provider == 'antigravity' else
+                   WorkloadTextProvider(config.provider, inputs, projection, bounds=limits,
                         expected_session=config.expect_session,
                         capture=http.observation if isinstance(http.observation, LaunchObservation) else None))
         state = State(sync)

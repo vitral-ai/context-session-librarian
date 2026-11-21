@@ -28,7 +28,7 @@ class OriginTests(unittest.TestCase):
     def test_canonical_https_origin_and_every_request_namespace(self):
         policy = Origin('https://identity.example.test')
         for path in ('/native-auth/v1/token', '/session-registry/v1/limits',
-                     '/session-registry/v1/sessions/gemini/fixture/files?limit=100'):
+                     '/session-registry/v1/sessions/codex/fixture/files?limit=100'):
             self.assertEqual(policy.endpoint(policy.value+path), policy.value+path)
         for value in ('http://identity.example.test', 'https://identity.example.test/',
                       'https://user@identity.example.test', 'https://identity.example.test?x=1',
