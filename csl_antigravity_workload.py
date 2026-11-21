@@ -41,6 +41,8 @@ class WorkloadAntigravityProvider(PreparedProvider):
                 raise SyncError('workload_source_refused')
         self.sources = sources
         self.store = ProjectionStore(store_root, self.bounds)
+        self.scratch = self.store.private_root / 'antigravity-read'
+        self.scratch.mkdir(mode=0o700, exist_ok=True)
         self.redactor = Redactor(self.bounds, extra_literals)
         self.prepared = {}
 
@@ -52,7 +54,8 @@ class WorkloadAntigravityProvider(PreparedProvider):
     def _read(self, root, relative):
         sid = source_id(relative)
         try:
-            with native.snapshot(Path(root), sid) as (db, files):
+            # Private scratch under the collector state: the image root filesystem is read-only.
+            with native.snapshot(Path(root), sid, scratch=self.scratch) as (db, files):
                 info = native.metadata(db, sid)
                 rows = [{name: row.get(name) for name in VIEW_FIELDS} for row in native.views(db, 16000)]
         except native.FormatError as error:
