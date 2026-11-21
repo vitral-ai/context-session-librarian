@@ -30,6 +30,7 @@ DIGEST = '1' * 64
 PROFILES = {
     'codex': 'codex-0.169.0-text-v1',
     'claude': 'claude-2.1.308-text-v1',
+    'antigravity': 'antigravity-1.5.9-sqlite-text-v1',
 }
 
 

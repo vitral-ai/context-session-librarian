@@ -13,8 +13,9 @@ prepared-view boundary without enabling the CLI.
 The workload providers read explicitly selected transcript files beneath
 explicit, non-symlink roots. They never discover a harness home, project
 registry, credential file, SQLite database or WAL. The qualified formats are
-the Codex and Claude Code text profiles. Antigravity remains a distinct desktop
-provider. The Gemini CLI workload profile was removed in November 2026.
+the Codex and Claude Code text profiles and `antigravity-1.5.9-sqlite-text-v1`
+(`csl_antigravity_workload`), which projects private copies of
+`conversations/<uuid>.db` into the same redacted, view-only text boundary. The Gemini CLI workload profile was removed in November 2026.
 
 ## Sanitized Coordinates
 

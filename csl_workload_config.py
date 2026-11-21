@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import re
 
+from csl_antigravity_workload import PROFILE as ANTIGRAVITY_PROFILE
 from csl_sync_state import SyncError
 from csl_text_workload import PROFILES
 from csl_workload_http import Origin
@@ -13,7 +14,7 @@ from csl_workload_observation import identity as observation_identity
 with (Path(__file__).parent/'packaging/workload-collector/profiles.json').open() as _source:
     PROVIDER_PROFILES = json.load(_source)
 # Refuse packaging/runtime drift rather than qualifying a different native format.
-if PROVIDER_PROFILES != PROFILES:
+if PROVIDER_PROFILES != {**PROFILES, 'antigravity': ANTIGRAVITY_PROFILE}:
     raise SyncError('workload_configuration_refused')
 PREFIX = 'VITRAL_COLLECTOR_'
 
