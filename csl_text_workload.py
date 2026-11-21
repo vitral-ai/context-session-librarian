@@ -29,7 +29,9 @@ CLAUDE_META = {'custom-title', 'file-history-snapshot', 'queue-operation', 'prog
                'system', 'summary', 'last-prompt', 'agent-name', 'bridge_status',
                # Observed in real 2.1.308 `-p` transcripts; auxiliary only, no field is copied.
                'attachment', 'atis-latch', 'api-request-shape', 'api-request-blob', 'api-request',
-               'cost-state'}
+               'cost-state',
+               # Interactive 2.1.308 sessions; auxiliary only, no field is copied.
+               'mode', 'permission-mode', 'ai-title'}
 CODEX_EVENTS = {'task_started', 'task_complete', 'item_started', 'item_completed',
                 'thread_name_updated', 'user_message', 'agent_message', 'token_count',
                 'agent_reasoning', 'agent_reasoning_raw_content', 'turn_aborted',
