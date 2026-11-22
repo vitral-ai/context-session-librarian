@@ -10,7 +10,7 @@ import subprocess
 from urllib.parse import urlsplit, urlunsplit
 
 from csl_canonical import strict_json
-from csl_sync_fs import open_stream, reparse
+from csl_sync_fs import extended_path, open_stream, reparse
 import csl_antigravity
 import csl_codex_history
 
@@ -30,7 +30,7 @@ def provider_home(provider, home=None):
     default = {'codex': os.environ.get('CODEX_HOME', '~/.codex'),
                'claude': os.environ.get('CLAUDE_CONFIG_DIR', '~/.claude'),
                'antigravity': os.environ.get('CSL_ANTIGRAVITY_HOME', '~/.gemini/antigravity-cli')}[provider]
-    return Path(home if home is not None else default).expanduser().resolve()
+    return extended_path(Path(home if home is not None else default).expanduser()).resolve()
 
 
 def _safe(path, root):

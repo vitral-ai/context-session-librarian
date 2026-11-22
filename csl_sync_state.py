@@ -9,7 +9,7 @@ import tempfile
 import uuid
 import hashlib
 
-from csl_sync_fs import (flush_directory, make_private_directory, open_lock, open_read,
+from csl_sync_fs import (extended_path, flush_directory, make_private_directory, open_lock, open_read,
                          private_file, protect_fd, protect_path, reparse, replace, try_lock)
 
 
@@ -30,7 +30,7 @@ def display_id(value):
 
 
 def private_directory(path):
-    path = Path(path).expanduser().absolute()
+    path = extended_path(Path(path).expanduser().absolute())
     try:
         safe = make_private_directory(path)
     except OSError:
@@ -41,7 +41,7 @@ def private_directory(path):
 
 
 def private_json(path, data):
-    path = Path(path)
+    path = extended_path(Path(path))
     directory = private_directory(path.parent)
     fd, temporary = tempfile.mkstemp(prefix='.write-', dir=directory)
     try:

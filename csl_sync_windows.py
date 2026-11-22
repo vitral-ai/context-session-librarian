@@ -3,6 +3,7 @@ import ctypes as c
 from ctypes import wintypes as w
 from functools import lru_cache
 import os
+from pathlib import Path
 import stat
 
 if os.name == 'nt':
@@ -13,6 +14,18 @@ if os.name == 'nt':
 
 INVALID_HANDLE = c.c_void_p(-1).value
 REPARSE = stat.FILE_ATTRIBUTE_REPARSE_POINT
+
+
+
+def extended_path(path):
+    """Use Win32 extended paths independently of the machine's long-path policy."""
+    absolute = os.path.abspath(path)
+    prefix = '\\\\?\\'
+    if absolute.startswith(prefix):
+        return Path(absolute)
+    if absolute.startswith('\\\\'):
+        return Path(prefix + 'UNC\\' + absolute[2:])
+    return Path(prefix + absolute)
 
 
 def api(library, name, result, *args):

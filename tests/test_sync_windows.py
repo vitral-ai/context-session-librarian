@@ -69,7 +69,10 @@ class WindowsSyncTests(unittest.TestCase):
         codex, claude = self.root / 'codex', self.root / 'claude'
         codex_id, claude_id = str(uuid.uuid4()), str(uuid.uuid4())
         codex_path = codex / 'sessions' / f'rollout-{codex_id}.jsonl'
-        claude_path = claude / 'projects' / 'fixture' / f'{claude_id}.jsonl'
+        # Claude encodes the full project path in the directory name. This
+        # makes the snapshot path exceed MAX_PATH once the cache key is added.
+        project = 'C--Users-vitraltest-AppData-Local-' + 'workspace-' * 9
+        claude_path = claude / 'projects' / project / f'{claude_id}.jsonl'
         codex_path.parent.mkdir(parents=True)
         claude_path.parent.mkdir(parents=True)
 
