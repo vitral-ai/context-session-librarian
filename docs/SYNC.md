@@ -249,6 +249,31 @@ Load/unload it with your normal `launchctl bootstrap gui/$(id -u) …` / `bootou
 workflow. Sign in manually first. No unit/plist is generated, installed or enabled
 by CSL; these service-manager arrangements require their own platform validation.
 
+### Windows Scheduled Task
+
+Run the native collector with Python 3.13 or later and a stable checkout.
+From the checkout, use `python -m csl_sync sync` in place of `csl sync` for
+the same sign-in, registration, status, and watch commands. The default state is
+`%LOCALAPPDATA%\csl\sync` and its ACL is restricted to the current user,
+SYSTEM, and local administrators. Native profiles are read from
+`%USERPROFILE%\.claude`, `%USERPROFILE%\.codex`, and
+`%USERPROFILE%\.gemini\antigravity-cli`. The existing profile overrides apply.
+Windows file notifications wake watch early. Periodic verified scans also run.
+
+After signing in, register the task from PowerShell:
+
+```powershell
+.\packaging\windows\register-sync-task.ps1
+Start-ScheduledTask -TaskName 'CSL Session Collector'
+```
+
+The task runs as the current user at logon. Pass `-State` if you signed in
+with a custom `--home`. For a headless host, an administrator can register
+with `-AtStartup`. Task Scheduler then runs the collector under the same
+user without storing that user's password. The S4U startup task cannot use
+Windows-authenticated network shares or encrypted files. Start and stop it
+with the normal Scheduled Task controls.
+
 ### Remote environments without a desktop browser
 
 Use your own browser with an explicitly forwarded loopback callback. For example,

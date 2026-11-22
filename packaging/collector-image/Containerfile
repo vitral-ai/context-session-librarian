@@ -14,7 +14,7 @@ COPY packaging/collector-image/runtime.json /source/packaging/collector-image/ru
 COPY packaging/workload-collector/profiles.json /source/packaging/workload-collector/profiles.json
 COPY LICENSE csl_antigravity.py csl_antigravity_workload.py csl_canonical.py csl_codex_history.py \
     csl_content.py csl_display.py csl_history.py \
-    csl_media.py csl_secrets.py csl_sync_cache.py csl_sync_engine.py csl_sync_http.py \
+    csl_media.py csl_secrets.py csl_sync_cache.py csl_sync_engine.py csl_sync_fs.py csl_sync_http.py \
     csl_sync_providers.py csl_sync_state.py csl_text_workload.py csl_version.py \
     csl_workload_auth.py csl_workload_config.py csl_workload_http.py \
     csl_workload_identity.py csl_workload_launch_binding.py csl_workload_observation.py csl_workload_observation_driver.py \

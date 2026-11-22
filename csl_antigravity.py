@@ -17,6 +17,7 @@ import struct
 import tempfile
 from urllib.parse import unquote, urlsplit
 import uuid
+from csl_sync_fs import open_stream, reparse
 
 
 class FormatError(ValueError):
@@ -114,7 +115,7 @@ def _regular(path, root):
         current = root
         for part in path.relative_to(root).parts:
             current = current / part
-            if current.is_symlink():
+            if reparse(current):
                 raise FormatError('antigravity_symlink_source')
         if not path.is_file():
             raise FormatError('antigravity_source_missing')
@@ -126,7 +127,7 @@ def _regular(path, root):
 
 def _hash(path,length):
     digest=hashlib.sha256()
-    with path.open('rb') as stream:
+    with open_stream(path) as stream:
         while length:
             chunk=stream.read(min(length,1024*1024))
             if not chunk:raise FormatError('antigravity_source_changing')
@@ -138,7 +139,7 @@ def _wal_length(path):
     """Last complete committed WAL frame, following SQLite's native checksums."""
     size=path.stat().st_size
     if not size:return 0
-    with path.open('rb') as stream:
+    with open_stream(path) as stream:
         header=stream.read(32)
         if len(header)!=32:raise FormatError('incomplete_antigravity_wal')
         magic,version,page_size=struct.unpack('>III',header[:12])
@@ -218,7 +219,7 @@ def snapshot(root, native_id, scratch=None):
         path = Path(tmp) / 'session.db'
         for item in files:
             dest = path if item['file_key'] == 'main' else Path(str(path) + '-wal')
-            with Path(item['path']).open('rb') as source, dest.open('xb') as target:
+            with open_stream(item['path']) as source, dest.open('xb') as target:
                 os.chmod(dest, 0o600);left=item['complete_length']
                 while left:
                     chunk=source.read(min(left,1024*1024))
