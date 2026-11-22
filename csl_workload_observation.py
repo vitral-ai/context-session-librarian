@@ -36,7 +36,7 @@ class Observation:
     result. Failed/retried attempts are scanned but cannot qualify this pass.
     """
     def __init__(self, origin, provider, session):
-        if provider not in ('codex', 'claude', 'gemini'): raise ValueError('invalid observation provider')
+        if provider not in ('codex', 'claude'): raise ValueError('invalid observation provider')
         self.path = '/sessions/' + provider + '/' + identity(session)
         self.url = Origin(origin).registry + self.path
         self.failed = False

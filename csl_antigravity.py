@@ -211,10 +211,10 @@ def _schema(db):
 
 
 @contextmanager
-def snapshot(root, native_id):
+def snapshot(root, native_id, scratch=None):
     """Copy exact DB/WAL bytes into private storage; SQL never opens the origin."""
     files = inventory(root, native_id)
-    with tempfile.TemporaryDirectory(prefix='csl-agy-read-') as tmp:
+    with tempfile.TemporaryDirectory(prefix='csl-agy-read-', dir=scratch) as tmp:
         path = Path(tmp) / 'session.db'
         for item in files:
             dest = path if item['file_key'] == 'main' else Path(str(path) + '-wal')

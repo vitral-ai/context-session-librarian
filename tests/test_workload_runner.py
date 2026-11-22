@@ -29,7 +29,6 @@ from csl_workload_runner import (DeadlineHTTP, PassProcess, Runner, bounds, chil
 from csl_workload_producer import guardian, producer_exec
 from sync_support import Peer
 from test_workload_text import CANARY, SID, native
-from test_workload_gemini import records as gemini_records, CANARY as GEMINI_CANARY
 
 
 def config_at(root):
@@ -460,13 +459,18 @@ class UploaderTests(unittest.TestCase):
         for data in self.peer.files.values(): self.assertNotIn(CANARY.encode(), data)
         self.assertTrue(self.peer.views)
 
-    def test_gemini_profile_is_distinct_and_uses_sanitized_runtime_boundary(self):
-        self.config = replace(self.config, provider='gemini', profile=PROVIDER_PROFILES['gemini'])
-        self.write(gemini_records())
-        self.assertTrue(self.one_pass()['ok'])
-        self.assertTrue(all('/gemini/' in key for key in self.peer.sessions))
-        for data in self.peer.files.values(): self.assertNotIn(GEMINI_CANARY.encode(), data)
+    def test_antigravity_profile_uploads_redacted_sqlite_view(self):
+        from test_antigravity import make_session
+        from test_workload_antigravity import add_user_step
+        self.config = replace(self.config, provider='antigravity', profile=PROVIDER_PROFILES['antigravity'])
+        db = make_session(self.config.transcript_root, str(uuid.uuid4()), self.root)
+        add_user_step(db, 2, 'secret ' + CANARY)
+        result = self.one_pass()
+        self.assertTrue(result['ok']); self.assertEqual(len(result['manifest']), 1)
+        self.assertTrue(all('/antigravity/' in key for key in self.peer.sessions))
+        for data in self.peer.files.values(): self.assertNotIn(CANARY.encode(), data)
         self.assertTrue(self.peer.views)
+        self.assertFalse(next(iter(self.peer.sessions.values()))['package']['available'])
 
     def test_append_rewrite_lost_view_ack_and_restart_have_no_duplicate_or_raw_offset(self):
         self.peer.drop_view_once = True

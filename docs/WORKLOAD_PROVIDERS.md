@@ -5,35 +5,17 @@ command or a deployable workload image. Existing desktop raw sync and the public
 provider/command matrix are unchanged. Workload device authorization, registry
 namespaces, continuous collection, final flush and the job wrapper are separate
 changes. Do not route workload transcripts through the existing raw CLI.
-Additional [Codex/Claude text profiles](WORKLOAD_TEXT_PROFILES.md) share this
-prepared-view boundary without enabling the CLI or expanding Gemini's profile.
+The [Codex/Claude text profiles](WORKLOAD_TEXT_PROFILES.md) use this
+prepared-view boundary without enabling the CLI.
 
 ## Qualified Input
 
-`csl_gemini_workload.WorkloadGeminiProvider` reads explicitly selected transcript
-files beneath explicit, non-symlink roots. It never discovers a harness home,
-project registry, credential file, SQLite database or WAL. Its only qualified
-format is the text-only main conversation JSONL written by Gemini CLI 0.68.0,
-pinned at `5a5c7180ff3f0a02511f54b54db7f228d4982a30`:
-
-- [Recording types](https://github.com/google-gemini/gemini-cli/blob/5a5c7180ff3f0a02511f54b54db7f228d4982a30/packages/core/src/services/chatRecordingTypes.ts)
-- [Recording reader/writer](https://github.com/google-gemini/gemini-cli/blob/5a5c7180ff3f0a02511f54b54db7f228d4982a30/packages/core/src/services/chatRecordingService.ts)
-
-Synthetic fixtures exercise metadata, text messages, tool arguments/results,
-patches, duplicate IDs, ordering, inclusive rewinds and checkpoints. They do not
-prove a real Gemini invocation or every possible transcript from that release.
-Bare metadata requires `sessionId` and `projectHash`; its embedded messages merge
-into the ordered map, preserving existing history and duplicate-ID positions.
-Only `$set.messages` replaces the history. Other bare shapes refuse.
-Unknown fields/control records, non-text parts, subagents, opaque attachments and
-legacy JSON snapshots refuse rather than falling back to raw bytes. Antigravity
-remains a distinct provider; the separate Codex/Claude module has its own bounded
-qualification and explicit omission policy. There is no native Gemini import/resume support.
-In particular, structured `functionResponse` parts and non-text `resultDisplay`
-objects are not qualified by this initial profile; their presence refuses the
-session, not just the individual part. General Gemini tool-session coverage
-requires a subsequent qualified extension; these tests establish the explicit
-text-result subset only.
+The workload providers read explicitly selected transcript files beneath
+explicit, non-symlink roots. They never discover a harness home, project
+registry, credential file, SQLite database or WAL. The qualified formats are
+the Codex and Claude Code text profiles and `antigravity-1.5.9-sqlite-text-v1`
+(`csl_antigravity_workload`), which projects private copies of
+`conversations/<uuid>.db` into the same redacted, view-only text boundary. The Gemini CLI workload profile was removed in November 2026.
 
 ## Sanitized Coordinates
 
@@ -101,11 +83,11 @@ one-origin HTTPS enforcement and independent per-replica private state.
 
 ## Evidence And Remaining Lifecycle Work
 
-`tests/test_workload_gemini.py` uses synthetic transcripts and an owned loopback
+`tests/test_workload_text.py` uses synthetic transcripts and an owned loopback
 HTTP registry contract fixture. It checks sanitization of metadata, upload,
 spool and view; complete-record boundaries; bounded reads/storage; mutation and
 append races; lost ACKs; restart; and raw/view generation changes. No harness,
-provider request, Google login, real registry or personal transcript is used.
+provider request, login, real registry or personal transcript is used.
 
 This PR does not implement a continuous watch, device proof or termination
 handler. The frozen lifecycle contract for the subsequent runner is a maximum

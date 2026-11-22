@@ -59,6 +59,45 @@ spec:
           volumeMounts:
             - name: vitral-host
               mountPath: /vitral-host
+{{- if $t.collector }}
+        - name: transcript-owner
+          image: {{ include "workload.image" $t.image }}
+          command: ["/bin/sh", "-c", "chown {{ int .Values.collector.uid }}:{{ int .Values.collector.uid }} /transcripts && chmod 0750 /transcripts"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "FOWNER"]
+          volumeMounts:
+            - name: transcript
+              mountPath: /transcripts
+        # Local item F: the collector streams the shared terminal's Claude transcripts.
+        - name: collector
+          image: {{ include "workload.image" .Values.collector.image }}
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/csl-workload-collector"]
+          restartPolicy: Always
+          securityContext:
+            runAsUser: {{ int .Values.collector.uid }}
+            runAsGroup: {{ int .Values.collector.uid }}
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          env:{{ include "workload.env" . | indent 10 }}
+          volumeMounts:
+            - name: transcript
+              mountPath: /transcripts
+              readOnly: true
+            - name: collector-state
+              mountPath: /collector-state
+            - name: collector-trust
+              mountPath: /collector-trust
+              readOnly: true
+{{- end }}
       containers:
         - name: agent
           image: {{ include "workload.image" $t.image }}
@@ -102,6 +141,23 @@ spec:
           volumeMounts:
             - name: vitral-host
               mountPath: /vitral-host
+{{- if $t.collector }}
+            - name: transcript
+              mountPath: /agent-transcripts
+      volumes:
+        - name: transcript
+          emptyDir:
+            sizeLimit: {{ .Values.transcripts.sizeLimit | quote }}
+        - name: collector-state
+          emptyDir:
+            sizeLimit: {{ .Values.collector.stateLimit | quote }}
+        - name: collector-trust
+          configMap:
+            name: {{ .Values.identity.caConfigMap | quote }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+{{- end }}
   volumeClaimTemplates:
     - metadata:
         name: vitral-host

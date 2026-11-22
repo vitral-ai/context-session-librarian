@@ -8,7 +8,7 @@ COLLECTOR = '/usr/local/bin/csl-workload-collector'
 PROFILES = {
     'codex': 'codex-0.169.0-text-v1',
     'claude': 'claude-2.1.308-text-v1',
-    'gemini': 'gemini-cli-0.68.0-jsonl-text-v1',
+    'antigravity': 'antigravity-1.5.9-sqlite-text-v1',
 }
 DIGEST_REF = re.compile(r'.+@sha256:[0-9a-f]{64}$')
 

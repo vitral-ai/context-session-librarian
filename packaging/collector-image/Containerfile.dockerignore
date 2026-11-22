@@ -1,11 +1,11 @@
 **
 !LICENSE
 !csl_antigravity.py
+!csl_antigravity_workload.py
 !csl_canonical.py
 !csl_codex_history.py
 !csl_content.py
 !csl_display.py
-!csl_gemini_workload.py
 !csl_history.py
 !csl_media.py
 !csl_secrets.py

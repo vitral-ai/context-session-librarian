@@ -31,7 +31,7 @@ never a harness home, registry, credential file or companion-file search:
 These are synthetic fixture profiles using CSL's existing provider renderer and
 documented native versions, not new evidence of an actual executable or model
 turn. Source references are the existing CSL provider/tests and
-[provider matrix](PROVIDER_MATRIX.md). Claude is not inferred from Gemini or
+[provider matrix](PROVIDER_MATRIX.md). Claude is not inferred from
 Antigravity. Missing/different versions refuse. No native process is launched to
 discover a version, and a transcript version field is not an identity authority.
 
@@ -177,10 +177,9 @@ source qualification; a diagnostic is not a provider PASS or A8 evidence.
 
 ## State And Delivery
 
-The shared `PreparedProvider` contains the formerly Gemini-only explicit-root,
+The shared `PreparedProvider` contains the explicit-root,
 private spool, complete-prefix check, view pagination and unavailable-package
-boundary. Gemini's source-key mapping, redaction fingerprint, native reducer and
-projected bytes stay unchanged. Its append/patch/replacement regressions remain.
+boundary.
 Codex/Claude policy fingerprints additionally bind the selected profile.
 
 Raw source depth/value limits are checked before selecting fields, including
@@ -218,7 +217,6 @@ existing loopback registry contract peer. It checks canaries across metadata,
 spool, view and wire, explicit reasoning omissions, native source preservation,
 UTF-8/incomplete tails, branch/history/media/version refusal, bounded discarded
 data, policy changes, byte offsets and actual uploader lost ACK/restart.
-All merged Gemini cases also run after the plumbing extraction.
 
 This does not exercise a live Codex/Claude login, provider call, native loader,
 W7 approval/token refresh, production registry, UI, kind/ACA, image or process

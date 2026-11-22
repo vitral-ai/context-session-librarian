@@ -162,7 +162,7 @@ The peer checks a synthetic token value; it is NOT real W7/Mongo authorization
 or a registry-server qualification. Healthy synthetic markers are measured to
 ACK within three seconds; no UI visibility or production timing is claimed.
 
-No actual Codex/Claude/Gemini invocation, provider call, harness login, personal
+No actual Codex/Claude invocation, provider call, harness login, personal
 transcript, real identity enrollment/refresh, image, kind/ACA, UI, cloud, new
 access or spend is exercised. The three profile formats remain exactly their
 previously qualified synthetic subsets, not expanded by the job wrapper.

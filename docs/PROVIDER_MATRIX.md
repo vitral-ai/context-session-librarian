@@ -26,7 +26,7 @@ for Codex, Claude Code and Antigravity CLI to a registry you configure.
 Raw sync uploads transcripts including any secrets they contain. See [sync](SYNC.md)
 and [Antigravity scope and limitations](ANTIGRAVITY.md).
 An internal [sanitized workload provider foundation](WORKLOAD_PROVIDERS.md)
-adds pinned Gemini and separate [Codex/Claude text profiles](WORKLOAD_TEXT_PROFILES.md)
+adds the [Codex/Claude text profiles](WORKLOAD_TEXT_PROFILES.md)
 for integration tests only. It activates no public command and does not change
 the desktop matrix below.
 An unwired [execution-import foundation](EXECUTION_IMPORT_FOUNDATION.md) provides
