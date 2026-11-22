@@ -2,12 +2,15 @@
 import ctypes as c
 from ctypes import wintypes as w
 from functools import lru_cache
-import msvcrt
 import os
 import stat
 
-kernel = c.WinDLL('kernel32', use_last_error=True)
-security = c.WinDLL('advapi32', use_last_error=True)
+if os.name == 'nt':
+    import msvcrt
+
+    kernel = c.WinDLL('kernel32', use_last_error=True)
+    security = c.WinDLL('advapi32', use_last_error=True)
+
 INVALID_HANDLE = c.c_void_p(-1).value
 REPARSE = stat.FILE_ATTRIBUTE_REPARSE_POINT
 
@@ -20,16 +23,17 @@ def api(library, name, result, *args):
 
 pointer = c.c_void_p
 out = c.POINTER(pointer)
-create_file = api(kernel, 'CreateFileW', w.HANDLE, w.LPCWSTR, w.DWORD, w.DWORD, pointer, w.DWORD, w.DWORD, w.HANDLE)
-close_handle = api(kernel, 'CloseHandle', w.BOOL, w.HANDLE)
-local_free = api(kernel, 'LocalFree', w.HLOCAL, w.HLOCAL)
-file_info = api(kernel, 'GetFileInformationByHandleEx', w.BOOL, w.HANDLE, c.c_int, pointer, w.DWORD)
-named_security = api(security, 'GetNamedSecurityInfoW', w.DWORD, w.LPWSTR, c.c_int, w.DWORD, out, out, out, out, out)
-get_ace = api(security, 'GetAce', w.BOOL, pointer, w.DWORD, out)
-to_string_sid = api(security, 'ConvertSidToStringSidW', w.BOOL, pointer, out)
-current_process = api(kernel, 'GetCurrentProcess', w.HANDLE)
-open_token = api(security, 'OpenProcessToken', w.BOOL, w.HANDLE, w.DWORD, out)
-token_info = api(security, 'GetTokenInformation', w.BOOL, w.HANDLE, c.c_int, pointer, w.DWORD, c.POINTER(w.DWORD))
+if os.name == 'nt':
+    create_file = api(kernel, 'CreateFileW', w.HANDLE, w.LPCWSTR, w.DWORD, w.DWORD, pointer, w.DWORD, w.DWORD, w.HANDLE)
+    close_handle = api(kernel, 'CloseHandle', w.BOOL, w.HANDLE)
+    local_free = api(kernel, 'LocalFree', w.HLOCAL, w.HLOCAL)
+    file_info = api(kernel, 'GetFileInformationByHandleEx', w.BOOL, w.HANDLE, c.c_int, pointer, w.DWORD)
+    named_security = api(security, 'GetNamedSecurityInfoW', w.DWORD, w.LPWSTR, c.c_int, w.DWORD, out, out, out, out, out)
+    get_ace = api(security, 'GetAce', w.BOOL, pointer, w.DWORD, out)
+    to_string_sid = api(security, 'ConvertSidToStringSidW', w.BOOL, pointer, out)
+    current_process = api(kernel, 'GetCurrentProcess', w.HANDLE)
+    open_token = api(security, 'OpenProcessToken', w.BOOL, w.HANDLE, w.DWORD, out)
+    token_info = api(security, 'GetTokenInformation', w.BOOL, w.HANDLE, c.c_int, pointer, w.DWORD, c.POINTER(w.DWORD))
 
 
 def sid_string(sid):
@@ -126,14 +130,15 @@ class Overlapped(c.Structure):
                 ('offset', w.DWORD), ('offset_high', w.DWORD), ('event', w.HANDLE)]
 
 
-create_event = api(kernel, 'CreateEventW', w.HANDLE, pointer, w.BOOL, w.BOOL, w.LPCWSTR)
-reset_event = api(kernel, 'ResetEvent', w.BOOL, w.HANDLE)
-read_changes = api(kernel, 'ReadDirectoryChangesW', w.BOOL, w.HANDLE, pointer, w.DWORD, w.BOOL,
-                   w.DWORD, c.POINTER(w.DWORD), c.POINTER(Overlapped), pointer)
-wait_handles = api(kernel, 'WaitForMultipleObjects', w.DWORD, w.DWORD, c.POINTER(w.HANDLE), w.BOOL, w.DWORD)
-cancel_io = api(kernel, 'CancelIoEx', w.BOOL, w.HANDLE, c.POINTER(Overlapped))
-io_result = api(kernel, 'GetOverlappedResult', w.BOOL, w.HANDLE, c.POINTER(Overlapped),
-                c.POINTER(w.DWORD), w.BOOL)
+if os.name == 'nt':
+    create_event = api(kernel, 'CreateEventW', w.HANDLE, pointer, w.BOOL, w.BOOL, w.LPCWSTR)
+    reset_event = api(kernel, 'ResetEvent', w.BOOL, w.HANDLE)
+    read_changes = api(kernel, 'ReadDirectoryChangesW', w.BOOL, w.HANDLE, pointer, w.DWORD, w.BOOL,
+                       w.DWORD, c.POINTER(w.DWORD), c.POINTER(Overlapped), pointer)
+    wait_handles = api(kernel, 'WaitForMultipleObjects', w.DWORD, w.DWORD, c.POINTER(w.HANDLE), w.BOOL, w.DWORD)
+    cancel_io = api(kernel, 'CancelIoEx', w.BOOL, w.HANDLE, c.POINTER(Overlapped))
+    io_result = api(kernel, 'GetOverlappedResult', w.BOOL, w.HANDLE, c.POINTER(Overlapped),
+                    c.POINTER(w.DWORD), w.BOOL)
 
 
 class DirectoryWatch:
@@ -219,7 +224,8 @@ class DirectoryChanges:
         return False
 
 
-set_file_info = api(kernel, 'SetFileInformationByHandle', w.BOOL, w.HANDLE, c.c_int, pointer, w.DWORD)
+if os.name == 'nt':
+    set_file_info = api(kernel, 'SetFileInformationByHandle', w.BOOL, w.HANDLE, c.c_int, pointer, w.DWORD)
 
 
 class RenameInfo(c.Structure):
