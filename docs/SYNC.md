@@ -271,7 +271,10 @@ The task runs as the current user at logon. Pass `-State` if you signed in
 with a custom `--home`. The task uses the profile paths from the PowerShell
 session that registers it. To update an existing task, stop it with
 `Stop-ScheduledTask`, run the registration script with `-Replace` and the
-same task name and options, then start the task again.
+same task name and options, then start the task again. A sync pass already
+in progress can still hold the collector lock after the task stops. Check
+that `Get-ScheduledTask` shows `Running` after the restart. If the worker
+still holds the lock, let the pass finish and retry `Start-ScheduledTask`.
 For a headless host, an administrator can register
 with `-AtStartup`. Task Scheduler then runs the collector under the same
 user without storing that user's password. The S4U startup task cannot use
