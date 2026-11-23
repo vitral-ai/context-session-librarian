@@ -650,3 +650,35 @@ are never passed to resume. Codex does not offer an atomic loaded-only attach:
 if a thread unloads between listing and resume, native resume can reload it
 from disk. Avoid concurrently unloading a thread while the connector attaches.
 Task-independent mailbox persistence does not require a loaded native thread.
+
+## SSH with pulled return mail
+
+When only the caller can initiate SSH, the optional `csl_bridge_ssh_pull.py`
+operator adapter carries normal requests and pulls one queued return-mail frame
+per exchange. It needs no reverse SSH forwarding, extra listener, watcher or
+service. Both connectors and their ordinary ACLs remain authoritative. The
+recipient persists mail before the adapter caches its receipt; lost responses
+replay the same immutable message ID. The ordinary sender mailbox flush then
+reconciles that receipt. Pending mail therefore survives either adapter exiting.
+
+Install fixed, owned executable helpers and configure them with `bridge peer
+--operator-helper`. The caller helper invokes this module's `client` mode with
+`--home LOCAL_HOME --peer REMOTE_PEER --ssh-alias TRUSTED_ALIAS --control-path
+PRIVATE_PATH --remote-command FIXED_COMMAND`. That fixed SSH command runs
+`python3 /ABS/SOURCE/csl_bridge_ssh_pull.py server --home REMOTE_HOME --peer
+CALLER_PEER --cache PRIVATE_CACHE`. The remote peer's helper invokes `cached
+--cache PRIVATE_CACHE` instead. All endpoints come from operator configuration,
+never message text. The existing caller connector's watch requests drive pulls;
+keep its `watch` and `mail` permissions enabled. No new native permission or
+message operation is introduced. Remote-to-caller coordination is not provided:
+the return adapter handles mailbox operations, while followup final events are
+still polled normally from the remote connector.
+
+The SSH client is opened on demand and multiplexed for 60 seconds after idle;
+there is no new caller service. Mail delivery waits for the next caller exchange
+(normally within the existing 15-second watch interval), and pauses if that
+caller connector or route is down. It is not a sub-second transport guarantee.
+Receipt cache files are private delivery metadata, not credentials or work
+authority. Keep them with the bridge state; removing them causes safe receipt
+reconciliation/replay, not loss of queued mail. Tests exercise disk persistence,
+disconnect after recipient persistence, deduplication, and source/endpoint ACLs.
