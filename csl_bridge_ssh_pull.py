@@ -125,13 +125,22 @@ def client(home, peer, request, exchange):
         validate(outgoing)
         if outgoing['op'] != 'mail' or outgoing['action'] not in ('send', 'ack'):
             raise BridgeError('Invalid pulled mailbox operation')
-        receipt = local_call(home, {'local_op': '_incoming', 'trusted_peer': peer, 'request': outgoing})
+        try:
+            receipt = local_call(home, {'local_op': '_incoming', 'trusted_peer': peer, 'request': outgoing}, timeout=2)
+        except (BridgeError, OSError):
+            # Return mail remains durably queued remotely for the next pull.
+            continue
         if receipt.get('state') != 'uncertain':
             receipts.append({'request': outgoing, 'result': receipt})
     if receipts:
         # If interrupted before this acknowledgement, ordinary mail dedup handles
         # the next pull. Never acknowledge before durable recipient persistence.
-        exchange({'request': None, 'receipts': receipts})
+        try:
+            exchange({'request': None, 'receipts': receipts})
+        except (BridgeError, OSError, ValueError, subprocess.TimeoutExpired):
+            # Losing the return-mail ACK cannot erase a known forward result.
+            # The remote outbox stays pending and pulls the same durable ID.
+            pass
     return result['result']
 
 
@@ -151,10 +160,12 @@ def main():
         elif args.mode == 'cached':
             output = {'ok': True, 'data': cached_result(args.cache, validate(decode(sys.stdin.buffer.readline(MAX_WIRE + 1))))}
         else:
+            deadline = time.monotonic() + 22
             def exchange(packet):
                 command = ssh_command(args.ssh_alias, args.control_path, args.remote_command)
                 process = subprocess.run(command, input=(json.dumps(packet) + '\n').encode(),
-                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=24)
+                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                         timeout=max(.01, deadline - time.monotonic()))
                 if process.returncode or len(process.stdout) > MAX_WIRE * 2:
                     raise BridgeError('SSH pull unavailable; preserve IDs and reconcile')
                 return json.loads(process.stdout)
@@ -162,8 +173,13 @@ def main():
             output = {'ok': True, 'data': client(args.home, args.peer, request, exchange)}
         print(json.dumps(output, separators=(',', ':')))
     except (BridgeError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
-        print(encode({'ok': False, 'data': {'error': 'SSH pull failed; reconcile the same operation ID'}}))
-        return 1
+        if args.mode == 'client':
+            print(encode({'ok': True, 'data': {'state': 'uncertain',
+                'reason': 'ssh_pull_unavailable',
+                'recovery': 'Keep the operation ID; check its receipt after SSH reconnects'}}))
+        else:
+            print(encode({'ok': False, 'data': {'error': 'SSH pull failed; reconcile the same operation ID'}}))
+        return 0 if args.mode == 'client' else 1
     return 0
 
 

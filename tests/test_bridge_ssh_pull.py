@@ -1,5 +1,8 @@
 """Disk-backed outbound-only SSH mailbox transport, no model or SSH required."""
 from pathlib import Path
+import io
+import json
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -7,7 +10,7 @@ import uuid
 
 from csl_bridge_engine import Connector
 from csl_bridge_store import BridgeError, Store, encode
-from csl_bridge_ssh_pull import cached_result, client, pending_mail, server
+from csl_bridge_ssh_pull import cached_result, client, main, pending_mail, server, ssh_command
 
 
 class PullMailTests(unittest.TestCase):
@@ -38,7 +41,7 @@ class PullMailTests(unittest.TestCase):
             connector.close()
         self.temp.cleanup()
 
-    def local(self, home, request):
+    def local(self, home, request, **kwargs):
         return self.connectors[Path(home).name].local(request)
 
     def exchange(self, packet):
@@ -52,6 +55,27 @@ class PullMailTests(unittest.TestCase):
         with patch('csl_bridge_transport.exchange', side_effect=lambda config, peer, req: cached_result(self.cache, req)):
             self.remote.mailbox.flush('laptop')
 
+    def test_ssh_rejects_stale_silent_streams_and_reopens_on_demand(self):
+        command = ssh_command("remote", "/private/control", "fixed-command")
+        for option in ("-oServerAliveInterval=5", "-oServerAliveCountMax=2",
+                       "-oConnectTimeout=8", "-oControlMaster=auto", "-oControlPersist=60"):
+            self.assertIn(option, command)
+        self.assertEqual(command[-3:], ["--", "remote", "fixed-command"])
+
+    def test_link_timeout_reports_reconciliation_without_losing_operation_id(self):
+        output = io.StringIO()
+        stdin = Mock(buffer=io.BytesIO((encode(self.request) + '\n').encode()))
+        argv = ['pull', 'client', '--ssh-alias', 'remote', '--control-path', '/private/control',
+                '--remote-command', 'fixed-command']
+        with patch('sys.argv', argv), patch('sys.stdin', stdin), patch('sys.stdout', output), \
+                patch('csl_bridge_ssh_pull.subprocess.run', side_effect=subprocess.TimeoutExpired('ssh', 22)):
+            self.assertEqual(main(), 0)
+        result = json.loads(output.getvalue())
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['data']['state'], 'uncertain')
+        self.assertEqual(result['data']['reason'], 'ssh_pull_unavailable')
+        self.assertIn('operation ID', result['data']['recovery'])
+
     def test_real_outbox_persistence_and_normal_flush(self):
         self.pull()
         self.assertEqual(self.laptop.mailbox.message(self.mid)['direction'], 'in')
@@ -64,12 +88,27 @@ class PullMailTests(unittest.TestCase):
             if packet['receipts']:
                 raise OSError('connection lost before acknowledgement')
             return self.exchange(packet)
-        with self.assertRaises(OSError):
-            self.pull(disconnected)
+        result = self.pull(disconnected)
+        self.assertIsInstance(result, dict)
+        self.assertTrue(pending_mail(self.remote.store, 'laptop'))
         self.pull()
         self.flush()
         self.assertEqual(len(self.laptop.store.rows('SELECT * FROM mail_messages WHERE id=?', (self.mid,))), 1)
         self.assertIsNotNone(self.remote.mailbox.message(self.mid)['persisted_at'])
+
+    def test_local_mail_storage_failure_preserves_known_forward_result(self):
+        def unavailable(home, request, **kwargs):
+            if Path(home).name == 'laptop':
+                raise BridgeError('local storage unavailable')
+            return self.local(home, request, **kwargs)
+        with patch('csl_bridge_ssh_pull.local_call', side_effect=unavailable):
+            result = client(self.root / 'laptop', 'remote', self.request, self.exchange)
+        self.assertIsInstance(result, dict)
+        self.assertTrue(pending_mail(self.remote.store, 'laptop'))
+        self.assertIsNone(self.laptop.mailbox.message(self.mid))
+        self.pull()
+        self.flush()
+        self.assertIsNotNone(self.laptop.mailbox.message(self.mid))
 
     def test_cached_receipt_survives_adapter_restart(self):
         self.pull()

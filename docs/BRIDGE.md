@@ -682,3 +682,32 @@ Receipt cache files are private delivery metadata, not credentials or work
 authority. Keep them with the bridge state; removing them causes safe receipt
 reconciliation/replay, not loss of queued mail. Tests exercise disk persistence,
 disconnect after recipient persistence, deduplication, and source/endpoint ACLs.
+
+SSH uses an eight-second connection timeout and five-second keepalives with two
+misses allowed. The complete request plus return-mail acknowledgement shares a
+22-second deadline, below the ordinary 25-second operator deadline. A broken
+link reports `uncertain` with `reason: ssh_pull_unavailable` and instructions to
+check the original operation's receipt after reconnecting. Never assign a new
+ID merely because an acknowledgement was lost. Failure to save or acknowledge
+piggybacked return mail leaves that mail queued and preserves a known forward
+delivery result.
+
+For reboot startup, enable the approved daemon and connector under the remote
+user manager (with linger enabled). On Linux installations where Codex's native
+`app-server daemon bootstrap` uses PID management rather than a boot unit, the
+daemon unit can be `Type=oneshot`, `RemainAfterExit=yes`, with
+`ExecStart=/ABS/codex app-server daemon start`. Make the connector require and
+start after that unit. This is the same daemon plus one connector, not another
+watcher or timer. Daemon startup does not automatically resume agent work:
+unopened threads report `agent_not_loaded` and their tasks remain pending until
+the owner opens the same UUID on that daemon.
+
+### Read new replies once, without a watcher
+
+`python3 csl_bridge_updates.py --home BRIDGE_HOME --agent AGENT --cursor-file PRIVATE_DIR/replies.json`
+prints new events and inbox messages as JSON lines, flushes output, stores separate
+cursors and exits. Repeat the same command whenever you want updates. Each call is
+bounded (default 100 per channel); run it again to drain a larger backlog. The
+cursor is bound to the exact home and recipient. Output failure leaves the old
+cursor, so recovery may repeat output rather than lose it. This does not start a
+watcher, timer, native agent or service. Keep the cursor directory private.
