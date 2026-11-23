@@ -14,6 +14,7 @@ import re
 import shutil
 import sqlite3
 import struct
+import sys
 import tempfile
 from urllib.parse import quote, unquote, urlsplit
 from urllib.request import url2pathname
@@ -214,7 +215,9 @@ def _schema(db):
 
 def read_only_uri(path):
     # Escape before SQLite parses the query or authority, including Win32 extended paths.
-    return 'file:' + quote(os.fsencode(Path(path).absolute()), safe='/:') + '?mode=ro'
+    absolute = Path(path).absolute()
+    filename = str(absolute) if WINDOWS else os.fsencode(absolute)
+    return 'file:' + quote(filename, safe='/:') + '?mode=ro'
 
 
 @contextmanager
@@ -269,7 +272,8 @@ def metadata(db, native_id):
         parts = urlsplit(uri)
         if parts.scheme == 'file' and parts.netloc in ('', 'localhost'):
             try:
-                cwd = url2pathname(parts.path) if WINDOWS else unquote(parts.path)
+                cwd = (url2pathname(parts.path) if WINDOWS
+                       else unquote(parts.path, encoding=sys.getfilesystemencoding(), errors='replace'))
             except (OSError, ValueError):
                 pass
     created = timestamp(first(blob, 2)); updated = created

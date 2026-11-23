@@ -1,6 +1,8 @@
 """Collector integration with fabricated SQLite histories; no native model calls."""
+import errno
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 import uuid
@@ -77,12 +79,18 @@ class SQLiteSyncTests(unittest.TestCase):
     @unittest.skipIf(WINDOWS, 'POSIX filesystem byte paths')
     def test_snapshot_preserves_non_utf8_filesystem_bytes(self):
         scratch = self.root / os.fsdecode(b'scratch-\xff')
-        scratch.mkdir()
+        try:
+            scratch.mkdir()
+        except OSError as error:
+            if error.errno in (errno.EILSEQ, errno.EINVAL):
+                self.skipTest('temporary filesystem requires UTF-8 filenames')
+            raise
         with sqlite3.connect(self.path) as db:
             db.execute("UPDATE trajectory_metadata_blob SET data=? WHERE id='main'",
                        (pb((7, 'file:///tmp/%FF')),))
         with csl_antigravity.snapshot(self.home, self.sid, scratch=scratch) as (db, _):
-            self.assertEqual(csl_antigravity.metadata(db, self.sid)['cwd'], '/tmp/\ufffd')
+            expected = b'/tmp/\xff'.decode(sys.getfilesystemencoding(), errors='replace')
+            self.assertEqual(csl_antigravity.metadata(db, self.sid)['cwd'], expected)
 
     def test_wal_appears_changes_checkpoints_and_disappears_between_passes(self):
         self.assertEqual(self.run_pass()['synced'], 1)
