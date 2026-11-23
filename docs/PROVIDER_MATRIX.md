@@ -52,6 +52,7 @@ registry. Update implementation, tests and this document in the same change.
 
 | Command | Codex | Claude Code | Antigravity CLI |
 | --- | --- | --- | --- |
+| `agents` | experimental | experimental | not-integrated |
 | `annotate` | supported | not-integrated | not-integrated |
 | `backup` | experimental | not-integrated | not-integrated |
 | `bridge` | experimental | experimental | not-integrated |
@@ -78,7 +79,9 @@ registry. Update implementation, tests and this document in the same change.
 | `receive` | supported | supported | not-integrated |
 | `recent` | supported | not-integrated | not-integrated |
 | `related` | supported | not-integrated | not-integrated |
+| `reply` | experimental | experimental | not-integrated |
 | `search` | supported | not-integrated | not-integrated |
+| `send` | experimental | experimental | not-integrated |
 | `sessions` | supported | supported | experimental |
 | `share` | supported | supported | not-integrated |
 | `show` | supported | not-integrated | not-integrated |
@@ -326,3 +329,9 @@ and explicitly enables native Codex activation for enrolled recipients. Client-o
 homes receive mail/results. Legacy SSH/operator transports remain deprecated
 opt-in fallbacks. See [light runbook](LIGHT_RUNBOOK.md). This does not change
 legacy mailbox-only activation/grant semantics or environment lifecycle.
+
+The experimental `agents`, `send` and `reply` commands use an owner-configured TLS hub.
+The hub pins agent sessions and machine identity, enforces directed approvals, and
+retains queued envelopes. Existing machine connectors deliver Codex turns or Claude
+mailbox boundary notifications. See [hub setup](AGENT_HUB.md); native delivery and
+model consumption are distinct, and interrupted native invocations are not replayed.

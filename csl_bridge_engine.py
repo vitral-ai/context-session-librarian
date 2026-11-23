@@ -156,6 +156,12 @@ class Connector:
     def start(self):
         if not self.client_only:
             self.spawn(self.runtime_loop)
+        from csl_agents import DEFAULT_CONFIG, config, loop
+        if DEFAULT_CONFIG.exists():
+            settings = config()
+            from pathlib import Path
+            if Path(settings['connector_home']).expanduser() == self.store.home:
+                self.spawn(loop, self)
         for peer in list(self.peers):
             ops = self.peers[peer].get('allow_ops', [])
             mail_only = 'mail' in ops and 'watch' not in ops
@@ -243,7 +249,7 @@ class Connector:
                 break
         previous = self.attached_threads or set()
         attached = previous & loaded
-        for thread in set(self.agents.values()) & (loaded - previous):
+        for thread in set(list(self.agents.values())) & (loaded - previous):
             try:
                 runtime.call('thread/resume', {'threadId': thread, 'excludeTurns': True})
                 attached.add(thread)
@@ -283,7 +289,7 @@ class Connector:
                         # Local UI handles approvals. A peer is never offered this request.
                         continue
                     thread = params.get('threadId')
-                    agent = next((a for a, t in self.agents.items() if t == thread), None)
+                    agent = next((a for a, t in list(self.agents.items()) if t == thread), None)
                     if agent is None:
                         continue
                     with self.locks[agent]:
@@ -514,7 +520,7 @@ class Connector:
         retry_publications(self.store)
         # Join first, then recover effects using native client message IDs. Missing
         # evidence remains uncertain; never auto-repeat an invocation.
-        for agent, thread in self.agents.items():
+        for agent, thread in list(self.agents.items()):
             if self.attached_threads is not None and thread not in self.attached_threads:
                 continue
             uncertain_ops = [row for row in self.store.rows("SELECT id,peer,request FROM operations WHERE state='uncertain' AND NOT EXISTS(SELECT 1 FROM event_publication_holds h WHERE h.task=operations.id AND h.state='conflict')")
@@ -742,6 +748,9 @@ class Connector:
         if not isinstance(request, dict) or not isinstance(request.get('local_op'), str):
             raise BridgeError('Invalid local operation')
         op = request['local_op']
+        if op == '_hub_delivery' and set(request) == {'local_op', 'packet'}:
+            from csl_agents import deliver
+            return deliver(self, request['packet'])
         if op == '_light_events_changed' and set(request) == {'local_op'}:
             with self.changed:
                 self.changed.notify_all()
