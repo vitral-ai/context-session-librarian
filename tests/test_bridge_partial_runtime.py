@@ -71,9 +71,15 @@ class PartialRuntimeTests(unittest.TestCase):
         self.connector.refresh_loaded(self.runtime)
         self.connector.incoming('alice', request)
         self.connector.factory = lambda _: self.runtime
+        self.connector.runtime = None
         thread = threading.Thread(target=self.connector.runtime_loop)
         thread.start()
         try:
+            ready_deadline = time.monotonic() + 3
+            while self.connector.runtime is None and time.monotonic() < ready_deadline:
+                time.sleep(.01)
+            self.assertIs(self.connector.runtime, self.runtime)
+            self.assertEqual(self.connector.current('late')['status'], 'agent_not_loaded')
             self.loaded.add(self.late)
             deadline = time.monotonic() + 6
             while time.monotonic() < deadline:
