@@ -274,9 +274,10 @@ session that registers it. To update an existing task, stop it with
 same task name and options, then start the task again. A sync pass already
 in progress can still hold the collector lock after the task stops. Recheck
 the named task with `Get-ScheduledTask` after startup to confirm it stays
-`Running`. If it stopped, run `python -m csl_sync sync status` with the same
-state directory. If `last_error` is `collector_busy`, let the old pass
-finish, retry `Start-ScheduledTask`, and recheck the task.
+`Running`. If it stops during startup, let the old pass finish, retry
+`Start-ScheduledTask`, and recheck the task. For a persistent failure, inspect
+the task's last result and run `python -m csl_sync sync status` with the same
+state directory to check `last_error`.
 For a headless host, an administrator can register
 with `-AtStartup`. Task Scheduler then runs the collector under the same
 user without storing that user's password. The S4U startup task cannot use
