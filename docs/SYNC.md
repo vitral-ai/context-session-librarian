@@ -268,9 +268,8 @@ Start-ScheduledTask -TaskName 'CSL Session Collector'
 ```
 
 The task runs as the current user at logon. Pass `-State` if you signed in
-with a custom `--home`. Set profile overrides as absolute paths in the user
-environment before opening the PowerShell session you use to register the task.
-The registration script rejects overrides that exist only in that session.
+with a custom `--home`. The task uses the profile paths from the PowerShell
+session that registers it. Register the task again to change its profiles.
 For a headless host, an administrator can register
 with `-AtStartup`. Task Scheduler then runs the collector under the same
 user without storing that user's password. The S4U startup task cannot use

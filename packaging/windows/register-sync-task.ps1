@@ -13,19 +13,27 @@ $State = (Resolve-Path -LiteralPath $State).Path
 $Python = (Resolve-Path -LiteralPath $Python).Path
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 
-foreach ($name in @('CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'CSL_ANTIGRAVITY_HOME')) {
-    $active = [Environment]::GetEnvironmentVariable($name, 'Process')
-    $scheduled = [Environment]::GetEnvironmentVariable($name, 'User')
-    if (-not $scheduled) {
-        $scheduled = [Environment]::GetEnvironmentVariable($name, 'Machine')
+$defaults = @{
+    CODEX_HOME = '.codex'
+    CLAUDE_CONFIG_DIR = '.claude'
+    CSL_ANTIGRAVITY_HOME = '.gemini\antigravity-cli'
+}
+$profiles = @{}
+foreach ($name in $defaults.Keys) {
+    $location = [Environment]::GetEnvironmentVariable($name, 'Process')
+    if (-not $location) {
+        $location = Join-Path $env:USERPROFILE $defaults[$name]
     }
-    if ($active -cne $scheduled) {
-        throw "$name differs from the user or machine environment the task will use. Persist the intended profile and register from a fresh PowerShell session."
-    }
-    if ($active -and $active -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\])') {
-        throw "$name must be an absolute Windows path for the scheduled collector."
+    $provider = $null
+    $drive = $null
+    $profiles[$name] = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
+        $location, [ref]$provider, [ref]$drive)
+    if ($provider.Name -ne 'FileSystem') {
+        throw "$name must point to a filesystem path."
     }
 }
+$profileBytes = [Text.Encoding]::UTF8.GetBytes(($profiles | ConvertTo-Json -Compress))
+$profileArgument = [Convert]::ToBase64String($profileBytes)
 
 Push-Location $root
 try {
@@ -37,8 +45,9 @@ try {
     Pop-Location
 }
 
+$launcher = Join-Path $PSScriptRoot 'run-sync-task.py'
 $action = New-ScheduledTaskAction -Execute $Python -WorkingDirectory $root `
-    -Argument ('-m csl_sync sync --home "{0}" watch' -f $State)
+    -Argument ('"{0}" "{1}" {2}' -f $launcher, $State, $profileArgument)
 if ($AtStartup) {
     # S4U runs under the account without storing its password. It has no Windows
     # network credentials. The collector uses its own HTTPS access token.

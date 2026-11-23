@@ -1,9 +1,11 @@
 """Native Windows checks for ACLs, live file handles, and wake notifications."""
 import argparse
+import base64
 import ctypes
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -117,15 +119,24 @@ class WindowsSyncTests(unittest.TestCase):
         registry.download.assert_not_called()
         self.assertEqual(list(self.root.glob('.pull-*')), [])
 
-    def test_scheduled_task_refuses_process_only_profile_override(self):
-        script = Path(__file__).resolve().parents[1] / 'packaging' / 'windows' / 'register-sync-task.ps1'
-        result = subprocess.run(
-            ['powershell.exe', '-NoProfile', '-File', str(script), '-State', str(self.root)],
-            env={**os.environ, 'CODEX_HOME': str(self.root / 'test-profile')},
-            capture_output=True, text=True, check=False,
-        )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('CODEX_HOME differs', result.stderr)
+    def test_scheduled_task_uses_registered_profiles(self):
+        script = Path(__file__).resolve().parents[1] / 'packaging' / 'windows' / 'run-sync-task.py'
+        profiles = {
+            'CODEX_HOME': str(self.root / 'alternate profile'),
+            'CLAUDE_CONFIG_DIR': '//server/share/claude',
+            'CSL_ANTIGRAVITY_HOME': str(self.root / 'antigravity'),
+        }
+        encoded = base64.b64encode(json.dumps(profiles).encode('utf-8')).decode('ascii')
+
+        def verify_profiles(_args):
+            self.assertEqual({name: os.environ[name] for name in profiles}, profiles)
+
+        with (patch.object(sys, 'argv', [str(script), str(self.root), encoded]),
+              patch.object(sys, 'path', sys.path.copy()),
+              patch.dict(os.environ, {'CODEX_HOME': str(self.root / 'stale')}),
+              patch('csl_sync.main', side_effect=verify_profiles) as watch):
+            runpy.run_path(str(script), run_name='__main__')
+        watch.assert_called_once_with(['sync', '--home', str(self.root), 'watch'])
 
     def test_replace_falls_back_when_posix_rename_is_unsupported(self):
         def unsupported(*_):
