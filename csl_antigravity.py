@@ -15,8 +15,10 @@ import shutil
 import sqlite3
 import struct
 import tempfile
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
+from urllib.request import url2pathname
 import uuid
+from csl_sync_fs import WINDOWS, open_stream, reparse
 
 
 class FormatError(ValueError):
@@ -114,7 +116,7 @@ def _regular(path, root):
         current = root
         for part in path.relative_to(root).parts:
             current = current / part
-            if current.is_symlink():
+            if reparse(current):
                 raise FormatError('antigravity_symlink_source')
         if not path.is_file():
             raise FormatError('antigravity_source_missing')
@@ -126,7 +128,7 @@ def _regular(path, root):
 
 def _hash(path,length):
     digest=hashlib.sha256()
-    with path.open('rb') as stream:
+    with open_stream(path) as stream:
         while length:
             chunk=stream.read(min(length,1024*1024))
             if not chunk:raise FormatError('antigravity_source_changing')
@@ -138,7 +140,7 @@ def _wal_length(path):
     """Last complete committed WAL frame, following SQLite's native checksums."""
     size=path.stat().st_size
     if not size:return 0
-    with path.open('rb') as stream:
+    with open_stream(path) as stream:
         header=stream.read(32)
         if len(header)!=32:raise FormatError('incomplete_antigravity_wal')
         magic,version,page_size=struct.unpack('>III',header[:12])
@@ -210,6 +212,13 @@ def _schema(db):
         raise FormatError('unsupported_antigravity_step_format')
 
 
+def read_only_uri(path):
+    # Escape before SQLite parses the query or authority, including Win32 extended paths.
+    absolute = Path(path).absolute()
+    filename = str(absolute) if WINDOWS else os.fsencode(absolute)
+    return 'file:' + quote(filename, safe='/:') + '?mode=ro'
+
+
 @contextmanager
 def snapshot(root, native_id, scratch=None):
     """Copy exact DB/WAL bytes into private storage; SQL never opens the origin."""
@@ -218,7 +227,7 @@ def snapshot(root, native_id, scratch=None):
         path = Path(tmp) / 'session.db'
         for item in files:
             dest = path if item['file_key'] == 'main' else Path(str(path) + '-wal')
-            with Path(item['path']).open('rb') as source, dest.open('xb') as target:
+            with open_stream(item['path']) as source, dest.open('xb') as target:
                 os.chmod(dest, 0o600);left=item['complete_length']
                 while left:
                     chunk=source.read(min(left,1024*1024))
@@ -230,7 +239,7 @@ def snapshot(root, native_id, scratch=None):
             raise FormatError('antigravity_source_changing')
         db = None
         try:
-            db = sqlite3.connect('file:' + str(path) + '?mode=ro', uri=True)
+            db = sqlite3.connect(read_only_uri(path), uri=True)
             db.execute('PRAGMA query_only=ON'); db.execute('PRAGMA trusted_schema=OFF')
             _schema(db)
             meta = db.execute('SELECT cascade_id FROM trajectory_meta').fetchall()
@@ -261,7 +270,10 @@ def metadata(db, native_id):
     if uri:
         parts = urlsplit(uri)
         if parts.scheme == 'file' and parts.netloc in ('', 'localhost'):
-            cwd = unquote(parts.path)
+            try:
+                cwd = url2pathname(parts.path) if WINDOWS else unquote(parts.path)
+            except (OSError, ValueError):
+                pass
     created = timestamp(first(blob, 2)); updated = created
     count = 0; title = None
     for idx, kind, payload in db.execute('SELECT idx,step_type,step_payload FROM steps ORDER BY idx'):
@@ -368,7 +380,7 @@ def package_reason(db):
 
 def rewrite_copy(source, destination, source_id, new_id, cwd):
     """Independent native copy. Historical blobs stay raw except local authority/IDs."""
-    db = sqlite3.connect('file:' + str(source) + '?mode=ro', uri=True)
+    db = sqlite3.connect(read_only_uri(source), uri=True)
     out = sqlite3.connect(destination)
     try:
         _schema(db)

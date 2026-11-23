@@ -1,15 +1,16 @@
 """Private collector state. No transcript text is stored in its journal."""
 from contextlib import contextmanager
 from datetime import datetime, timezone
-import fcntl
 import json
 import os
 from pathlib import Path
 import sqlite3
-import stat
 import tempfile
 import uuid
 import hashlib
+
+from csl_sync_fs import (durable_replace, extended_path, flush_directory, make_private_directory, open_lock, open_read,
+                         private_file, protect_fd, protect_path, reparse, replace, try_lock)
 
 
 class SyncError(Exception):
@@ -29,33 +30,28 @@ def display_id(value):
 
 
 def private_directory(path):
-    path = Path(path).expanduser().absolute()
-    if path.is_symlink():
+    path = extended_path(Path(path).expanduser().absolute())
+    try:
+        safe = make_private_directory(path)
+    except OSError:
+        safe = False
+    if not safe:
         raise SyncError('unsafe_state_directory')
-    path.mkdir(parents=True, mode=0o700, exist_ok=True)
-    info = path.stat()
-    if info.st_uid != os.getuid() or not stat.S_ISDIR(info.st_mode):
-        raise SyncError('unsafe_state_directory')
-    path.chmod(0o700)
     return path
 
 
-def private_json(path, data):
-    path = Path(path)
+def private_json(path, data, *, durable=False):
+    path = extended_path(Path(path))
     directory = private_directory(path.parent)
     fd, temporary = tempfile.mkstemp(prefix='.write-', dir=directory)
     try:
-        os.fchmod(fd, 0o600)
+        protect_fd(fd)
         with os.fdopen(fd, 'w') as output:
             json.dump(data, output, separators=(',', ':'))
             output.flush()
             os.fsync(output.fileno())
-        os.replace(temporary, path)
-        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        (durable_replace if durable else replace)(temporary, path)
+        flush_directory(directory)
     finally:
         try:
             os.unlink(temporary)
@@ -65,14 +61,14 @@ def private_json(path, data):
 
 def read_private_json(path):
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = open_read(path)
     except FileNotFoundError:
         return None
     except OSError:
         raise SyncError('unsafe_credentials_file') from None
     with os.fdopen(fd, 'rb') as stream:
         info = os.fstat(stream.fileno())
-        if info.st_uid != os.getuid() or not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+        if not private_file(path, info):
             raise SyncError('unsafe_credentials_file')
         raw = stream.read(1024 * 1024 + 1)
     try:
@@ -90,12 +86,14 @@ def read_private_json(path):
 def exclusive(root, name='collector.lock'):
     root = private_directory(root)
     try:
-        fd = os.open(root / name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        fd = open_lock(root / name)
+    except BlockingIOError:
+        raise SyncError('collector_busy') from None
     except OSError:
         raise SyncError('unsafe_lock_file') from None
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try_lock(fd)
         except BlockingIOError:
             raise SyncError('collector_busy') from None
         yield fd
@@ -107,10 +105,10 @@ class State:
     def __init__(self, root):
         self.root = private_directory(root)
         path = self.root / 'state.sqlite'
-        if path.is_symlink():
+        if reparse(path):
             raise SyncError('unsafe_state_file')
         self.db = sqlite3.connect(path)
-        path.chmod(0o600)
+        protect_path(path)
         self.db.executescript('''
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=FULL;

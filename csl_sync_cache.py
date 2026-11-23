@@ -11,6 +11,7 @@ import shutil
 import sqlite3
 import time
 
+from csl_sync_fs import change_time, open_read, open_stream, protect_fd, protect_path, reparse
 from csl_sync_state import SyncError, private_directory, private_json, read_private_json
 
 EMPTY = hashlib.sha256(b'').hexdigest()
@@ -22,7 +23,7 @@ def encoded(value):
 
 def hash_prefix(path, length):
     h = hashlib.sha256()
-    with path.open('rb') as stream:
+    with open_stream(path) as stream:
         while length:
             chunk = stream.read(min(length, 1024 * 1024))
             if not chunk: raise SyncError('source_changed')
@@ -66,7 +67,7 @@ class CachedProviders:
             directory = path.with_suffix('')
             if directory.is_dir():
                 for child in sorted(directory.rglob('*')):
-                    if child.is_symlink(): raise SyncError('symlink_source')
+                    if reparse(child): raise SyncError('symlink_source')
                     if child.is_file() and child.relative_to(directory).parts[0] in ('subagents', 'tool-results'):
                         paths.append(child)
         for source in paths: self.module._safe(source, home)
@@ -77,7 +78,7 @@ class CachedProviders:
         for path in paths:
             st = path.stat()
             result.append([path.relative_to(home).as_posix(), st.st_dev, st.st_ino,
-                           st.st_size, st.st_mtime_ns, st.st_ctime_ns])
+                           st.st_size, st.st_mtime_ns, change_time(path, st)])
         return result
 
     def list_sessions(self, provider):
@@ -170,7 +171,7 @@ class CachedProviders:
                 if hash_prefix(path, item['complete_length']) != item['sha256']:
                     return False
                 if item['mode'] == 'append':
-                    with path.open('rb') as stream:
+                    with open_stream(path) as stream:
                         stream.seek(item['complete_length'])
                         if b'\n' in stream.read(item['size'] - item['complete_length']):
                             return False
@@ -190,9 +191,9 @@ class CachedProviders:
             for source in paths:
                 target = stage / source.relative_to(home)
                 private_directory(target.parent)
-                fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+                fd = open_read(source)
                 with os.fdopen(fd, 'rb') as incoming, target.open('wb') as output:
-                    os.fchmod(output.fileno(), 0o600)
+                    protect_fd(output.fileno())
                     size = os.fstat(incoming.fileno()).st_size
                     left = size
                     h = hashlib.sha256()
@@ -230,7 +231,7 @@ class CachedProviders:
 
     def index_view(self, provider, path, primary, directory, previous, *, nodes=None, binding=None):
         db = sqlite3.connect(directory / 'view.sqlite')
-        (directory / 'view.sqlite').chmod(0o600)
+        protect_path(directory / 'view.sqlite')
         try:
             db.execute('CREATE TABLE IF NOT EXISTS records (seq INTEGER PRIMARY KEY, body TEXT, digest TEXT)')
             db.execute('CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY, value TEXT)')
