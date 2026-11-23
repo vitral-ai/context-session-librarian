@@ -14,7 +14,7 @@ import urllib.parse
 
 from csl_sync_auth import Tokens, discover
 from csl_sync_engine import Collector, PROVIDERS, Providers
-from csl_sync_fs import WINDOWS, protect_fd, reparse, replace
+from csl_sync_fs import WINDOWS, protect_fd, protect_path, reparse, replace
 from csl_sync_http import Registry, checked_url
 from csl_sync_state import State, SyncError, exclusive, now, private_json
 from csl_sync_watch import pass_lock
@@ -171,6 +171,8 @@ def pull(registry, session_id, out_dir):
     fd, temporary = tempfile.mkstemp(prefix='.pull-', suffix='.part', dir=directory)
     try:
         protect_fd(fd)
+        if WINDOWS:
+            protect_path(Path(temporary))
         digest = hashlib.sha256()
         class Sink:
             def write(self, chunk):

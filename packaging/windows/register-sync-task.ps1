@@ -13,6 +13,20 @@ $State = (Resolve-Path -LiteralPath $State).Path
 $Python = (Resolve-Path -LiteralPath $Python).Path
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 
+foreach ($name in @('CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'CSL_ANTIGRAVITY_HOME')) {
+    $active = [Environment]::GetEnvironmentVariable($name, 'Process')
+    $scheduled = [Environment]::GetEnvironmentVariable($name, 'User')
+    if (-not $scheduled) {
+        $scheduled = [Environment]::GetEnvironmentVariable($name, 'Machine')
+    }
+    if ($active -cne $scheduled) {
+        throw "$name differs from the user or machine environment the task will use. Persist the intended profile and register from a fresh PowerShell session."
+    }
+    if ($active -and $active -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\])') {
+        throw "$name must be an absolute Windows path for the scheduled collector."
+    }
+}
+
 Push-Location $root
 try {
     $status = & $Python -m csl_sync sync --home $State status | ConvertFrom-Json

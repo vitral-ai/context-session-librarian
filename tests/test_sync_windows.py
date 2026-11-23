@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 import uuid
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from csl_sync_engine import Collector, Providers
 from csl_sync import pull
@@ -108,6 +108,24 @@ class WindowsSyncTests(unittest.TestCase):
         self.assertNotEqual(cases[0].name.casefold(), cases[1].name.casefold())
         self.assertEqual(requests, ['/sessions/session%3A123/package', '/sessions/sess-a/package',
                                     '/sessions/Sess-a/package'])
+
+    def test_pull_refuses_unsafe_temporary_acl_before_download(self):
+        registry = Mock()
+        with patch('csl_sync.protect_path', side_effect=OSError('unsafe state file')):
+            with self.assertRaisesRegex(OSError, 'unsafe state file'):
+                pull(registry, 'session', self.root)
+        registry.download.assert_not_called()
+        self.assertEqual(list(self.root.glob('.pull-*')), [])
+
+    def test_scheduled_task_refuses_process_only_profile_override(self):
+        script = Path(__file__).resolve().parents[1] / 'packaging' / 'windows' / 'register-sync-task.ps1'
+        result = subprocess.run(
+            ['powershell.exe', '-NoProfile', '-File', str(script), '-State', str(self.root)],
+            env={**os.environ, 'CODEX_HOME': str(self.root / 'test-profile')},
+            capture_output=True, text=True, check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('CODEX_HOME differs', result.stderr)
 
     def test_replace_falls_back_when_posix_rename_is_unsupported(self):
         def unsupported(*_):
