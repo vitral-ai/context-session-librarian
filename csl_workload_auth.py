@@ -5,6 +5,7 @@ one replica's private state child, and expose approval only to its operator.
 """
 import base64
 from contextlib import contextmanager
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import re
 import stat
 import time
 import urllib.parse
+from uuid import UUID
 
 from csl_canonical import strict_json
 from csl_sync_state import SyncError, exclusive, private_directory, private_json
@@ -19,11 +21,22 @@ from csl_workload_http import Origin, WorkloadHTTP
 from csl_workload_identity import AUDIENCE, CLIENT_ID, SCOPES, WorkloadKey, b64, canonical, metadata, unb64
 
 DEVICE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code'
+MANAGED_AUDIENCE = 'vitral-collector-assignment-enroll'
 REPLAY_SECONDS = 30
 TERMINAL = {'invalid_grant', 'session_revoked', 'access_denied'}
 JOURNAL_FIELDS = {'version', 'binding', 'thumbprint', 'phase', 'boot', 'deadline', 'device_code', 'nonce',
     'interval', 'next_poll', 'account_id', 'device_id', 'access_token', 'refresh_token', 'expires_boot',
-    'expires_wall', 'request_started', 'replay_used', 'fields'}
+    'expires_wall', 'request_started', 'replay_used', 'fields', 'managed_assignment'}
+
+
+def managed_binding(value):
+    if not isinstance(value, dict) or set(value) != {'environment_id', 'generation'}:
+        raise ValueError('Invalid managed assignment')
+    environment_id, generation = value['environment_id'], value['generation']
+    if (not isinstance(environment_id, str) or str(UUID(environment_id)) != environment_id
+            or type(generation) is not int or not 0 < generation < 2**64):
+        raise ValueError('Invalid managed assignment')
+    return value
 
 
 def boot_clock():
@@ -124,6 +137,8 @@ class WorkloadTokens:
                         'authorization_inflight', 'pending', 'device_inflight', 'ready', 'refresh_inflight', 'revoked', 'expired'}):
                 raise ValueError()
             unb64(value.get('thumbprint'), 32)
+            if 'managed_assignment' in value:
+                managed_binding(value['managed_assignment'])
             phase = value['phase']
             if phase not in ('revoked', 'expired') and (not isinstance(value.get('boot'), str) or not value['boot']):
                 raise ValueError()
@@ -188,6 +203,46 @@ class WorkloadTokens:
                     'account_id': value.get('account_id') if value else None,
                     'device_id': value.get('device_id') if value else None}
 
+    def managed_identity(self):
+        with self._lock():
+            value = self._read()
+            if value is not None and 'managed_assignment' not in value:
+                raise SyncError('workload_identity_binding_changed')
+            _, thumb = self._public(value)
+            return {'workload_jkt': b64(thumb), 'state': value['phase'] if value else 'signed_out'}
+
+    def enroll_managed(self, assertion):
+        with self._lock():
+            current = self._read()
+            _, thumb = self._public(current)
+            try:
+                if len(token_text(assertion)) > 8192:
+                    raise ValueError()
+                claims = jwt_payload(assertion)
+                assignment = managed_binding({key: claims[key] for key in ('environment_id', 'generation')})
+                account = claims['sub']
+                if (claims['iss'] != 'vitral-pool-controller' or claims['aud'] != MANAGED_AUDIENCE
+                        or claims['owner_issuer'] != self.origin.issuer or claims['workload_jkt'] != b64(thumb)
+                        or not re.fullmatch(r'[a-f0-9]{24}', account)):
+                    raise ValueError()
+            except (KeyError, ValueError, TypeError, SyncError):
+                raise SyncError('workload_assignment_refused') from None
+            if current:
+                if current.get('managed_assignment') != assignment or current.get('account_id') != account:
+                    raise SyncError('workload_identity_binding_changed')
+                if current['phase'] in ('ready', 'refresh_inflight'):
+                    return
+                raise SyncError('credential_revoked')
+            public, _ = self._public(current)
+            nonce = hashlib.sha256(b'vitral-managed-collector-v1\0' + assertion.encode('ascii')).digest()
+            proof = self.key.proof(self.origin.issuer, assertion, nonce, self.digest, expected_thumbprint=thumb)
+            response = self._form('/managed_workload_token', {
+                'assignment_assertion': assertion, 'workload': canonical(self.location).decode(),
+                'host_public_key': canonical(public).decode(), 'host_key_proof': proof,
+            })
+            self._accept(response, {'version': 1, 'binding': self.binding, 'thumbprint': b64(thumb),
+                                    'managed_assignment': assignment, 'account_id': account})
+
     def begin(self, *, timeout=600):
         timeout = number(timeout, 600)
         with self._lock():
@@ -251,12 +306,15 @@ class WorkloadTokens:
         result = {'version': 1, 'binding': self.binding, 'thumbprint': value['thumbprint'], 'phase': 'ready',
             'account_id': account['id'], 'device_id': device, 'access_token': access, 'refresh_token': refresh,
             'boot': self.boot(), 'expires_boot': expires_boot, 'expires_wall': expires_at}
+        if 'managed_assignment' in value:
+            result['managed_assignment'] = value['managed_assignment']
         self._write(result)
         self._check(write_deadline)
         return access
 
     def _terminal(self, value, phase='revoked'):
-        result = {key: value[key] for key in ('version', 'binding', 'thumbprint', 'account_id', 'device_id') if key in value}
+        result = {key: value[key] for key in ('version', 'binding', 'thumbprint', 'account_id', 'device_id',
+                                             'managed_assignment') if key in value}
         result['phase'] = phase
         self._write(result)
 
