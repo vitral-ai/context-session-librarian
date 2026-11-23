@@ -16,6 +16,7 @@ import subprocess
 import uuid
 
 from csl_canonical import strict_json
+from csl_sync_fs import open_stream
 
 MAX_DEPTH = 32
 MAX_FILE = 2 * 1024**3
@@ -88,7 +89,7 @@ def _safe(path, root):
 def decoded(path):
     """Optional zstd needs stdlib Python 3.14 or an existing zstd executable."""
     if not str(path).endswith('.zst'):
-        with path.open('rb') as stream:
+        with open_stream(path) as stream:
             yield stream
         return
     class Limited:
@@ -105,7 +106,9 @@ def decoded(path):
         executable = shutil.which('zstd')
         if not executable:
             raise HistoryError('history_base_zstd_decoder_unavailable') from None
-        process = subprocess.Popen([executable,'-d','-q','-c','--',str(path)],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+        with open_stream(path) as source:
+            process = subprocess.Popen([executable, '-d', '-q', '-c'], stdin=source,
+                                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         try:
             reader=Limited(process.stdout)
             yield reader
@@ -119,7 +122,7 @@ def decoded(path):
                 process.terminate(); process.wait(timeout=10)
     else:
         try:
-            with zstd.open(path,'rb') as stream:
+            with open_stream(path) as source, zstd.open(source, 'rb') as stream:
                 reader=Limited(stream);yield reader
                 while reader.read(1024*1024):pass
         except (EOFError, zstd.ZstdError):
@@ -178,7 +181,7 @@ def has_base(path):
 
 def _hash(path,length):
     result=hashlib.sha256()
-    with path.open('rb') as stream:
+    with open_stream(path) as stream:
         while length:
             data=stream.read(min(length,1024*1024))
             if not data:raise HistoryError('history_base_source_changing')

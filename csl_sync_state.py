@@ -9,7 +9,7 @@ import tempfile
 import uuid
 import hashlib
 
-from csl_sync_fs import (extended_path, flush_directory, make_private_directory, open_lock, open_read,
+from csl_sync_fs import (durable_replace, extended_path, flush_directory, make_private_directory, open_lock, open_read,
                          private_file, protect_fd, protect_path, reparse, replace, try_lock)
 
 
@@ -40,7 +40,7 @@ def private_directory(path):
     return path
 
 
-def private_json(path, data):
+def private_json(path, data, *, durable=False):
     path = extended_path(Path(path))
     directory = private_directory(path.parent)
     fd, temporary = tempfile.mkstemp(prefix='.write-', dir=directory)
@@ -50,7 +50,7 @@ def private_json(path, data):
             json.dump(data, output, separators=(',', ':'))
             output.flush()
             os.fsync(output.fileno())
-        replace(temporary, path)
+        (durable_replace if durable else replace)(temporary, path)
         flush_directory(directory)
     finally:
         try:

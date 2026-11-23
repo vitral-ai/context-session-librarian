@@ -2,7 +2,7 @@
 from contextlib import contextmanager, nullcontext
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import signal
 import subprocess
@@ -14,6 +14,19 @@ from csl_sync_state import SyncError, exclusive
 
 LOCK_ENV = 'CSL_SYNC_PASS_LOCK_FD'
 AUTH_ERRORS = {'sign_in_required', 'credential_revoked', 'session_revoked', 'refresh_outcome_unknown'}
+
+
+def history_notification(provider, filename):
+    parts = PureWindowsPath(filename.casefold()).parts
+    if not parts:
+        return False
+    if provider == 'codex':
+        return parts[0] in ('sessions', 'archived_sessions') and parts[-1].endswith(('.jsonl', '.jsonl.zst'))
+    if provider == 'claude':
+        return len(parts) == 3 and parts[0] == 'projects' and parts[-1].endswith('.jsonl')
+    if provider == 'antigravity':
+        return len(parts) == 2 and parts[0] == 'conversations' and parts[-1].endswith(('.db', '.db-wal'))
+    return False
 
 
 @contextmanager
@@ -99,7 +112,11 @@ def watch(args, state, hints):
     if WINDOWS:
         from csl_sync_windows import DirectoryChanges
         providers = args.providers or ('codex', 'claude', 'antigravity')
-        notifications = DirectoryChanges(hints.module.provider_home(name) for name in providers)
+        roots = {}
+        for name in providers:
+            roots.setdefault(hints.module.provider_home(name), []).append(name)
+        notifications = DirectoryChanges(roots, lambda root, filename:
+                                         any(history_notification(p, filename) for p in roots[root]))
     try:
         with exclusive(state.root) as fd, notifications as changes:
             while True:

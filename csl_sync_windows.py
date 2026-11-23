@@ -5,6 +5,7 @@ from functools import lru_cache
 import os
 from pathlib import Path
 import stat
+import struct
 
 if os.name == 'nt':
     import msvcrt
@@ -41,6 +42,7 @@ if os.name == 'nt':
     close_handle = api(kernel, 'CloseHandle', w.BOOL, w.HANDLE)
     local_free = api(kernel, 'LocalFree', w.HLOCAL, w.HLOCAL)
     file_info = api(kernel, 'GetFileInformationByHandleEx', w.BOOL, w.HANDLE, c.c_int, pointer, w.DWORD)
+    move_file = api(kernel, 'MoveFileExW', w.BOOL, w.LPCWSTR, w.LPCWSTR, w.DWORD)
     named_security = api(security, 'GetNamedSecurityInfoW', w.DWORD, w.LPWSTR, c.c_int, w.DWORD, out, out, out, out, out)
     get_ace = api(security, 'GetAce', w.BOOL, pointer, w.DWORD, out)
     to_string_sid = api(security, 'ConvertSidToStringSidW', w.BOOL, pointer, out)
@@ -187,7 +189,9 @@ class DirectoryWatch:
         self.pending = False
         if not ok and c.get_last_error() != 1022:  # ERROR_NOTIFY_ENUM_DIR (overflow)
             raise c.WinError(c.get_last_error())
+        data = self.buffer.raw[:transferred.value] if ok else b''
         self.arm()
+        return notification_paths(data)
 
     def close(self):
         if self.pending:
@@ -198,10 +202,22 @@ class DirectoryWatch:
         close_handle(self.event)
 
 
+def notification_paths(data):
+    offset = 0
+    while offset + 12 <= len(data):
+        following, _, length = struct.unpack_from('<III', data, offset)
+        start = offset + 12
+        yield data[start:start + length].decode('utf-16-le', errors='surrogatepass')
+        if not following:
+            break
+        offset += following
+
+
 class DirectoryChanges:
     """Use native notifications only as hints. Timed verified scans still run."""
-    def __init__(self, paths):
+    def __init__(self, paths, accept=lambda _root, _name: True):
         self.paths = tuple(dict.fromkeys(paths))
+        self.accept = accept
         self.watches = {}
 
     def __enter__(self):
@@ -220,20 +236,23 @@ class DirectoryChanges:
                     self.watches[path] = DirectoryWatch(path)
                 except OSError:
                     pass  # Missing or unsupported roots remain on the timed scan.
-        rows = list(self.watches.items())
-        if not rows:
-            time.sleep(seconds)
-            return False
-        events = (w.HANDLE * len(rows))(*(watch.event for _, watch in rows))
-        index = wait_handles(len(rows), events, False, max(1, int(seconds * 1000)))
-        if index < len(rows):
+        deadline = time.monotonic() + seconds
+        while (remaining := deadline - time.monotonic()) > 0:
+            rows = list(self.watches.items())
+            if not rows:
+                time.sleep(remaining)
+                break
+            events = (w.HANDLE * len(rows))(*(watch.event for _, watch in rows))
+            index = wait_handles(len(rows), events, False, max(1, int(remaining * 1000)))
+            if index >= len(rows):
+                break
             path, watch = rows[index]
             try:
-                watch.consume()
+                if any(self.accept(path, name) for name in watch.consume()):
+                    return True
             except OSError:
                 watch.close()
                 del self.watches[path]
-            return True
         return False
 
 
@@ -263,6 +282,12 @@ def replace(source, target):
             raise c.WinError(c.get_last_error())
     finally:
         close_handle(handle)
+
+
+def durable_replace(source, target):
+    # REPLACE_EXISTING | WRITE_THROUGH. The temporary file is already flushed.
+    if not move_file(os.fsdecode(source), os.fsdecode(target), 0x9):
+        raise c.WinError(c.get_last_error())
 
 
 def change_time(path, _stat):

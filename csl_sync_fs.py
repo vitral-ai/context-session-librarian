@@ -5,10 +5,11 @@ import stat
 WINDOWS = os.name == 'nt'
 
 if WINDOWS:
-    from csl_sync_windows import change_time, extended_path, is_private, open_lock, open_read, replace
+    from csl_sync_windows import change_time, durable_replace, extended_path, is_private, open_lock, open_read, replace
 else:
     import fcntl
     from os import replace
+    durable_replace = replace
 
     def extended_path(path):
         return path

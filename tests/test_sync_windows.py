@@ -11,12 +11,15 @@ import uuid
 from unittest.mock import patch
 
 from csl_sync_engine import Collector, Providers
+from csl_sync import pull
+from csl_sync_auth import Tokens
 from csl_sync_http import Registry
+from csl_codex_history import decoded
 from sync_support import FakeTokens, Peer
 
 from csl_sync_fs import WINDOWS, open_read
 from csl_sync_state import State, exclusive, private_directory, private_json, read_private_json
-from csl_sync_watch import run_pass
+from csl_sync_watch import history_notification, run_pass
 
 
 @unittest.skipUnless(WINDOWS, 'Windows filesystem behavior')
@@ -33,6 +36,54 @@ class WindowsSyncTests(unittest.TestCase):
             private_json(path, {'generation': 2})
             self.assertEqual(old.read(), b'{"generation":1}')
         self.assertEqual(read_private_json(path), {'generation': 2})
+
+    def test_refresh_marker_is_written_through_before_token_exchange(self):
+        from csl_sync_windows import move_file
+
+        tokens = Tokens(self.root, {'token_endpoint': 'https://localhost/token', 'client_id': 'fixture'})
+        private_json(tokens.path, {'access_token': 'expired', 'refresh_token': 'fixture',
+                                  'refresh_state': 'ready', 'expires_at': 0})
+        with patch('csl_sync_windows.move_file', wraps=move_file) as move:
+            def exchange(_fields):
+                self.assertEqual(read_private_json(tokens.path)['refresh_state'], 'inflight')
+                self.assertEqual(move.call_args.args[2], 0x9)
+                return {'token_type': 'bearer', 'access_token': 'renewed', 'refresh_token': 'successor',
+                        'expires_in': 600}
+
+            with patch.object(tokens, '_exchange', side_effect=exchange):
+                self.assertEqual(tokens.access_token(), 'renewed')
+            self.assertEqual(move.call_count, 2)
+
+    def test_watch_ignores_collector_state_and_accepts_native_history(self):
+        from csl_sync_windows import DirectoryChanges
+
+        sessions = self.root / 'sessions'
+        sessions.mkdir()
+        with DirectoryChanges([self.root], lambda _root, name: history_notification('codex', name)) as changes:
+            self.assertFalse(changes.wait(0.05))
+            (self.root / 'state.sqlite3').write_bytes(b'unrelated')
+            self.assertFalse(changes.wait(2))
+            (sessions / 'latest.jsonl').write_bytes(b'{}\r\n')
+            self.assertTrue(changes.wait(2))
+
+    def test_lineage_reader_allows_rollout_rotation(self):
+        path = self.root / 'rollout.jsonl'
+        path.write_bytes(b'{}\r\n')
+        with decoded(path) as source:
+            path.rename(path.with_suffix('.old'))
+            self.assertEqual(source.read(), b'{}\r\n')
+
+    def test_pull_uses_a_regular_file_for_ntfs_reserved_names(self):
+        class Registry:
+            def download(self, path, sink, _limit):
+                if path != '/sessions/session%3A123/package':
+                    raise AssertionError('registry request changed the opaque ID')
+                sink.write(b'PK\x03\x04')
+                return 4
+
+        stored = Path(pull(Registry(), 'session:123', self.root)['path'])
+        self.assertNotIn(':', stored.name)
+        self.assertEqual(stored.read_bytes(), b'PK\x03\x04')
 
     def test_notification_and_rotate_while_reading(self):
         from csl_sync_windows import DirectoryChanges
