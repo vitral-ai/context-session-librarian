@@ -65,11 +65,10 @@ def run_pass(args, fd):
     options = {}
     if WINDOWS:
         import msvcrt
-        command[1:2] = ['-m', 'csl_sync']
+        command[1] = str(Path(__file__).resolve().with_name('csl_sync.py'))
         handle = msvcrt.get_osfhandle(fd)
         env[LOCK_ENV] = str(handle)
         options['startupinfo'] = subprocess.STARTUPINFO(lpAttributeList={'handle_list': [handle]})
-        options['cwd'] = Path(__file__).resolve().parent
         os.set_handle_inheritable(handle, True)
     else:
         env[LOCK_ENV] = str(fd)

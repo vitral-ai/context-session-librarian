@@ -1,5 +1,6 @@
 """Native Windows checks for ACLs, live file handles, and wake notifications."""
 import argparse
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -76,14 +77,41 @@ class WindowsSyncTests(unittest.TestCase):
     def test_pull_uses_a_regular_file_for_ntfs_reserved_names(self):
         class Registry:
             def download(self, path, sink, _limit):
-                if path != '/sessions/session%3A123/package':
-                    raise AssertionError('registry request changed the opaque ID')
                 sink.write(b'PK\x03\x04')
+                requests.append(path)
                 return 4
 
+        requests = []
         stored = Path(pull(Registry(), 'session:123', self.root)['path'])
         self.assertNotIn(':', stored.name)
         self.assertEqual(stored.read_bytes(), b'PK\x03\x04')
+        cases = [Path(pull(Registry(), name, self.root)['path']) for name in ('sess-a', 'Sess-a')]
+        self.assertNotEqual(cases[0].name.casefold(), cases[1].name.casefold())
+        self.assertEqual(requests, ['/sessions/session%3A123/package', '/sessions/sess-a/package',
+                                    '/sessions/Sess-a/package'])
+
+    def test_replace_falls_back_when_posix_rename_is_unsupported(self):
+        def unsupported(*_):
+            ctypes.set_last_error(50)
+            return False
+
+        path = self.root / 'state.json'
+        with patch('csl_sync_windows.set_file_info', side_effect=unsupported):
+            private_json(path, {'generation': 1})
+            private_json(path, {'generation': 2})
+        self.assertEqual(read_private_json(path), {'generation': 2})
+
+    def test_watch_worker_resolves_relative_state_from_caller_directory(self):
+        args = argparse.Namespace(sync_home=Path('sync'), all=False, days=30, providers=['codex'])
+        cwd = Path.cwd()
+        os.chdir(self.root.parent)
+        try:
+            with exclusive(self.root) as fd:
+                code, _, stderr, _ = run_pass(args, fd)
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(code, 2)
+        self.assertIn('"sign_in_required"', stderr)
 
     def test_notification_and_rotate_while_reading(self):
         from csl_sync_windows import DirectoryChanges

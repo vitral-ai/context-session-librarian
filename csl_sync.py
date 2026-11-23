@@ -160,8 +160,8 @@ def pull(registry, session_id, out_dir):
         raise SyncError('invalid_session_id')
     directory = output_directory(out_dir)
     filename = session_id + '.zip'
-    if WINDOWS and os.path.isreserved(filename):
-        # '%' cannot occur in a registry ID. Keep the usual path for safe IDs.
+    if WINDOWS and (filename != filename.lower() or os.path.isreserved(filename)):
+        # '%' separates opaque names from the lowercase canonical registry IDs.
         filename = 'session%' + hashlib.sha256(session_id.encode('ascii')).hexdigest() + '.zip'
     target = directory / filename
     # The same session can be resumed again (or retried after a failed import): replace

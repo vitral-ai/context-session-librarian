@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import stat
 import struct
+import time
 
 if os.name == 'nt':
     import msvcrt
@@ -228,8 +229,6 @@ class DirectoryChanges:
             watch.close()
 
     def wait(self, seconds):
-        import time
-
         for path in self.paths:
             if path not in self.watches:
                 try:
@@ -278,16 +277,29 @@ def replace(source, target):
     if handle == INVALID_HANDLE:
         raise c.WinError(c.get_last_error())
     try:
-        if not set_file_info(handle, 22, buffer, size):  # FileRenameInfoEx
-            raise c.WinError(c.get_last_error())
+        if set_file_info(handle, 22, buffer, size):  # FileRenameInfoEx
+            return
+        error = c.get_last_error()
     finally:
         close_handle(handle)
+    if error not in (1, 50, 87, 120):  # FileRenameInfoEx unsupported by the OS or volume.
+        raise c.WinError(error)
+    os.replace(source, target)
 
 
 def durable_replace(source, target):
     # REPLACE_EXISTING | WRITE_THROUGH. The temporary file is already flushed.
-    if not move_file(os.fsdecode(source), os.fsdecode(target), 0x9):
-        raise c.WinError(c.get_last_error())
+    source, target = os.fsdecode(source), os.fsdecode(target)
+    for delay in (0, 0.01, 0.025, 0.05, 0.1, 0.2):
+        if delay:
+            time.sleep(delay)
+        if move_file(source, target, 0x9):
+            return
+        error = c.get_last_error()
+        # A concurrent status read may briefly hold the old destination.
+        if error not in (5, 32):
+            break
+    raise c.WinError(error)
 
 
 def change_time(path, _stat):

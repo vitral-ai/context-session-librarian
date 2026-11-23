@@ -9,7 +9,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
-$State = [IO.Path]::GetFullPath($State)
+$State = (Resolve-Path -LiteralPath $State).Path
 $Python = (Resolve-Path -LiteralPath $Python).Path
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 
