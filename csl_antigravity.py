@@ -14,9 +14,8 @@ import re
 import shutil
 import sqlite3
 import struct
-import sys
 import tempfile
-from urllib.parse import quote, unquote_to_bytes, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 from urllib.request import url2pathname
 import uuid
 from csl_sync_fs import WINDOWS, open_stream, reparse
@@ -261,16 +260,6 @@ def _metadata_blob(db):
     return row[0] if row and isinstance(row[0], bytes) else b''
 
 
-def local_workspace_path(path):
-    if WINDOWS:
-        return url2pathname(path)
-    raw = unquote_to_bytes(path)
-    try:
-        return raw.decode('utf-8')
-    except UnicodeDecodeError:
-        return raw.decode(sys.getfilesystemencoding(), errors='replace')
-
-
 def metadata(db, native_id):
     blob = _metadata_blob(db)
     cwd = None
@@ -282,7 +271,7 @@ def metadata(db, native_id):
         parts = urlsplit(uri)
         if parts.scheme == 'file' and parts.netloc in ('', 'localhost'):
             try:
-                cwd = local_workspace_path(parts.path)
+                cwd = url2pathname(parts.path) if WINDOWS else unquote(parts.path)
             except (OSError, ValueError):
                 pass
     created = timestamp(first(blob, 2)); updated = created

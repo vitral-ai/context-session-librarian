@@ -2,12 +2,10 @@
 import errno
 import os
 import sqlite3
-import sys
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
-from unittest.mock import patch
 
 import csl_antigravity
 from csl_sync_engine import Collector, PROVIDERS
@@ -90,14 +88,7 @@ class SQLiteSyncTests(unittest.TestCase):
             db.execute("UPDATE trajectory_metadata_blob SET data=? WHERE id='main'",
                        (pb((7, 'file:///tmp/%FF')),))
         with csl_antigravity.snapshot(self.home, self.sid, scratch=scratch) as (db, _):
-            expected = b'/tmp/\xff'.decode(sys.getfilesystemencoding(), errors='replace')
-            self.assertEqual(csl_antigravity.metadata(db, self.sid)['cwd'], expected)
-
-    @unittest.skipIf(WINDOWS, 'POSIX filesystem byte paths')
-    def test_workspace_uri_prefers_utf8_over_the_reader_locale(self):
-        with patch.object(sys, 'getfilesystemencoding', return_value='iso8859-1'):
-            self.assertEqual(csl_antigravity.local_workspace_path('/tmp/caf%C3%A9'), '/tmp/café')
-            self.assertEqual(csl_antigravity.local_workspace_path('/tmp/caf%E9'), '/tmp/café')
+            self.assertEqual(csl_antigravity.metadata(db, self.sid)['cwd'], '/tmp/\ufffd')
 
     def test_wal_appears_changes_checkpoints_and_disappears_between_passes(self):
         self.assertEqual(self.run_pass()['synced'], 1)
