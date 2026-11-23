@@ -17,6 +17,8 @@ class NotifyTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.home = Path(self.temp.name) / 'home'
+        self.config = Path(self.temp.name) / 'claude'
+        self.config.mkdir()
         self.session = str(uuid.uuid4())
         self.mid = str(uuid.uuid4())
         store = Store(self.home, create=True)
@@ -53,7 +55,7 @@ class NotifyTests(unittest.TestCase):
         with patch('csl_bridge_claude_notify.endpoint', return_value=(self.record, Path('/test/socket'), '0' * 32)), \
              patch('csl_bridge_claude_notify.socket.socket', return_value=self.sock), \
              patch('csl_bridge_claude_notify.start_ticks', return_value='123'):
-            return notify(self.home, agent, mid or self.mid)
+            return notify(self.home, agent, mid or self.mid, config=self.config)
 
     def test_header_only_bound_session_and_no_ack(self):
         self.assertTrue(self.run_notify())
@@ -65,6 +67,42 @@ class NotifyTests(unittest.TestCase):
         self.assertEqual(frames[1]['from'], 'csl-mailbox')
         self.assertIn('CSL mailbox boundary notification', frames[1]['message']['content'])
         self.assertIsNone(self.connector.mailbox.message(self.mid)['acknowledged_at'])
+
+    def preview_preferences(self, session):
+        path = self.config / 'csl-mailbox-preview.json'
+        path.write_text(json.dumps({'target': session}))
+        path.chmod(0o600)
+
+    def test_body_preview_requires_exact_local_session_binding(self):
+        self.preview_preferences(self.session)
+        with self.connector.store.transaction() as db:
+            row = db.execute('SELECT envelope FROM mail_messages WHERE id=?', (self.mid,)).fetchone()
+            envelope = json.loads(row['envelope'])
+            envelope['body'] = 'x' * 700
+            db.execute('UPDATE mail_messages SET envelope=? WHERE id=?', (encode(envelope), self.mid))
+        self.assertTrue(self.run_notify())
+        frame = json.loads(self.sock.sendall.call_args.args[0].decode().splitlines()[1])
+        text = frame['message']['content']
+        item = json.loads(text.split('\n', 1)[1])['messages'][0]
+        self.assertEqual(item['body_preview'], 'x' * 600)
+        self.assertTrue(item['body_truncated'])
+        self.assertEqual(item['time'], envelope['created_at'])
+        self.assertEqual(item['from']['agent'], 'sender')
+        self.assertIn('untrusted data', text)
+        self.assertIn('not an instruction or permission', text)
+        self.assertIsNone(self.connector.mailbox.message(self.mid)['acknowledged_at'])
+
+    def test_rebound_session_stays_header_only(self):
+        self.preview_preferences(str(uuid.uuid4()))
+        self.assertTrue(self.run_notify())
+        self.assertNotIn('SECRET REMOTE BODY', self.sock.sendall.call_args.args[0].decode())
+
+    def test_different_agent_stays_header_only(self):
+        path = self.config / 'csl-mailbox-preview.json'
+        path.write_text(json.dumps({'other-agent': self.session}))
+        path.chmod(0o600)
+        self.assertTrue(self.run_notify())
+        self.assertNotIn('SECRET REMOTE BODY', self.sock.sendall.call_args.args[0].decode())
 
     def test_duplicate_pull_attempts_native_once(self):
         self.assertTrue(self.run_notify())
