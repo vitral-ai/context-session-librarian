@@ -636,7 +636,8 @@ tests are described in the standalone specification; they do not establish
 universal OS/runtime support. Native task outcomes (completed, failed, interrupted) remain
 separate from messages; an unobserved cause remains unknown. An agent's prose
 claim such as refusal or need for approval is not a runtime fact or owner grant.
-# Partial runtime availability
+
+## Partial runtime availability
 
 Registered Codex threads need not all be loaded at the same time. The connector
 attaches only loaded threads; other agents report `agent_not_loaded`. Coordination
@@ -646,4 +647,3 @@ on its next loaded-list check (about two seconds), attaches without changing its
 configuration, and drains pending work. Loaded siblings continue working. This
 adds no service, timer or background loop and never hosts an unloaded thread.
 Task-independent mailbox persistence does not require a loaded native thread.
-

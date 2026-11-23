@@ -3,17 +3,17 @@ import threading
 import time
 import unittest
 
-from test_bridge import BridgeTests, FakeRuntime, uid
+import test_bridge as fixtures
 
 
 class PartialRuntimeTests(unittest.TestCase):
     def setUp(self):
-        self.fixture = BridgeTests()
+        self.fixture = fixtures.BridgeTests()
         self.fixture.setUp()
         self.addCleanup(self.fixture.tearDown)
         self.connector = self.fixture.connector
         self.runtime = self.fixture.runtime
-        self.late = uid()
+        self.late = fixtures.uid()
         self.connector.agents['late'] = self.late
         self.connector.locks['late'] = threading.RLock()
         self.connector.waiters['late'] = 0
