@@ -24,7 +24,7 @@ def fingerprint(request):
 
 def ssh_command(alias, control_path, remote_command):
     return ['ssh', '-T', '-oBatchMode=yes', '-oStrictHostKeyChecking=yes',
-            '-oClearAllForwardings=yes', '-oConnectTimeout=8',
+            '-oClearAllForwardings=yes', '-oConnectTimeout=15',
             '-oServerAliveInterval=5', '-oServerAliveCountMax=2',
             '-oControlMaster=auto', '-oControlPersist=60',
             '-oControlPath=' + control_path, '--', alias, remote_command]

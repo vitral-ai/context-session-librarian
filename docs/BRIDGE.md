@@ -683,7 +683,7 @@ authority. Keep them with the bridge state; removing them causes safe receipt
 reconciliation/replay, not loss of queued mail. Tests exercise disk persistence,
 disconnect after recipient persistence, deduplication, and source/endpoint ACLs.
 
-SSH uses an eight-second connection timeout and five-second keepalives with two
+SSH uses a fifteen-second connection timeout and five-second keepalives with two
 misses allowed. The complete request plus return-mail acknowledgement shares a
 22-second deadline, below the ordinary 25-second operator deadline. A broken
 link reports `uncertain` with `reason: ssh_pull_unavailable` and instructions to

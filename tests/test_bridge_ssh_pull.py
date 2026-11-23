@@ -58,7 +58,7 @@ class PullMailTests(unittest.TestCase):
     def test_ssh_rejects_stale_silent_streams_and_reopens_on_demand(self):
         command = ssh_command("remote", "/private/control", "fixed-command")
         for option in ("-oServerAliveInterval=5", "-oServerAliveCountMax=2",
-                       "-oConnectTimeout=8", "-oControlMaster=auto", "-oControlPersist=60"):
+                       "-oConnectTimeout=15", "-oControlMaster=auto", "-oControlPersist=60"):
             self.assertIn(option, command)
         self.assertEqual(command[-3:], ["--", "remote", "fixed-command"])
 
