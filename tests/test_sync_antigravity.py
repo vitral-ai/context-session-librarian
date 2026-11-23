@@ -1,4 +1,5 @@
 """Collector integration with fabricated SQLite histories; no native model calls."""
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -7,7 +8,7 @@ from pathlib import Path
 
 import csl_antigravity
 from csl_sync_engine import Collector, PROVIDERS
-from csl_sync_fs import extended_path
+from csl_sync_fs import WINDOWS, extended_path
 from csl_sync_http import HTTP, Registry
 from csl_sync_state import State
 import csl_sync_providers as providers
@@ -72,6 +73,16 @@ class SQLiteSyncTests(unittest.TestCase):
         with csl_antigravity.snapshot(self.home, self.sid, scratch=extended_path(scratch)) as (db, _):
             row = csl_antigravity.metadata(db, self.sid)
             self.assertEqual(Path(row['cwd']), self.project)
+
+    @unittest.skipIf(WINDOWS, 'POSIX filesystem byte paths')
+    def test_snapshot_preserves_non_utf8_filesystem_bytes(self):
+        scratch = self.root / os.fsdecode(b'scratch-\xff')
+        scratch.mkdir()
+        with sqlite3.connect(self.path) as db:
+            db.execute("UPDATE trajectory_metadata_blob SET data=? WHERE id='main'",
+                       (pb((7, 'file:///tmp/%FF')),))
+        with csl_antigravity.snapshot(self.home, self.sid, scratch=scratch) as (db, _):
+            self.assertEqual(csl_antigravity.metadata(db, self.sid)['cwd'], '/tmp/\ufffd')
 
     def test_wal_appears_changes_checkpoints_and_disappears_between_passes(self):
         self.assertEqual(self.run_pass()['synced'], 1)

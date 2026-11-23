@@ -15,10 +15,10 @@ import shutil
 import sqlite3
 import struct
 import tempfile
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 from urllib.request import url2pathname
 import uuid
-from csl_sync_fs import open_stream, reparse
+from csl_sync_fs import WINDOWS, open_stream, reparse
 
 
 class FormatError(ValueError):
@@ -214,7 +214,7 @@ def _schema(db):
 
 def read_only_uri(path):
     # Escape before SQLite parses the query or authority, including Win32 extended paths.
-    return 'file:' + quote(str(Path(path).absolute()), safe='/:') + '?mode=ro'
+    return 'file:' + quote(os.fsencode(Path(path).absolute()), safe='/:') + '?mode=ro'
 
 
 @contextmanager
@@ -269,7 +269,7 @@ def metadata(db, native_id):
         parts = urlsplit(uri)
         if parts.scheme == 'file' and parts.netloc in ('', 'localhost'):
             try:
-                cwd = url2pathname(parts.path)
+                cwd = url2pathname(parts.path) if WINDOWS else unquote(parts.path)
             except (OSError, ValueError):
                 pass
     created = timestamp(first(blob, 2)); updated = created
