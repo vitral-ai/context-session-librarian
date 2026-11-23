@@ -16,7 +16,7 @@ import subprocess
 import uuid
 
 from csl_canonical import strict_json
-from csl_sync_fs import open_stream
+from csl_sync_fs import open_stream, reparse
 
 MAX_DEPTH = 32
 MAX_FILE = 2 * 1024**3
@@ -75,7 +75,7 @@ def _safe(path, root):
         cursor = root
         for part in path.relative_to(root).parts:
             cursor = cursor / part
-            if cursor.is_symlink():
+            if reparse(cursor):
                 raise HistoryError('history_base_symlink')
         if not path.is_file():
             raise HistoryError('history_base_missing')

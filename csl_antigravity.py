@@ -15,7 +15,8 @@ import shutil
 import sqlite3
 import struct
 import tempfile
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, urlsplit
+from urllib.request import url2pathname
 import uuid
 from csl_sync_fs import open_stream, reparse
 
@@ -211,6 +212,11 @@ def _schema(db):
         raise FormatError('unsupported_antigravity_step_format')
 
 
+def read_only_uri(path):
+    # Escape before SQLite parses the query or authority, including Win32 extended paths.
+    return 'file:' + quote(str(Path(path).absolute()), safe='/:') + '?mode=ro'
+
+
 @contextmanager
 def snapshot(root, native_id, scratch=None):
     """Copy exact DB/WAL bytes into private storage; SQL never opens the origin."""
@@ -231,7 +237,7 @@ def snapshot(root, native_id, scratch=None):
             raise FormatError('antigravity_source_changing')
         db = None
         try:
-            db = sqlite3.connect('file:' + str(path) + '?mode=ro', uri=True)
+            db = sqlite3.connect(read_only_uri(path), uri=True)
             db.execute('PRAGMA query_only=ON'); db.execute('PRAGMA trusted_schema=OFF')
             _schema(db)
             meta = db.execute('SELECT cascade_id FROM trajectory_meta').fetchall()
@@ -262,7 +268,10 @@ def metadata(db, native_id):
     if uri:
         parts = urlsplit(uri)
         if parts.scheme == 'file' and parts.netloc in ('', 'localhost'):
-            cwd = unquote(parts.path)
+            try:
+                cwd = url2pathname(parts.path)
+            except (OSError, ValueError):
+                pass
     created = timestamp(first(blob, 2)); updated = created
     count = 0; title = None
     for idx, kind, payload in db.execute('SELECT idx,step_type,step_payload FROM steps ORDER BY idx'):
@@ -369,7 +378,7 @@ def package_reason(db):
 
 def rewrite_copy(source, destination, source_id, new_id, cwd):
     """Independent native copy. Historical blobs stay raw except local authority/IDs."""
-    db = sqlite3.connect('file:' + str(source) + '?mode=ro', uri=True)
+    db = sqlite3.connect(read_only_uri(source), uri=True)
     out = sqlite3.connect(destination)
     try:
         _schema(db)

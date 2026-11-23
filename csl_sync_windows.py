@@ -222,19 +222,23 @@ class DirectoryChanges:
         self.watches = {}
 
     def __enter__(self):
+        self.arm()
         return self
 
     def __exit__(self, *exc):
         for watch in self.watches.values():
             watch.close()
 
-    def wait(self, seconds):
+    def arm(self):
         for path in self.paths:
             if path not in self.watches:
                 try:
                     self.watches[path] = DirectoryWatch(path)
                 except OSError:
                     pass  # Missing or unsupported roots remain on the timed scan.
+
+    def wait(self, seconds):
+        self.arm()
         deadline = time.monotonic() + seconds
         while (remaining := deadline - time.monotonic()) > 0:
             rows = list(self.watches.items())

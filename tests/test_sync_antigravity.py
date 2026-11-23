@@ -5,7 +5,9 @@ import unittest
 import uuid
 from pathlib import Path
 
+import csl_antigravity
 from csl_sync_engine import Collector, PROVIDERS
+from csl_sync_fs import extended_path
 from csl_sync_http import HTTP, Registry
 from csl_sync_state import State
 import csl_sync_providers as providers
@@ -63,6 +65,13 @@ class SQLiteSyncTests(unittest.TestCase):
         self.assertEqual(len(self.peer.writes), writes)
         self.assertEqual(self.local()['files']['main']['revision'], revision)
         self.assertEqual(self.path.read_bytes(), original)
+
+    def test_snapshot_with_uri_metacharacters_preserves_native_workspace_path(self):
+        scratch = self.root / 'scratch #%'
+        scratch.mkdir()
+        with csl_antigravity.snapshot(self.home, self.sid, scratch=extended_path(scratch)) as (db, _):
+            row = csl_antigravity.metadata(db, self.sid)
+            self.assertEqual(Path(row['cwd']), self.project)
 
     def test_wal_appears_changes_checkpoints_and_disappears_between_passes(self):
         self.assertEqual(self.run_pass()['synced'], 1)

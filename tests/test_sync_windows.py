@@ -15,7 +15,7 @@ from csl_sync_engine import Collector, Providers
 from csl_sync import pull
 from csl_sync_auth import Tokens
 from csl_sync_http import Registry
-from csl_codex_history import decoded
+from csl_codex_history import HistoryError, _safe, decoded
 from sync_support import FakeTokens, Peer
 
 from csl_sync_fs import WINDOWS, open_read
@@ -73,6 +73,25 @@ class WindowsSyncTests(unittest.TestCase):
         with decoded(path) as source:
             path.rename(path.with_suffix('.old'))
             self.assertEqual(source.read(), b'{}\r\n')
+
+    def test_lineage_rejects_windows_junction_before_read(self):
+        outside = self.root / 'outside'
+        profile = self.root / 'profile'
+        outside.mkdir()
+        profile.mkdir()
+        (outside / 'rollout.jsonl').write_bytes(b'{}\r\n')
+        archive = profile / 'archived_sessions'
+        subprocess.run(['cmd.exe', '/d', '/c', 'mklink', '/J', str(archive), str(outside)],
+                       check=True, capture_output=True)
+        with self.assertRaisesRegex(HistoryError, 'history_base_symlink'):
+            _safe(archive / 'rollout.jsonl', profile)
+
+    def test_watch_is_armed_before_the_first_wait(self):
+        from csl_sync_windows import DirectoryChanges
+
+        with DirectoryChanges([self.root]) as changes:
+            (self.root / 'first.jsonl').write_bytes(b'{}\r\n')
+            self.assertTrue(changes.wait(2))
 
     def test_pull_uses_a_regular_file_for_ntfs_reserved_names(self):
         class Registry:
