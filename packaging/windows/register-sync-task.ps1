@@ -4,7 +4,8 @@ param(
     [string]$Python = (Get-Command python.exe -CommandType Application -ErrorAction Stop).Source,
     [string]$State = (Join-Path $env:LOCALAPPDATA 'csl\sync'),
     [string]$TaskName = 'CSL Session Collector',
-    [switch]$AtStartup
+    [switch]$AtStartup,
+    [switch]$Replace
 )
 
 $ErrorActionPreference = 'Stop'
@@ -60,4 +61,5 @@ if ($AtStartup) {
 $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal `
-    -Trigger $trigger -Settings $settings -Description 'Publish opted-in native CSL sessions.' | Out-Null
+    -Trigger $trigger -Settings $settings -Description 'Publish opted-in native CSL sessions.' `
+    -Force:$Replace | Out-Null
