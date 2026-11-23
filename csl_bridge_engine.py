@@ -233,7 +233,7 @@ class Connector:
                 'last_task': last[0] if last else None}
 
     def refresh_loaded(self, runtime):
-        """Refresh within the existing runtime loop; never host an unloaded thread."""
+        """Resume only threads observed loaded, within the existing runtime loop."""
         loaded, cursor = set(), None
         while True:
             page = runtime.call('thread/loaded/list', {'cursor': cursor, 'limit': 100})
@@ -243,13 +243,13 @@ class Connector:
                 break
         previous = self.attached_threads or set()
         attached = previous & loaded
-        for thread in set(self.agents.values()) & loaded - previous:
+        for thread in set(self.agents.values()) & (loaded - previous):
             try:
                 runtime.call('thread/resume', {'threadId': thread, 'excludeTurns': True})
                 attached.add(thread)
             except RuntimeRejected:
-                # A thread can unload between listing and attaching. Other agents
-                # remain available; the next loaded-list check retries attachment.
+                # A rejected attachment must not disconnect sibling agents.
+                # Codex has no atomic loaded-only resume; see docs/BRIDGE.md.
                 continue
         self.attached_threads = attached
         return attached - previous

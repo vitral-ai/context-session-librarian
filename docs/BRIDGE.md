@@ -645,5 +645,8 @@ messages for those agents remain pending with the same reason and request ID.
 After the owner loads a thread, the existing connector runtime loop discovers it
 on its next loaded-list check (about two seconds), attaches without changing its
 configuration, and drains pending work. Loaded siblings continue working. This
-adds no service, timer or background loop and never hosts an unloaded thread.
+adds no service, timer or background loop. UUIDs absent from the loaded snapshot
+are never passed to resume. Codex does not offer an atomic loaded-only attach:
+if a thread unloads between listing and resume, native resume can reload it
+from disk. Avoid concurrently unloading a thread while the connector attaches.
 Task-independent mailbox persistence does not require a loaded native thread.
