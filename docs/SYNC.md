@@ -272,9 +272,11 @@ with a custom `--home`. The task uses the profile paths from the PowerShell
 session that registers it. To update an existing task, stop it with
 `Stop-ScheduledTask`, run the registration script with `-Replace` and the
 same task name and options, then start the task again. A sync pass already
-in progress can still hold the collector lock after the task stops. Check
-that `Get-ScheduledTask` shows `Running` after the restart. If the worker
-still holds the lock, let the pass finish and retry `Start-ScheduledTask`.
+in progress can still hold the collector lock after the task stops. Recheck
+the named task with `Get-ScheduledTask` after startup to confirm it stays
+`Running`. If it stopped, run `python -m csl_sync sync status` with the same
+state directory. If `last_error` is `collector_busy`, let the old pass
+finish, retry `Start-ScheduledTask`, and recheck the task.
 For a headless host, an administrator can register
 with `-AtStartup`. Task Scheduler then runs the collector under the same
 user without storing that user's password. The S4U startup task cannot use
