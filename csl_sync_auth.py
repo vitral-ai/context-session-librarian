@@ -40,9 +40,12 @@ class Tokens:
                 'state': value.get('refresh_state', 'signed_out') if value else 'signed_out',
                 'expires_at': value.get('expires_at') if value else None}
 
+    def _save(self, value):
+        private_json(self.path, value, durable=True)
+
     def revoke_locally(self):
         with exclusive(self.root, 'oauth.lock'):
-            private_json(self.path, {'refresh_state': 'revoked'})
+            self._save({'refresh_state': 'revoked'})
 
     def _exchange(self, fields):
         return self.http.request(checked_url(self.config['token_endpoint']), 'POST',
@@ -66,23 +69,23 @@ class Tokens:
                 value['replay_attempted'] = True
             else:
                 value.update(refresh_state='inflight', refresh_started_at=self.clock(), replay_attempted=False)
-            private_json(self.path, value)  # Durable BEFORE consuming a rotating credential.
+            self._save(value)  # Durable BEFORE consuming a rotating credential.
             for attempt in range(2):
                 try:
                     response = self._exchange({'grant_type': 'refresh_token', 'refresh_token': value['refresh_token'],
                                                'client_id': self.config['client_id']})
                     result = token_response(response)
-                    private_json(self.path, result)
+                    self._save(result)
                     return result['access_token']
                 except SyncError as error:
                     if error.code in ('invalid_grant', 'session_revoked'):
-                        private_json(self.path, {'refresh_state': 'revoked'})
+                        self._save({'refresh_state': 'revoked'})
                         raise SyncError('credential_revoked') from None
                     elapsed = self.clock() - value['refresh_started_at']
                     if attempt == 0 and grace and 0 <= elapsed < grace and not value['replay_attempted']:
                         # Only opt in when the issuer documents successor replay, never generic retry.
                         value['replay_attempted'] = True
-                        private_json(self.path, value)
+                        self._save(value)
                         continue
                     raise SyncError('refresh_outcome_unknown') from None
 
@@ -140,7 +143,7 @@ class Tokens:
                     fields['device_label'] = device_label
                 # An uncertain code exchange is not repeated; start a fresh browser flow.
                 value = token_response(self._exchange(fields))
-                private_json(self.path, value)
+                self._save(value)
                 return self.status()
 
 

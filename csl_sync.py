@@ -14,6 +14,7 @@ import urllib.parse
 
 from csl_sync_auth import Tokens, discover
 from csl_sync_engine import Collector, PROVIDERS, Providers
+from csl_sync_fs import WINDOWS, protect_fd, protect_path, reparse, replace
 from csl_sync_http import Registry, checked_url
 from csl_sync_state import State, SyncError, exclusive, now, private_json
 from csl_sync_watch import pass_lock
@@ -136,8 +137,11 @@ SESSION_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}')
 def output_directory(path):
     """Use an existing directory as it is; only a directory we create gets mode 0700."""
     path = Path(path).expanduser().absolute()
-    if path.is_symlink():
+    if reparse(path):
         raise SyncError('unsafe_output_directory')
+    if WINDOWS:
+        from csl_sync_state import private_directory
+        return private_directory(path)
     if not path.exists():
         path.mkdir(parents=True, mode=0o700)
     info = path.stat()
@@ -155,14 +159,20 @@ def pull(registry, session_id, out_dir):
     if SESSION_ID.fullmatch(session_id) is None:
         raise SyncError('invalid_session_id')
     directory = output_directory(out_dir)
-    target = directory / (session_id + '.zip')
+    filename = session_id + '.zip'
+    if WINDOWS and (filename != filename.lower() or os.path.isreserved(filename)):
+        # '%' separates opaque names from the lowercase canonical registry IDs.
+        filename = 'session%' + hashlib.sha256(session_id.encode('ascii')).hexdigest() + '.zip'
+    target = directory / filename
     # The same session can be resumed again (or retried after a failed import): replace
     # a previous pull of it atomically, but never follow a symlink or replace a non-file.
-    if target.is_symlink() or (target.exists() and not target.is_file()):
+    if reparse(target) or (target.exists() and not target.is_file()):
         raise SyncError('unsafe_output_file')
     fd, temporary = tempfile.mkstemp(prefix='.pull-', suffix='.part', dir=directory)
     try:
-        os.fchmod(fd, 0o600)
+        protect_fd(fd)
+        if WINDOWS:
+            protect_path(Path(temporary))
         digest = hashlib.sha256()
         class Sink:
             def write(self, chunk):
@@ -174,7 +184,7 @@ def pull(registry, session_id, out_dir):
         with open(temporary, 'rb') as check:
             if check.read(4) != b'PK\x03\x04':
                 raise SyncError('invalid_server_response')
-        os.replace(temporary, target); temporary = None
+        replace(temporary, target); temporary = None
     finally:
         if fd is not None: os.close(fd)
         if temporary is not None: os.unlink(temporary)
@@ -201,7 +211,8 @@ def port(value):
 
 def add_commands(subparsers, csl):
     parser = subparsers.add_parser('sync', help='Explicit opt-in raw session sync to a configured registry; no automatic service.')
-    default = Path(os.environ.get('XDG_STATE_HOME', str(Path.home()/'.local/state'))) / 'csl/sync'
+    base = os.environ.get('LOCALAPPDATA') if WINDOWS else os.environ.get('XDG_STATE_HOME')
+    default = (Path(base) if base else Path.home() / '.local/state') / 'csl' / 'sync'
     parser.add_argument('--home', dest='sync_home', type=Path, default=default, help='Private state and credentials directory.')
     actions = parser.add_subparsers(dest='sync_action', required=True)
     signin = actions.add_parser('sign-in', help=WARNING, description=WARNING)
@@ -235,3 +246,14 @@ def add_commands(subparsers, csl):
         runner.add_argument('--provider', dest='providers', action='append', choices=PROVIDERS)
         if action == 'watch': runner.add_argument('--interval', type=positive, default=30)
     parser.set_defaults(func=lambda args: command(args, csl))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog='csl')
+    add_commands(parser.add_subparsers(required=True), None)
+    args = parser.parse_args(argv)
+    args.func(args)
+
+
+if __name__ == '__main__':
+    main()

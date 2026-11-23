@@ -10,6 +10,7 @@ import subprocess
 from urllib.parse import urlsplit, urlunsplit
 
 from csl_canonical import strict_json
+from csl_sync_fs import extended_path, open_stream, reparse
 import csl_antigravity
 import csl_codex_history
 
@@ -29,7 +30,7 @@ def provider_home(provider, home=None):
     default = {'codex': os.environ.get('CODEX_HOME', '~/.codex'),
                'claude': os.environ.get('CLAUDE_CONFIG_DIR', '~/.claude'),
                'antigravity': os.environ.get('CSL_ANTIGRAVITY_HOME', '~/.gemini/antigravity-cli')}[provider]
-    return Path(home if home is not None else default).expanduser().resolve()
+    return extended_path(Path(home if home is not None else default).expanduser()).resolve()
 
 
 def _safe(path, root):
@@ -38,7 +39,7 @@ def _safe(path, root):
         current = root
         for part in relative.parts:
             current = current / part
-            if current.is_symlink():
+            if reparse(current):
                 raise ProviderError('symlink_source')
         if not path.resolve().is_relative_to(root) or not stat.S_ISREG(path.stat().st_mode):
             raise ProviderError('unsafe_source')
@@ -50,7 +51,7 @@ def _safe(path, root):
 def _lines(path, max_bytes=None, start_offset=0):
     """Fixed opening length; never parse a concurrently growing partial tail."""
     try:
-        with path.open('rb') as source:
+        with open_stream(path) as source:
             left = os.fstat(source.fileno()).st_size
             if max_bytes is not None:left=min(left,max_bytes)
             if not 0 <= start_offset <= left:raise ProviderError('invalid_view_position')
@@ -209,7 +210,7 @@ def _metadata(provider, path, root, active_seconds, files=None, *, evidence=None
 def _descriptor(path, root, relative, role):
     _safe(path, root)
     digest = hashlib.sha256(); complete = 0
-    with path.open('rb') as stream:
+    with open_stream(path) as stream:
         size = os.fstat(stream.fileno()).st_size
         if path.suffix == '.jsonl':
             # Validate complete records first, preserving original raw whitespace.
@@ -254,7 +255,7 @@ def _files(provider, path, root):
     companion = path.with_suffix('') if provider == 'claude' else None
     if companion and companion.is_dir():
         for child in sorted(companion.rglob('*')):
-            if child.is_symlink():
+            if reparse(child):
                 raise ProviderError('symlink_source')
             if not child.is_file():
                 continue
@@ -386,7 +387,7 @@ def view_records(provider, native_id, *, position=None, limit=500, text_limit=16
         raise ProviderError('invalid_view_position')
     def result(reset=False,complete=False):
         check=hashlib.sha256()
-        with path.open('rb') as stream:
+        with open_stream(path) as stream:
             left=primary['complete_length']
             while left:
                 chunk=stream.read(min(left,1024*1024))

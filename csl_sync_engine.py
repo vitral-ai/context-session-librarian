@@ -5,11 +5,13 @@ import json
 import os
 from pathlib import Path
 import re
+from platform import system
 import stat
 import tempfile
 import urllib.parse
 import uuid
 
+from csl_sync_fs import open_read, open_stream, protect_fd
 from csl_sync_state import SyncError, now, private_directory
 from csl_version import __version__
 
@@ -30,7 +32,7 @@ def segment(value):
 
 def prefix(path, length):
     h = hashlib.sha256()
-    with open(path, 'rb') as source:
+    with open_stream(path) as source:
         while length:
             data = source.read(min(1024 * 1024, length))
             if not data:
@@ -91,7 +93,7 @@ class Collector:
 
     def register(self):
         config = self.state.get('settings', {})
-        body = {'label': config.get('label', 'CSL device'), 'platform': os.uname().sysname,
+        body = {'label': config.get('label', 'CSL device'), 'platform': system(),
                 'kind': config.get('kind', 'local'), 'environment': config.get('environment'), 'csl_version': __version__}
         return self.registry.call('PUT', '/devices/' + segment(self.state.get('device_id')), body=body,
                                   key=digest(body))
@@ -167,11 +169,11 @@ class Collector:
         if type(length) is not int or length < 0 or item.get('mode') not in ('append', 'rewrite'):
             raise SyncError('invalid_provider_inventory')
         try:
-            fd = os.open(item['path'], os.O_RDONLY | os.O_NOFOLLOW)
+            fd = open_read(item['path'])
         except OSError:
             raise SyncError('source_unavailable') from None
         tmp_fd, temporary = tempfile.mkstemp(prefix='raw-', dir=self.spool)
-        os.fchmod(tmp_fd, 0o600)
+        protect_fd(tmp_fd)
         h = hashlib.sha256()
         try:
             with os.fdopen(fd, 'rb') as source, os.fdopen(tmp_fd, 'wb') as target:
@@ -195,7 +197,7 @@ class Collector:
     def check_sources(self, files):
         for item in files:
             try:
-                fd = os.open(item['path'], os.O_RDONLY | os.O_NOFOLLOW)
+                fd = open_read(item['path'])
                 with os.fdopen(fd, 'rb') as source:
                     info = os.fstat(source.fileno())
                     if [info.st_dev, info.st_ino] != item['identity'] or info.st_size < item['complete_length']:
@@ -277,7 +279,7 @@ class Collector:
                 normalized['raw_offset'] = offset
                 wire.append(normalized)
             fd, name = tempfile.mkstemp(prefix='view-', dir=self.spool)
-            os.fchmod(fd, 0o600)
+            protect_fd(fd)
             with os.fdopen(fd, 'w') as target:
                 json.dump({'records': wire, 'position': page['position']}, target, separators=(',', ':'))
             pages.append(name); position = page['position']
