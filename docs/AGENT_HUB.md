@@ -79,3 +79,18 @@ Use an unprivileged service user with only `CAP_NET_BIND_SERVICE`, private state
 and restart-on-failure. Keep existing sshd local and expose only 443 in the NSG.
 This replaces the cross-machine message route, not native runtime ownership or
 CLI-specific authorization. Existing SSH routes may remain as an opt-in fallback.
+
+### Local Claude wake previews
+
+Native wake notifications are header-only by default. To opt one endpoint into a
+600-character untrusted body preview, create an owner-owned, non-writable-by-others
+`~/.claude/csl-mailbox-preview.json` (mode 0600):
+
+```json
+{"your-agent-name":"its-exact-Claude-session-UUID"}
+```
+
+The preview includes sender, ID and sender timestamp. Other endpoints and rebound
+sessions stay header-only. Remove that entry or file to switch back; no restart
+is needed for the preference. This grants no authority, does not acknowledge mail,
+and does not change Claude inbound permission or wake approval policy.
