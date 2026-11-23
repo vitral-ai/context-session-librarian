@@ -696,16 +696,20 @@ def worker_main(receipt, parent, deadline, observation_fd=None):
     private_json(receipt, {'sequence': receipt.stem, 'scope': scope(config), **result})
 
 
+def enrollment_tokens(config):
+    config = checked_config(config)
+    http = WorkloadHTTP(config.origin, attempts=1, ca_file=config.ca_file)
+    return WorkloadTokens(child(config.state_root, 'auth'), config.origin, config.location, http=http,
+                          key=WorkloadKey(config.state_root/'identity'))
+
+
 def enroll(config, *, out=sys.stdout, sleep=time.sleep, timeout=600):
     """Person-approved device enrollment for this replica's own STATE.
 
     Prints only the public consent (code, verification URI, lifetime) and the
     final state; keys and tokens never leave STATE. One-shot: an existing
     journal refuses a new begin, and there is no automatic re-enrollment."""
-    config = checked_config(config)
-    http = WorkloadHTTP(config.origin, attempts=1, ca_file=config.ca_file)
-    tokens = WorkloadTokens(child(config.state_root, 'auth'), config.origin, config.location, http=http,
-                            key=WorkloadKey(config.state_root/'identity'))
+    tokens = enrollment_tokens(config)
     def emit(value): out.write(json.dumps(value, separators=(',', ':')) + '\n'); out.flush()
     if tokens.status()['state'] == 'ready':
         emit({'state': 'ready'}); return 0
@@ -729,6 +733,12 @@ def main(argv=None):
     try:
         if argv == ['--enroll']:
             return enroll(Configuration.from_environment(os.environ))
+        if argv in (['--managed-identity'], ['--enroll-managed']):
+            tokens = enrollment_tokens(Configuration.from_environment(os.environ))
+            if argv == ['--enroll-managed']:
+                tokens.enroll_managed(sys.stdin.buffer.read(8193).decode('ascii'))
+            print(json.dumps(tokens.managed_identity(), separators=(',', ':')))
+            return 0
         if len(argv) in (4, 5) and argv[0] == '--worker':
             worker_main(argv[1], int(argv[2]), float(argv[3]), int(argv[4]) if len(argv) == 5 else None); return 0
         if argv and argv[0] != '--': raise SyncError('workload_command_refused')

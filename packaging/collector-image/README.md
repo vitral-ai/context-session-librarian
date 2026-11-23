@@ -223,3 +223,12 @@ On the author guest, Docker has no daemon and Podman cannot create its runtime
 directory. No privilege or namespace workaround is used. Local Python assembly
 tests and an actual OCI build/run must be reported separately; a passing source
 test is not an image qualification.
+
+## Managed pool enrollment
+
+With the same reviewed workload configuration, the pool supervisor invokes
+`--managed-identity` to obtain the collector key thumbprint. It then passes the
+signed collector assertion on standard input to `--enroll-managed`. Both
+commands print only the workload thumbprint and local enrollment state. The
+collector keeps the resulting registry credential in its private state and uses
+the regular runner for collection and refresh.

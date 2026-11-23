@@ -1,5 +1,6 @@
 """Person approval and loss/restart state machines with synthetic credentials."""
 import copy
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
@@ -17,7 +18,7 @@ import urllib.parse
 import urllib.error
 
 from csl_sync_state import SyncError, exclusive
-from csl_workload_auth import DEVICE_GRANT, WorkloadTokens
+from csl_workload_auth import DEVICE_GRANT, MANAGED_AUDIENCE, WorkloadTokens
 from csl_sync_http import HTTP
 from csl_workload_http import Origin, WorkloadHTTP
 from csl_workload_identity import AUDIENCE, CLIENT_ID, SCOPES, WorkloadKey, b64, canonical, metadata, public_key
@@ -83,6 +84,9 @@ class Issuer(WorkloadHTTP):
         if path.endswith('/host_refresh_challenge'):
             if self.challenge_refusal: raise SyncError(self.challenge_refusal, status=400)
             return {'refresh_nonce': b64(b'r'*32), 'expires_in': 60}
+        if path.endswith('/managed_workload_token'):
+            self.effects.append(('managed', copy.deepcopy(form)))
+            return self.credentials()
         if not path.endswith('/token'): raise AssertionError('unexpected fixture route')
         if self.refusal: raise SyncError(self.refusal, status=400)
         if form['grant_type'] == DEVICE_GRANT:
@@ -123,6 +127,44 @@ class WorkloadAuthTests(unittest.TestCase):
         client = self.client(); client.begin(); self.clock.advance(5)
         self.assertEqual(client.poll(), {'state': 'ready'})
         return client
+
+    def assignment(self, **overrides):
+        claims = {
+            'iss': 'vitral-pool-controller', 'aud': MANAGED_AUDIENCE, 'sub': ACCOUNT,
+            'owner_issuer': ORIGIN + '/native-auth/v1', 'workload_jkt': b64(self.key.public()[1]),
+            'environment_id': '87654321-1234-4321-8432-123456789abc', 'generation': 4,
+        } | overrides
+        return '.'.join((b64(canonical({'alg': 'RS256'})), b64(canonical(claims)), b64(b'test-signature')))
+
+    def test_managed_enrollment_uses_bound_proof_and_existing_refresh(self):
+        client = self.client()
+        self.assertEqual(client.managed_identity(), {'workload_jkt': b64(self.key.public()[1]), 'state': 'signed_out'})
+        assertion = self.assignment()
+        client.enroll_managed(assertion)
+        self.client().enroll_managed(assertion)
+        self.assertEqual([kind for kind, _ in self.issuer.effects], ['managed'])
+        form = self.issuer.effects[0][1]
+        self.assertEqual(form['assignment_assertion'], assertion)
+        self.assertEqual(json.loads(form['workload']), LOCATION)
+        nonce = hashlib.sha256(b'vitral-managed-collector-v1\0' + assertion.encode()).digest()
+        self.assertEqual(self.key.proofs[0][0][2], nonce)
+        self.assertNotIn(assertion, json.dumps(self.journal()))
+        self.client().access_token(force_refresh=True)
+        self.assertEqual(self.journal()['managed_assignment']['generation'], 4)
+        self.assertEqual([kind for kind, _ in self.issuer.effects], ['managed', 'refresh'])
+
+    def test_managed_enrollment_rejects_wrong_key_owner_and_other_generation(self):
+        client = self.client()
+        with self.assertRaisesRegex(SyncError, 'workload_assignment_refused'):
+            client.enroll_managed(self.assignment(workload_jkt=b64(b'x' * 32)))
+        self.assertEqual(self.issuer.calls, [])
+        with self.assertRaisesRegex(SyncError, 'workload_identity_binding_changed'):
+            client.enroll_managed(self.assignment(sub='0' * 24))
+        self.assertEqual(client.status()['state'], 'signed_out')
+        client.enroll_managed(self.assignment())
+        with self.assertRaisesRegex(SyncError, 'workload_identity_binding_changed'):
+            self.client().enroll_managed(self.assignment(generation=5))
+        self.assertEqual(len(self.issuer.calls), 2)
 
     def test_discovery_uses_existing_oauth_route_without_oidc_fallback(self):
         self.client().begin()
