@@ -650,3 +650,91 @@ are never passed to resume. Codex does not offer an atomic loaded-only attach:
 if a thread unloads between listing and resume, native resume can reload it
 from disk. Avoid concurrently unloading a thread while the connector attaches.
 Task-independent mailbox persistence does not require a loaded native thread.
+
+## SSH with pulled return mail
+
+When only the caller can initiate SSH, the optional `csl_bridge_ssh_pull.py`
+operator adapter carries normal requests and pulls one queued return-mail frame
+per exchange. It needs no reverse SSH forwarding, extra listener, watcher or
+service. Both connectors and their ordinary ACLs remain authoritative. The
+recipient persists mail before the adapter caches its receipt; lost responses
+replay the same immutable message ID. The ordinary sender mailbox flush then
+reconciles that receipt. Pending mail therefore survives either adapter exiting.
+
+Install fixed, owned executable helpers and configure them with `bridge peer
+--operator-helper`. The caller helper invokes this module's `client` mode with
+`--home LOCAL_HOME --peer REMOTE_PEER --ssh-alias TRUSTED_ALIAS --control-path
+PRIVATE_PATH --remote-command FIXED_COMMAND`. That fixed SSH command runs
+`python3 /ABS/SOURCE/csl_bridge_ssh_pull.py server --home REMOTE_HOME --peer
+CALLER_PEER --cache PRIVATE_CACHE`. The remote peer's helper invokes `cached
+--cache PRIVATE_CACHE` instead. All endpoints come from operator configuration,
+never message text. The existing caller connector's watch requests drive pulls;
+keep its `watch` and `mail` permissions enabled. No new native permission or
+message operation is introduced. Remote-to-caller coordination is not provided:
+the return adapter handles mailbox operations, while followup final events are
+still polled normally from the remote connector.
+
+The SSH client is opened on demand and multiplexed for 60 seconds after idle;
+there is no new caller service. Mail delivery waits for the next caller exchange
+(normally within the existing 15-second watch interval), and pauses if that
+caller connector or route is down. It is not a sub-second transport guarantee.
+Receipt cache files are private delivery metadata, not credentials or work
+authority. Keep them with the bridge state; removing them causes safe receipt
+reconciliation/replay, not loss of queued mail. Tests exercise disk persistence,
+disconnect after recipient persistence, deduplication, and source/endpoint ACLs.
+
+SSH uses a fifteen-second connection timeout and five-second keepalives with two
+misses allowed. The complete request plus return-mail acknowledgement shares a
+22-second deadline, below the ordinary 25-second operator deadline. A broken
+link reports `uncertain` with `reason: ssh_pull_unavailable` and instructions to
+check the original operation's receipt after reconnecting. Never assign a new
+ID merely because an acknowledgement was lost. Failure to save or acknowledge
+piggybacked return mail leaves that mail queued and preserves a known forward
+delivery result.
+
+For reboot startup, enable the approved daemon and connector under the remote
+user manager (with linger enabled). On Linux installations where Codex's native
+`app-server daemon bootstrap` uses PID management rather than a boot unit, the
+daemon unit can be `Type=oneshot`, `RemainAfterExit=yes`, with
+`ExecStart=/ABS/codex app-server daemon start`. Make the connector require and
+start after that unit. This is the same daemon plus one connector, not another
+watcher or timer. Daemon startup does not automatically resume agent work:
+unopened threads report `agent_not_loaded` and their tasks remain pending until
+the owner opens the same UUID on that daemon.
+
+### Read new replies once, without a watcher
+
+`python3 csl_bridge_updates.py --home BRIDGE_HOME --agent AGENT --cursor-file PRIVATE_DIR/replies.json`
+prints new events and inbox messages as JSON lines, flushes output, stores separate
+cursors and exits. Repeat the same command whenever you want updates. Each call is
+bounded (default 100 per channel); run it again to drain a larger backlog. The
+cursor is bound to the exact home and recipient. Output failure leaves the old
+cursor, so recovery may repeat output rather than lose it. This does not start a
+watcher, timer, native agent or service. Keep the cursor directory private.
+
+### Opt-in Claude idle mailbox headers
+
+The SSH pull client accepts `--claude-notify-agent AGENT` as an owner-installed,
+fixed option. Register AGENT to its **actual native Claude session UUID**, not a
+legacy bridge alias. Only durably persisted incoming mail for that agent triggers
+a header-only notice through its existing local Claude Code peer socket. No mail
+body, grant, acknowledgement, slash command or remote attachment is injected.
+The native sender label is `csl-mailbox`, not an impersonated Claude session.
+
+This experimental Linux adapter validates the session record, PID/start identity,
+socket owner and server credentials, and uses the native published local IPC key
+without printing it. It requires peer protocol 1 and was exercised with Claude
+Code 2.1.329. Native inbound policy remains authoritative. It adds no listener,
+service, watcher or timer. Idle sessions wake; busy sessions queue the notification
+at a native boundary. Socket writes are emission attempts, not read receipts.
+Each message/session gets at most one write attempt; on failure or uncertainty,
+mail remains in the inbox and the existing session-bound boundary hook is the
+fallback. A hook can repeat a header already emitted over the socket. Native
+coordination final events remain separate from mailbox mail.
+
+Keep the existing header-only `bridge hook` entries for SessionStart,
+UserPromptSubmit, PostToolUse and Stop. The wrapper must reject other session IDs
+and payloads with `agent_id`; leave unrelated wrappers intact. Back up Claude's
+settings before adding entries. Disable idle wake by removing only the fixed
+`--claude-notify-agent` option; remove only this wrapper's hook entries to disable
+boundary notifications. Neither action removes mail or changes grants.

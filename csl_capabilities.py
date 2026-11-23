@@ -20,6 +20,8 @@ def coverage():
     commands["migrate"] = {"codex": "experimental", "claude": "not-integrated"}
     commands["backup"] = {"codex": "experimental", "claude": "not-integrated"}
     commands["light"] = {"codex": "experimental", "claude": "experimental"}
+    for command in ("agents", "send", "reply"):
+        commands[command] = {"codex": "experimental", "claude": "experimental"}
     commands["bridge"] = {"codex": "experimental", "claude": "experimental"}
     commands["sync"] = {"codex": "experimental", "claude": "experimental"}
     for name in ("native-cut", "native-clone", "native-sanitize"):

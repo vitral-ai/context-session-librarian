@@ -335,3 +335,5 @@ isolated native checks without model generation or real credentials. See
 - [Conversion and continuity](docs/CONVERSION.md)
 - [Experimental encrypted backup](docs/BACKUP.md)
 - [Release history](CHANGELOG.md) and [release records](RELEASE.md)
+
+Experimental cross-machine agent messaging: see [register/allow/send hub setup](docs/AGENT_HUB.md).

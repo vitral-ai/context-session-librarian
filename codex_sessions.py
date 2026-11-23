@@ -2941,6 +2941,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_backup_commands(sub, sys.modules[__name__])
     from csl_bridge import add_commands as add_bridge_commands
     add_bridge_commands(sub, sys.modules[__name__])
+    from csl_agents import add_commands as add_agent_commands
+    add_agent_commands(sub, sys.modules[__name__])
     from csl_light_cli import add_commands as add_light_commands
     add_light_commands(sub, sys.modules[__name__])
     from csl_sync import add_commands as add_sync_commands
