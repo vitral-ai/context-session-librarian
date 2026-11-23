@@ -22,6 +22,14 @@ def fingerprint(request):
     return hashlib.sha256(encode(request).encode()).hexdigest()
 
 
+def ssh_command(alias, control_path, remote_command):
+    return ['ssh', '-T', '-oBatchMode=yes', '-oStrictHostKeyChecking=yes',
+            '-oClearAllForwardings=yes', '-oConnectTimeout=8',
+            '-oServerAliveInterval=5', '-oServerAliveCountMax=2',
+            '-oControlMaster=auto', '-oControlPersist=60',
+            '-oControlPath=' + control_path, '--', alias, remote_command]
+
+
 def read_packet(stream):
     raw = stream.readline(MAX_WIRE * 2 + 1)
     if len(raw) > MAX_WIRE * 2 or not raw.endswith(b'\n'):
@@ -144,10 +152,7 @@ def main():
             output = {'ok': True, 'data': cached_result(args.cache, validate(decode(sys.stdin.buffer.readline(MAX_WIRE + 1))))}
         else:
             def exchange(packet):
-                command = ['ssh', '-T', '-oBatchMode=yes', '-oStrictHostKeyChecking=yes',
-                           '-oClearAllForwardings=yes', '-oConnectTimeout=8',
-                           '-oControlMaster=auto', '-oControlPersist=60',
-                           '-oControlPath=' + args.control_path, '--', args.ssh_alias, args.remote_command]
+                command = ssh_command(args.ssh_alias, args.control_path, args.remote_command)
                 process = subprocess.run(command, input=(json.dumps(packet) + '\n').encode(),
                                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=24)
                 if process.returncode or len(process.stdout) > MAX_WIRE * 2:
