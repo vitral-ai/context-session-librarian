@@ -113,7 +113,10 @@ registered session endpoint. This capability persists mail without waking or
 steering a model. Explicit receive and session-bound hooks are available;
 bounded real CLI exchanges and Claude hook/MCP sessions have been exercised.
 The separate owner-opted Codex notifier requires a local activate grant and an
-existing owned runtime. Claude support does not imply arbitrary idle wake,
+existing owned runtime. A separately owner-opted Linux SSH-pull adapter can emit
+header-only mailbox notices through an existing authenticated Claude peer socket
+(protocol 1, exercised on 2.1.329), including idle wake; native inbound policy
+still applies. This is not arbitrary remote Claude control. Claude support does not imply
 search or conversion guarantees. See the [communication specification](AGENT_COMMUNICATION.md)
 for evidence boundaries. Earlier v0.3.0 predates this capability, included in 0.4.0.
 

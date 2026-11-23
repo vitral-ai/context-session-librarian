@@ -711,3 +711,30 @@ bounded (default 100 per channel); run it again to drain a larger backlog. The
 cursor is bound to the exact home and recipient. Output failure leaves the old
 cursor, so recovery may repeat output rather than lose it. This does not start a
 watcher, timer, native agent or service. Keep the cursor directory private.
+
+### Opt-in Claude idle mailbox headers
+
+The SSH pull client accepts `--claude-notify-agent AGENT` as an owner-installed,
+fixed option. Register AGENT to its **actual native Claude session UUID**, not a
+legacy bridge alias. Only durably persisted incoming mail for that agent triggers
+a header-only notice through its existing local Claude Code peer socket. No mail
+body, grant, acknowledgement, slash command or remote attachment is injected.
+The native sender label is `csl-mailbox`, not an impersonated Claude session.
+
+This experimental Linux adapter validates the session record, PID/start identity,
+socket owner and server credentials, and uses the native published local IPC key
+without printing it. It requires peer protocol 1 and was exercised with Claude
+Code 2.1.329. Native inbound policy remains authoritative. It adds no listener,
+service, watcher or timer. Idle sessions wake; busy sessions queue the notification
+at a native boundary. Socket writes are emission attempts, not read receipts.
+Each message/session gets at most one write attempt; on failure or uncertainty,
+mail remains in the inbox and the existing session-bound boundary hook is the
+fallback. A hook can repeat a header already emitted over the socket. Native
+coordination final events remain separate from mailbox mail.
+
+Keep the existing header-only `bridge hook` entries for SessionStart,
+UserPromptSubmit, PostToolUse and Stop. The wrapper must reject other session IDs
+and payloads with `agent_id`; leave unrelated wrappers intact. Back up Claude's
+settings before adding entries. Disable idle wake by removing only the fixed
+`--claude-notify-agent` option; remove only this wrapper's hook entries to disable
+boundary notifications. Neither action removes mail or changes grants.

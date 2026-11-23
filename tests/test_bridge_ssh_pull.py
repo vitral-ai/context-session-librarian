@@ -110,6 +110,23 @@ class PullMailTests(unittest.TestCase):
         self.flush()
         self.assertIsNotNone(self.laptop.mailbox.message(self.mid))
 
+    def test_opted_notification_runs_only_after_real_persistence(self):
+        notifier = Mock()
+        with patch('csl_bridge_ssh_pull.local_call', side_effect=self.local):
+            client(self.root / 'laptop', 'remote', self.request, self.exchange, notifier)
+        self.assertEqual(notifier.call_args.args[0]['id'], self.mid)
+        self.assertIsNotNone(self.laptop.mailbox.message(self.mid))
+
+    def test_native_notification_failure_keeps_mail_and_forward_result(self):
+        with patch('csl_bridge_ssh_pull.local_call', side_effect=self.local), \
+             patch('sys.stderr', io.StringIO()):
+            result = client(self.root / 'laptop', 'remote', self.request, self.exchange,
+                            Mock(side_effect=OSError('native unavailable')))
+        self.assertIsInstance(result, dict)
+        self.assertIsNotNone(self.laptop.mailbox.message(self.mid))
+        self.flush()
+        self.assertIsNotNone(self.remote.mailbox.message(self.mid)['persisted_at'])
+
     def test_cached_receipt_survives_adapter_restart(self):
         self.pull()
         request = pending_mail(self.remote.store, 'laptop')[0]

@@ -114,7 +114,7 @@ def server(home, peer, cache, packet):
         store.close()
 
 
-def client(home, peer, request, exchange):
+def client(home, peer, request, exchange, notify=None):
     result = exchange({'request': validate(request), 'receipts': []})
     if not isinstance(result, dict) or set(result) != {'result', 'mail'}:
         raise BridgeError('Invalid SSH pull response')
@@ -141,6 +141,15 @@ def client(home, peer, request, exchange):
             # Losing the return-mail ACK cannot erase a known forward result.
             # The remote outbox stays pending and pulls the same durable ID.
             pass
+    if notify:
+        for entry in receipts:
+            outgoing = entry['request']
+            if outgoing['action'] == 'send' and entry['result'].get('state') == 'persisted':
+                try:
+                    notify(outgoing)
+                except Exception:
+                    # Durable delivery and hook fallback must survive native IPC failure.
+                    print('CSL idle notification unavailable; boundary hook remains available.', file=sys.stderr)
     return result['result']
 
 
@@ -153,6 +162,7 @@ def main():
     parser.add_argument('--ssh-alias')
     parser.add_argument('--control-path')
     parser.add_argument('--remote-command')
+    parser.add_argument('--claude-notify-agent', help='Owner opt-in: header-only native peer wake for this local agent')
     args = parser.parse_args()
     try:
         if args.mode == 'server':
@@ -170,7 +180,13 @@ def main():
                     raise BridgeError('SSH pull unavailable; preserve IDs and reconcile')
                 return json.loads(process.stdout)
             request = validate(decode(sys.stdin.buffer.readline(MAX_WIRE + 1)))
-            output = {'ok': True, 'data': client(args.home, args.peer, request, exchange)}
+            notifier = None
+            if args.claude_notify_agent:
+                from csl_bridge_claude_notify import notify
+                def notifier(outgoing):
+                    if outgoing['target'] == args.claude_notify_agent:
+                        notify(args.home, args.claude_notify_agent, outgoing['id'])
+            output = {'ok': True, 'data': client(args.home, args.peer, request, exchange, notifier)}
         print(json.dumps(output, separators=(',', ':')))
     except (BridgeError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
         if args.mode == 'client':
