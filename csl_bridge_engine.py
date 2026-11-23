@@ -796,7 +796,7 @@ class Connector:
             return result
         if op == 'agents' and set(request) == {'local_op'}:
             result = []
-            for agent in self.agents:
+            for agent in list(self.agents):
                 try:
                     result.append(self.current(agent))
                 except RuntimeUnavailable:
