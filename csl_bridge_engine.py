@@ -116,6 +116,7 @@ class Connector:
         self.agents, self.peers = self.store.agents(), self.configured_peers()
         self.factory = runtime_factory
         self.runtime = None
+        self.attached_threads = None
         self.stop = threading.Event()
         self.changed = threading.Condition()
         self.locks = {agent: threading.RLock() for agent in self.agents}
@@ -211,7 +212,12 @@ class Connector:
                     'delivery': 'wait tool result only; no runtime attach or async injection'}
         runtime = self.ready()
         thread = self.agents[agent]
-        state = runtime.call('thread/read', {'threadId': thread})['thread']['status']
+        if self.attached_threads is not None and thread not in self.attached_threads:
+            state = {'type': 'agent_not_loaded'}
+        else:
+            state = runtime.call('thread/read', {'threadId': thread})['thread']['status']
+            if state['type'] == 'notLoaded':
+                state = {'type': 'agent_not_loaded'}
         turn = None
         if state['type'] == 'active':
             turn = self.turns.get(thread)
@@ -226,6 +232,28 @@ class Connector:
                 'active_flags': state.get('activeFlags', []), 'turn_id': turn,
                 'last_task': last[0] if last else None}
 
+    def refresh_loaded(self, runtime):
+        """Resume only threads observed loaded, within the existing runtime loop."""
+        loaded, cursor = set(), None
+        while True:
+            page = runtime.call('thread/loaded/list', {'cursor': cursor, 'limit': 100})
+            loaded.update(page['data'])
+            cursor = page.get('nextCursor')
+            if not cursor:
+                break
+        previous = self.attached_threads or set()
+        attached = previous & loaded
+        for thread in set(self.agents.values()) & (loaded - previous):
+            try:
+                runtime.call('thread/resume', {'threadId': thread, 'excludeTurns': True})
+                attached.add(thread)
+            except RuntimeRejected:
+                # A rejected attachment must not disconnect sibling agents.
+                # Codex has no atomic loaded-only resume; see docs/BRIDGE.md.
+                continue
+        self.attached_threads = attached
+        return attached - previous
+
     def runtime_loop(self):
         from csl_bridge_event_state import EventConflict
         while not self.stop.is_set():
@@ -233,21 +261,17 @@ class Connector:
             try:
                 runtime = self.factory(self.runtime_path)
                 # Rejoin selected existing threads only; no start/fork/override/auth surface.
-                loaded, cursor = set(), None
-                while True:
-                    page = runtime.call('thread/loaded/list', {'cursor': cursor, 'limit': 100})
-                    loaded.update(page['data'])
-                    cursor = page.get('nextCursor')
-                    if not cursor:
-                        break
-                if not set(self.agents.values()) <= loaded:
-                    raise RuntimeUnavailable('Owner must first host selected conversations in this runtime')
-                for agent, thread in self.agents.items():
-                    runtime.call('thread/resume', {'threadId': thread, 'excludeTurns': True})
+                self.attached_threads = set()
+                self.refresh_loaded(runtime)
                 self.runtime = runtime
                 self.turns.clear()
                 self.reconcile()
+                next_loaded_check = time.monotonic() + 2
                 while not self.stop.is_set() and runtime.connected:
+                    if time.monotonic() >= next_loaded_check:
+                        if self.refresh_loaded(runtime):
+                            self.reconcile()
+                        next_loaded_check = time.monotonic() + 2
                     try:
                         msg = runtime.events.get(timeout=.5)
                     except queue.Empty:
@@ -279,6 +303,7 @@ class Connector:
             finally:
                 if self.runtime is runtime:
                     self.runtime = None
+                    self.attached_threads = None
                 if runtime:
                     runtime.close()
             self.stop.wait(1)
@@ -305,10 +330,13 @@ class Connector:
     def invoke(self, peer, request):
         agent, request_id = request['target'], request['id']
         state = self.current(agent)
+        if state['status'] == 'agent_not_loaded':
+            result = {'state': 'pending', 'request_id': request_id,
+                      'reason': 'agent_not_loaded', 'activated': False}
+            self.store.operation(request_id, 'pending', result)
+            return result
         if request['op'] == 'send_message' and state['status'] != 'active':
             return {'state': 'pending', 'request_id': request_id, 'activated': False}
-        if state['status'] == 'notLoaded':
-            raise RuntimeUnavailable('Owner must first host this conversation; no implicit rehosting')
         from csl_bridge_event_state import EventState
         import hashlib
         with self.store.transaction() as db:
@@ -487,6 +515,8 @@ class Connector:
         # Join first, then recover effects using native client message IDs. Missing
         # evidence remains uncertain; never auto-repeat an invocation.
         for agent, thread in self.agents.items():
+            if self.attached_threads is not None and thread not in self.attached_threads:
+                continue
             uncertain_ops = [row for row in self.store.rows("SELECT id,peer,request FROM operations WHERE state='uncertain' AND NOT EXISTS(SELECT 1 FROM event_publication_holds h WHERE h.task=operations.id AND h.state='conflict')")
                              if not row['peer'].startswith('outbound:') and decode(row['request']).get('op') != 'mail'
                              and decode(row['request']).get('target') == agent]
