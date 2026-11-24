@@ -14,7 +14,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: vitral-ai/context-session-librarian
-          ref: 50c0469303f6f0e6e5a6f66bef3bffb2450c1a50
+          ref: 0ec961875b7e21857fc3853868d78699f3e21b05
           persist-credentials: false
           sparse-checkout: |
             csl_ci_notice.py
