@@ -98,7 +98,7 @@ coordinator or another agent.
 
 Each repository stores `CSL_HUB_NOTICE_TOKEN` ONLY in environment
 `csl-ci-notices`, with custom deployment branches allowing only the default
-branch (`main`). No repository-level copy, PR refs, tags or wildcard policies are
+branch (`main`, or `development` for vitral_landing). No repository-level copy, PR refs, tags or wildcard policies are
 allowed. A candidate workflow naming this environment is rejected by GitHub, not
 merely by an editable YAML condition. Configure this policy before storing the
 secret, and verify it on readback. Each repository also has public variables

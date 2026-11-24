@@ -78,9 +78,10 @@ class CompletionNoticeTests(unittest.TestCase):
     def run_environment(self):
         run = dict(id=123, run_attempt=1, name='Codex PR Review', status='completed',
                    event='pull_request_target', conclusion='failure',
+                   head_branch='codex/client/$(touch /tmp/untrusted)', head_sha='a' * 40,
                    head_repository={'full_name': 'vitral-ai/example'},
                    pull_requests=[dict(number=799, head={'repo': {'id': 42},
-                       'ref': 'codex/client/$(touch /tmp/untrusted)', 'sha': 'a' * 40})])
+                       'ref': 'codex/client/newer-branch', 'sha': 'b' * 40})])
         return run, dict(CSL_EVENT=json.dumps({'workflow_run': run}),
                          CSL_REPOSITORY='vitral-ai/example', CSL_REPOSITORY_ID='42')
 
@@ -88,6 +89,9 @@ class CompletionNoticeTests(unittest.TestCase):
         run, env = self.run_environment()
         payload = workflow_notice(env)
         self.assertEqual(payload['results'], {'completion': 'failure'})
+        self.assertEqual(payload['sha'], 'a' * 40)
+        self.assertEqual(payload['branch'], run['head_branch'])
+        self.assertNotEqual(payload['sha'], run['pull_requests'][0]['head']['sha'])
         self.assertEqual(notice_request(self.policy, payload)['target'], 'client')
         for changes in ({'head_repository': {'full_name': 'fork/example'}},
                         {'event': 'push'}, {'status': 'in_progress'}, {'pull_requests': []},

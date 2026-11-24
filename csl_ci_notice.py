@@ -69,7 +69,7 @@ def workflow_notice(env):
         raise BridgeError('Completion must identify exactly one same-repository PR')
     pr = prs[0]
     return {'action': 'notice', 'repository': repo, 'number': pr['number'],
-            'branch': pr['head']['ref'], 'sha': pr['head']['sha'],
+            'branch': run['head_branch'], 'sha': run['head_sha'],
             'workflow': run['name'], 'run_id': run['id'], 'attempt': run['run_attempt'],
             'results': {'completion': {'timed_out': 'failure', 'action_required': 'failure',
                                       'startup_failure': 'failure', 'neutral': 'skipped',
