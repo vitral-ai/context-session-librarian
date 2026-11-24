@@ -70,7 +70,8 @@ class DeliveryCompatibilityTests(unittest.TestCase):
         packet = self.packet('codex', text)
         self.assertEqual(deliver(self.bridge.connector, packet)['state'], 'delivered')
         native = next(p['input'][0]['text'] for m,p in self.bridge.runtime.calls if m=='turn/start')
-        self.assertTrue(native.endswith(' [truncated, csl receive for full text]'))
+        self.assertIn(' [truncated, csl receive for full text]\nReply via hub: csl reply ' + packet['id'], native)
+        self.assertTrue(native.endswith('--text ...'))
         self.assertNotIn('Important final instruction', native)
         import json
         request = self.bridge.connector.store.rows('SELECT request FROM operations WHERE id=?', (packet['id'],))[0]

@@ -63,7 +63,7 @@ class NotifyTests(unittest.TestCase):
         self.assertEqual(frames[1]['session_id'], self.session)
         self.assertEqual(frames[1]['priority'], 'next')
         self.assertEqual(frames[1]['from'], 'csl-mailbox')
-        self.assertEqual('CSL from sender (' + self.mid[:8] + '):\nSECRET REMOTE BODY', frames[1]['message']['content'])
+        self.assertEqual('CSL from sender (' + self.mid[:8] + '):\nSECRET REMOTE BODY\nReply via hub: csl reply ' + self.mid + ' --from target --text ...', frames[1]['message']['content'])
         self.assertIsNone(self.connector.mailbox.message(self.mid)['acknowledged_at'])
 
     def test_duplicate_pull_attempts_native_once(self):

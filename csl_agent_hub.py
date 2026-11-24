@@ -15,7 +15,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from csl_bridge_store import BridgeError, decode, encode, identifier, name
+from csl_bridge_store import BridgeError, decode, encode, identifier, message_selector, name
 
 
 NOTICE_SOURCE = {'name': 'hub-notifier', 'session': 'a38597e0-058a-5a72-9f71-50340e8242d3',
@@ -183,7 +183,18 @@ class Hub:
                 if type(last) is not int or not 1 <= last <= self.history_retention:
                     raise BridgeError('History last must be 1..' + str(self.history_retention))
                 if mid:
-                    rows = db.execute('SELECT * FROM history WHERE id=?', (identifier(mid),)).fetchall()
+                    selector = message_selector(mid)
+                    if len(selector) == 36:
+                        rows = db.execute('SELECT * FROM history WHERE id=?', (selector,)).fetchall()
+                    else:
+                        # Prefix ambiguity is scoped to history this endpoint may read.
+                        rows = db.execute('SELECT * FROM history WHERE id LIKE ? AND '
+                                          '(? OR (source=? AND source_machine=?) OR '
+                                          '(target=? AND target_machine=?)) LIMIT 2',
+                                          (selector + '%', admin, source['name'], machine,
+                                           source['name'], machine)).fetchall()
+                        if len(rows) > 1:
+                            raise BridgeError('Ambiguous message ID prefix; use more characters')
                 else:
                     a, b = sorted((source['name'], name(partner)))
                     rows = db.execute('SELECT * FROM history WHERE pair_a=? AND pair_b=? '
@@ -223,7 +234,16 @@ class Hub:
                                      'Unapproved pair: ' + source_name + ' -> ' + target_name, attempt)
                 reply = request.get('in_reply_to')
                 if reply is not None:
-                    original = db.execute('SELECT source,target FROM envelopes WHERE id=?', (identifier(reply),)).fetchone()
+                    selector = message_selector(reply)
+                    originals = db.execute('SELECT id,source,target FROM envelopes WHERE id LIKE ? '
+                                           'AND source=? AND target=? LIMIT 2',
+                                           (selector + '%' if len(selector) < 36 else selector,
+                                            target['name'], source['name'])).fetchall()
+                    if len(originals) > 1:
+                        raise BridgeError('Ambiguous message ID prefix; use more characters')
+                    original = originals[0] if originals else None
+                    if original:
+                        reply = original['id']
                     if not original or (original['source'], original['target']) != (target['name'], source['name']):
                         raise BridgeError('Reply must reverse the original envelope endpoints')
                 packet = {'id': mid, 'source': source, 'target': target, 'text': text, 'in_reply_to': reply}

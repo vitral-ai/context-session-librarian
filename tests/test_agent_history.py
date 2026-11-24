@@ -110,3 +110,65 @@ class HistoryCLITests(unittest.TestCase):
             csl_agents._execute(args)
         self.assertEqual(call.call_args.args[1],
                          {'action': 'history', 'source': 'reader', 'with': 'partner', 'last': 20})
+
+class PrefixTests(HistoryTests):
+    def test_prefix_resolution_ambiguity_and_canonical_reply(self):
+        self.allow()
+        ids = ['12345678-1111-4111-8111-111111111111', '12345678-2222-4222-8222-222222222222']
+        for mid in ids:
+            self.send(id=mid)
+        with self.assertRaisesRegex(BridgeError, 'Ambiguous'):
+            self.history(partner=None, id='12345678')
+        with self.assertRaisesRegex(BridgeError, 'Ambiguous'):
+            self.send('client', 'claude', 'remote', in_reply_to='12345678')
+        self.assertEqual(self.history(partner=None, id='12345678-1')[0]['id'], ids[0])
+        sent = self.send('client', 'claude', 'remote', in_reply_to='12345678-1')
+        with self.hub.connect() as db:
+            from csl_bridge_store import decode
+            packet = decode(db.execute('SELECT packet FROM envelopes WHERE id=?', (sent['id'],)).fetchone()[0])
+        self.assertEqual(packet['in_reply_to'], ids[0])
+        # A retry using the full UUID has the same durable fingerprint.
+        self.assertEqual(self.send('client', 'claude', 'remote', id=sent['id'], in_reply_to=ids[0])['id'], sent['id'])
+        for bad in ('1234567', '12345678%', '12345678_1', '12345678-abcz', 'x' * 100):
+            with self.assertRaises(BridgeError):
+                self.history(partner=None, id=bad)
+
+    def test_hidden_history_does_not_change_prefix_ambiguity(self):
+        self.allow(); self.allow('builder', 'other')
+        visible = '12345678-1111-4111-8111-111111111111'
+        hidden = '12345678-2222-4222-8222-222222222222'
+        self.send(id=visible)
+        self.send('builder', 'other', 'laptop', id=hidden)
+        self.assertEqual(self.history(partner=None, id='12345678')[0]['id'], visible)
+        self.assertEqual(self.history(partner=None, id=hidden[:10]), [])
+        with self.assertRaisesRegex(BridgeError, 'private'):
+            self.history(partner=None, id=hidden)
+
+    def test_explicit_reply_survives_history_retention(self):
+        self.hub = Hub(self.path, self.machines, history_retention=1)
+        self.allow()
+        old = self.send()['id']; self.send()
+        self.assertEqual(self.history(partner=None, id=old[:8]), [])
+        self.assertEqual(self.send('client', 'claude', 'remote', in_reply_to=old[:8])['state'], 'queued')
+
+
+class ReplyCLITests(HistoryCLITests):
+    def test_positional_prefix_infers_target_without_touching_body(self):
+        args = self.parse('reply', '12345678', '--from', 'client', '--text', 'quoted reply')
+        full = '12345678-1111-4111-8111-111111111111'
+        with patch('csl_agents.config', return_value={}), \
+             patch('csl_agents.call', side_effect=[{'messages': [{'id': full, 'source': 'claude', 'target': 'client'}]}, {'state': 'queued'}]) as call, \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            csl_agents._execute(args)
+        self.assertEqual(call.call_args_list[0].args[1], {'action': 'history', 'source': 'client', 'id': '12345678'})
+        sent = call.call_args_list[1].args[1]
+        self.assertEqual((sent['source'], sent['target'], sent['in_reply_to'], sent['text']), ('client', 'claude', full, 'quoted reply'))
+
+    def test_explicit_prefix_and_file_remain_supported(self):
+        args = self.parse('reply', '--from', 'client', '--to', 'claude', '--in-reply-to', '12345678')
+        with patch('csl_agents.config', return_value={}), patch('csl_bridge.reviewed_text', return_value='file reply'), \
+             patch('csl_agents.call', return_value={'state': 'queued'}) as call, \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            csl_agents._execute(args)
+        self.assertEqual(call.call_args.args[1]['in_reply_to'], '12345678')
+        self.assertEqual(call.call_args.args[1]['text'], 'file reply')

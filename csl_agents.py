@@ -165,8 +165,29 @@ def _execute(args):
         request['name'] = args.name
     elif args.hub_action in ('send',):
         from csl_bridge import reviewed_text
-        request.update(source=args.source, target=args.to, id=args.id or str(uuid.uuid4()),
-                       text=reviewed_text(args.text_file, False), in_reply_to=getattr(args, 'in_reply_to', None))
+        source = args.source or os.environ.get('CSL_AGENT') or settings.get('agent')
+        if not source:
+            raise BridgeError('Set CSL_AGENT or use --from to identify your sender')
+        reply = getattr(args, 'message_id', None) or getattr(args, 'in_reply_to', None)
+        target = args.to
+        if getattr(args, 'message_id', None):
+            if args.in_reply_to:
+                raise BridgeError('Use the positional reply ID or --in-reply-to, not both')
+            rows = call(settings, {'action': 'history', 'source': source, 'id': reply})['messages']
+            if len(rows) != 1 or rows[0]['target'] != source:
+                raise BridgeError('Reply requires one retained incoming message; use --to and --in-reply-to for older messages')
+            if target and target != rows[0]['source']:
+                raise BridgeError('Reply target does not match original sender')
+            target, reply = rows[0]['source'], rows[0]['id']
+        if not target or (getattr(args, 'is_reply', False) and not reply):
+            raise BridgeError('Reply requires a message ID; send requires --to')
+        request.update(source=source, target=target, id=args.id or str(uuid.uuid4()),
+                       text=(reviewed_text(args.text_file, False) if args.text is None else args.text),
+                       in_reply_to=reply)
+        if args.text is not None:
+            from csl_bridge_store import contains_findings
+            if contains_findings(args.text):
+                raise BridgeError('Possible secrets detected; select redacted text before sending')
         # Print the ID before networking: unknown outcomes are retried with this ID.
         import sys
         print('message_id=' + request['id'], file=sys.stderr)
@@ -207,13 +228,16 @@ def add_commands(subparsers, _):
     for action in ('send', 'reply'):
         send = subparsers.add_parser(action, help='Send a durable envelope and wake its registered recipient.')
         send.add_argument('--hub-config', type=Path, default=DEFAULT_CONFIG)
-        send.add_argument('--from', dest='source', required=True)
-        send.add_argument('--to', required=True)
-        send.add_argument('--text-file', type=Path, default=Path('-'))
+        send.add_argument('--from', dest='source')
+        send.add_argument('--to', required=action == 'send')
+        body = send.add_mutually_exclusive_group()
+        body.add_argument('--text-file', type=Path, default=Path('-'))
+        body.add_argument('--text')
         send.add_argument('--id')
         if action == 'reply':
-            send.add_argument('--in-reply-to', required=True)
-        send.set_defaults(func=execute, hub_action='send')
+            send.add_argument('message_id', nargs='?', help='Full message UUID or a unique prefix (8+ characters).')
+            send.add_argument('--in-reply-to')
+        send.set_defaults(func=execute, hub_action='send', is_reply=action == 'reply')
     history = sub.add_parser('history', help='Read your retained pair history (CSL_AGENT identifies you).')
     selection = history.add_mutually_exclusive_group(required=True)
     selection.add_argument('--with', dest='partner')

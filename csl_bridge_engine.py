@@ -332,7 +332,7 @@ class Connector:
     def frame(self, peer, request):
         session = request.get('session') if self.sends_session(peer) else None
         if peer == 'agent-hub':
-            return compact_message(request['source'], request['id'], request['text'])
+            return compact_message(request['source'], request['id'], request['text'], target=request['target'])
         return frame_message(request['source'], request['id'], session, request['text'])
 
     def invoke(self, peer, request):
