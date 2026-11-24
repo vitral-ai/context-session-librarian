@@ -76,13 +76,41 @@ def workflow_notice(env):
                                       'stale': 'cancelled'}.get(run['conclusion'], run['conclusion'])}}
 
 
+def current_head_allows_notice(notice, env):
+    """Skip known superseded runs; lookup failures must never lose a completion."""
+    try:
+        repo = notice['repository']
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo):
+            raise ValueError('Invalid repository')
+        request = urllib.request.Request(
+            'https://api.github.com/repos/' + repo + '/pulls/' + str(notice['number']),
+            headers={'Accept': 'application/vnd.github+json',
+                     'Authorization': 'Bearer ' + env['CSL_GITHUB_TOKEN'],
+                     'X-GitHub-Api-Version': '2022-11-28'})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            head = json.load(response)['head']['sha']
+        if not isinstance(head, str) or not re.fullmatch(r'[0-9a-f]{40}', head):
+            raise ValueError('Invalid PR head')
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        # Do not log credentials or response bodies. The notice retains run.head_sha.
+        print('Current PR head lookup failed (' + type(error).__name__ + '); sending exact-run notice')
+        return True
+    if head != notice['sha']:
+        print('superseded by ' + head)
+        return False
+    return True
+
+
 def main():
     env = os.environ
+    notice = workflow_notice(env)
+    if not current_head_allows_notice(notice, env):
+        return
     context = ssl.create_default_context(cadata=env['CSL_HUB_CA_PEM'])
     url = env['CSL_HUB_URL']
     if not url.startswith('https://') or not url.endswith('/v1'):
         raise BridgeError('Hub requires a pinned HTTPS /v1 endpoint')
-    request = urllib.request.Request(url, data=json.dumps(workflow_notice(env)).encode(),
+    request = urllib.request.Request(url, data=json.dumps(notice).encode(),
         headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + env['CSL_HUB_NOTICE_TOKEN']})
     # One request, no polling/retry loop. The hub durably owns delivery after enqueue.
     with urllib.request.urlopen(request, context=context, timeout=20) as response:
