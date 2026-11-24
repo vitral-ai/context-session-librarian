@@ -4,6 +4,7 @@ import hmac
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import logging
 from pathlib import Path
 import select
 import socket
@@ -98,6 +99,12 @@ class Hub:
             if action == 'permissions':
                 return {'approvals': [dict(r) for r in db.execute('SELECT * FROM approvals ORDER BY source,target')]}
             if action == 'send':
+                if (policy.get('scope') == 'notices' and request['source'] == 'ci-notices'
+                        and not db.execute('SELECT 1 FROM agents WHERE name=?',
+                                           (request['target'],)).fetchone()):
+                    logging.getLogger(__name__).warning(
+                        'CI notice dropped: unknown target=%s id=%s', request['target'], request['id'])
+                    return {'id': request['id'], 'state': 'dropped', 'reason': 'unknown notice target'}
                 source, target = agent(request['source']), agent(request['target'])
                 if source['machine'] != machine:
                     raise BridgeError('Source agent does not belong to authenticated machine')
