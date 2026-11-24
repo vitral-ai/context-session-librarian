@@ -31,6 +31,8 @@ class ToolFieldsError(BridgeError):
 
 
 TOOLS = {
+    'history': ('Read your retained hub pair history, both directions, without acknowledging or waking anyone.',
+                {'with': NAME, 'id': UUID, 'last': {'type': 'integer', 'minimum': 1, 'maximum': 10000}}, []),
     'inbox_status': ('Read only counts and pending id/from/kind headers for this endpoint; no bodies, scopes, acknowledgement or wake.',
                      {'after': {'type': 'integer', 'minimum': 0, 'maximum': 2**63-1},
                       'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100}}, []),
@@ -81,7 +83,7 @@ def configuration(home, agent, approve_tools=(), *, grant_admin=False):
     if not approved <= {'send_progress', 'send_message', 'send', 'ack', 'reply'}:
         raise BridgeError('Only explicitly selected message tools are eligible for this profile')
     adapter = Adapter(home, agent, grant_admin=grant_admin)  # validate without contacting runtime
-    enabled = sorted(approved | {'wait_agent', 'list_agents', 'agent_status', 'operation_receipt', 'receive', 'inbox_status', 'grant_list', 'grant_show'} | (GRANT_ADMIN if grant_admin else set()))
+    enabled = sorted(approved | {'wait_agent', 'list_agents', 'agent_status', 'operation_receipt', 'receive', 'inbox_status', 'grant_list', 'grant_show', 'history'} | (GRANT_ADMIN if grant_admin else set()))
     quoted = lambda value: json.dumps(str(value), ensure_ascii=False)
     lines = ['# Review locally before applying; this command changes no configuration.',
              '# Explicit per-tool consent. Runtime shell/approval policies remain separate.',
@@ -110,7 +112,7 @@ class Adapter:
     def catalog(self):
         return [{'name': tool, 'description': description, 'inputSchema': {'type': 'object',
             'properties': fields, 'required': required, 'additionalProperties': False},
-            'annotations': {'readOnlyHint': tool in {'wait_agent', 'list_agents', 'agent_status', 'operation_receipt', 'receive', 'inbox_status', 'grant_list', 'grant_show'},
+            'annotations': {'readOnlyHint': tool in {'wait_agent', 'list_agents', 'agent_status', 'operation_receipt', 'receive', 'inbox_status', 'grant_list', 'grant_show', 'history'},
                             'destructiveHint': False}}
             for tool, (description, fields, required) in TOOLS.items() if tool not in GRANT_ADMIN or self.grant_admin]
 
@@ -147,6 +149,12 @@ class Adapter:
                 raise ToolFieldsError(invalid=[key])
         if any(contains_findings(arguments[key]) for key in ('message', 'body') if key in arguments):
             raise BridgeError('Possible secrets detected; select redacted text before sending')
+        if tool == 'history':
+            if bool(arguments.get('with')) == bool(arguments.get('id')):
+                raise BridgeError('History requires exactly one of with or id')
+            from csl_agents import call, config
+            return {'bound_agent': self.agent,
+                    'data': call(config(), {'action': 'history', 'source': self.agent, **arguments})}
         request_id = arguments.get('id') or str(uuid.uuid4())
         if tool.startswith('grant_'):
             data = self.grant_call(tool, arguments)

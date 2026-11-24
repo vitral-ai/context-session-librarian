@@ -57,16 +57,45 @@ actual Native turn ID. Interrupted/uncertain Native invocations are NOT replayed
 Replies are explicit `reply` messages, not implicit final-turn forwarding.
 
 Claude delivery persists the envelope in its existing bridge mailbox, then sends
-a header through its authenticated local native peer socket. The session-bound
-hook exposes headers at boundaries; idle wake is native-version-dependent. Its
+a compact preview through its authenticated local native peer socket. The session-bound
+hook is a fallback: a successful native write and the hook share one emission record,
+so the hook does not repeat it. A failed native write leaves the fallback eligible; idle wake is native-version-dependent. Its
 receipt is durable mailbox delivery plus a wake attempt, not a read receipt.
 A closed Claude session retains mail; once open, polling retries its wake.
 
 Hub storage is SQLite; undelivered messages survive hub/connector restarts.
 Approvals and pinned source/target bindings are checked again before delivery.
 An already emitted envelope cannot be recalled by subsequent revocation.
-There is no history UI, tenancy system, or automatic retention in this initial
-shape. Keep the database private, back it up normally, and provision disk space.
+Pair history retains the last 200 messages by default, including queued, delivered,
+refused and dropped outcomes. Set `--history-retention N` (1..10000) on the existing
+hub service to change it; restarting applies the smaller limit immediately.
+History trimming does not delete pending envelopes or their idempotency ledger.
+Keep the database private, back it up normally, and provision disk space.
+
+Missed or lost a message? `csl agents history --with <agent>`.
+Set `CSL_AGENT` to your registered name, or pass `--from NAME`:
+
+```sh
+export CSL_AGENT=client
+csl agents history --with coordinator              # last 5, oldest to newest
+csl agents history --with coordinator --last 20    # no more than retention
+csl agents history --id MESSAGE_UUID               # one complete retained body
+```
+
+Results contain id, source, target, time, state and complete body in both directions.
+Only an authenticated endpoint machine acting as a participant, or the owner
+machine, can read a pair. Machines remain trust domains: this is not isolation
+between agents that share one machine token. Rebinding a name to another machine
+does not grant that machine access to the prior machine's history. The existing
+`csl-bridge-mcp` exposes the same read-only `history` tool with `with`/`last` or `id`,
+bound to its configured agent; no approval or runtime call is needed.
+
+Native Claude and Codex input uses `CSL from <agent> (<id8>):` followed by at most
+600 body characters. Truncated previews say ` [truncated, csl receive for full text]`;
+hub history returns the full body. Transport identity and pair authorization still
+come from the registry, never from text imitating a header. Local IPC emission is
+not a proof of model consumption; a process crash between an IPC write and its
+SQLite commit cannot provide distributed exactly-once delivery.
 Messages are limited to 10,000 UTF-8 bytes; pull batches and HTTP requests are bounded.
 
 Server (the only new permanent process):

@@ -275,7 +275,7 @@ class Tests(unittest.TestCase):
                 return {'turn': {'id': 'synthetic-turn'}}
         self.node.native.client = lambda home: RPC()
         self.node.native.inject('worker', r, r['session'])
-        self.assertTrue(seen[0].startswith('[Message from=coordinator; session=' + r['session'] + '; task=' + r['id'] + ']\n'))
+        self.assertTrue(seen[0].startswith('CSL from coordinator (' + r['id'][:8] + '):\n'))
 
     def test_polling_closes_database_descriptors(self):
         before = len(list(Path('/proc/self/fd').iterdir()))

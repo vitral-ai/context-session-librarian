@@ -55,15 +55,15 @@ class NotifyTests(unittest.TestCase):
              patch('csl_bridge_claude_notify.start_ticks', return_value='123'):
             return notify(self.home, agent, mid or self.mid)
 
-    def test_header_only_bound_session_and_no_ack(self):
+    def test_compact_preview_bound_session_and_no_ack(self):
         self.assertTrue(self.run_notify())
         raw = self.sock.sendall.call_args.args[0].decode()
-        self.assertNotIn('SECRET REMOTE BODY', raw)
+        self.assertIn('SECRET REMOTE BODY', raw)
         frames = [json.loads(line) for line in raw.splitlines()]
         self.assertEqual(frames[1]['session_id'], self.session)
         self.assertEqual(frames[1]['priority'], 'next')
         self.assertEqual(frames[1]['from'], 'csl-mailbox')
-        self.assertIn('CSL mailbox boundary notification', frames[1]['message']['content'])
+        self.assertEqual('CSL from sender (' + self.mid[:8] + '):\nSECRET REMOTE BODY', frames[1]['message']['content'])
         self.assertIsNone(self.connector.mailbox.message(self.mid)['acknowledged_at'])
 
     def test_duplicate_pull_attempts_native_once(self):
@@ -83,11 +83,26 @@ class NotifyTests(unittest.TestCase):
             self.run_notify()
         self.sock.sendall.assert_not_called()
 
-    def test_uncertain_write_not_retried_and_mail_retained(self):
+    def fallback(self):
+        from csl_bridge_hooks import surface
+        return surface(self.home, 'target', 'UserPromptSubmit', {'session_id': self.session})
+
+    def test_native_success_suppresses_hook_and_hook_suppresses_native(self):
+        self.assertTrue(self.run_notify())
+        self.assertEqual(self.fallback(), '')
+        self.assertFalse(self.run_notify())
+
+    def test_hook_first_suppresses_native(self):
+        self.assertIn('SECRET REMOTE BODY', self.fallback())
+        self.assertFalse(self.run_notify())
+        self.sock.sendall.assert_not_called()
+
+    def test_failed_write_keeps_hook_eligible_and_mail_retained(self):
         self.sock.sendall.side_effect = OSError('lost connection')
         with self.assertRaises(OSError):
             self.run_notify()
-        self.assertFalse(self.run_notify())
+        self.assertIn('SECRET REMOTE BODY', self.fallback())
+        self.assertEqual(self.fallback(), '')
         self.assertIsNotNone(self.connector.mailbox.message(self.mid))
 
     def test_metadata_refuses_symlink_and_writable_file(self):

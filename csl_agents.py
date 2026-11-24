@@ -15,10 +15,8 @@ from csl_bridge_store import BridgeError, decode, encode, identifier, message_he
 
 
 def frame_message(source, task, session, text):
-    # Keep the same envelope on older installed bridge stores too.
-    body = ''.join('> ' + line if line.lstrip().startswith('[Message ') else line
-                   for line in text.splitlines(keepends=True))
-    return message_header(source, task, session) + body
+    # Persist full text; framing/preview belongs at the native presentation boundary.
+    return text
 
 
 DEFAULT_CONFIG = Path.home() / '.config/csl/agents.json'
@@ -44,11 +42,14 @@ def call(settings, request):
     if len(token) != 64 or any(c not in '0123456789abcdef' for c in token):
         raise BridgeError('Invalid machine token file')
     context = ssl.create_default_context(cafile=str(Path(settings['cafile']).expanduser()))
+    response_limit = 65536
+    if request.get('action') == 'history':
+        response_limit += min(10000, max(1, request.get('last', 5))) * 60000
     request = urllib.request.Request(settings['url'].rstrip('/') + '/v1', encode(request).encode(),
                 headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
     try:
         with urllib.request.urlopen(request, context=context, timeout=10) as response:
-            result = decode(response.read(65537))
+            result = decode(response.read(response_limit + 1))
     except urllib.error.HTTPError as error:
         with error:
             result = decode(error.read(65537))
@@ -96,7 +97,7 @@ def deliver(connector, packet):
             from csl_bridge_claude_notify import notify
             notify(connector.store.home, target['name'], packet['id'])
             return {'state': 'delivered', 'id': packet['id'], 'session': target['session'],
-                    'delivery': 'durable mailbox and native boundary header attempted; not a read receipt'}
+                    'delivery': 'durable mailbox and compact native preview attempted; not a read receipt'}
         return result
     if target['cli'] != 'codex' or connector.client_only:
         raise BridgeError('No native Codex runtime on this delivery home')
@@ -161,6 +162,14 @@ def _execute(args):
         # Print the ID before networking: unknown outcomes are retried with this ID.
         import sys
         print('message_id=' + request['id'], file=sys.stderr)
+    elif args.hub_action == 'history':
+        source = args.source or os.environ.get('CSL_AGENT') or settings.get('agent')
+        if not source:
+            raise BridgeError('Set CSL_AGENT or use --from to identify your history endpoint')
+        request.update(source=source)
+        if args.last is not None:
+            request['last'] = args.last
+        request['id' if args.message_id else 'with'] = args.message_id or args.partner
     elif args.hub_action == 'receipt':
         request['id'] = args.id
     print(encode(call(settings, request)))
@@ -197,6 +206,12 @@ def add_commands(subparsers, _):
         if action == 'reply':
             send.add_argument('--in-reply-to', required=True)
         send.set_defaults(func=execute, hub_action='send')
+    history = sub.add_parser('history', help='Read your retained pair history (CSL_AGENT identifies you).')
+    selection = history.add_mutually_exclusive_group(required=True)
+    selection.add_argument('--with', dest='partner')
+    selection.add_argument('--id', dest='message_id')
+    history.add_argument('--from', dest='source')
+    history.add_argument('--last', type=int)
     receipt = sub.add_parser('receipt'); receipt.add_argument('id')
     parser.set_defaults(func=execute)
 
@@ -208,8 +223,9 @@ def serve_main():
         parser.add_argument('--' + key, required=True)
     parser.add_argument('--bind', default='127.0.0.1'); parser.add_argument('--port', type=int, default=443)
     parser.add_argument('--ssh-port', type=int)
+    parser.add_argument('--history-retention', type=int, default=200)
     args = parser.parse_args()
-    hub = Hub(args.database, json.loads(Path(args.machines).read_text()))
+    hub = Hub(args.database, json.loads(Path(args.machines).read_text()), args.history_retention)
     server(hub, (args.bind, args.port), args.certificate, args.key, args.ssh_port).serve_forever()
 
 

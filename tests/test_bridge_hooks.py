@@ -24,23 +24,22 @@ class HookTests(unittest.TestCase):
         sent = self.send(body='Private synthetic body')
         self.flush(self.a, 'bob')
         first = self.notify()
-        self.assertIn(sent['id'], first)
-        self.assertNotIn('Private synthetic body', first)
+        self.assertIn(sent['id'][:8], first)
+        self.assertIn('Private synthetic body', first)
         self.assertNotIn('authority', first.split('\n', 1)[1])
         self.assertEqual(self.notify(), '')
         other = str(uuid.uuid4())
         with self.assertRaises(BridgeError):
             self.notify(session=other)
-        self.assertIn(sent['id'], self.notify(session=other, session_binding=other))
+        self.assertIn(sent['id'][:8], self.notify(session=other, session_binding=other))
         self.assertFalse(self.receive()['messages'][0]['facts']['acknowledged'])
 
     def test_body_opt_in_uses_local_authority_not_sender_assertion(self):
         self.send(body='Synthetic message with no authority')
         self.flush(self.a, 'bob')
         value = self.notify(include_body=True)
-        body = json.loads(value.split('\n', 1)[1])['messages'][0]
-        self.assertEqual(body['authority']['authority'], 'none')
-        self.assertIn('Synthetic message', body['body'])
+        self.assertIn('Synthetic message with no authority', value)
+        self.assertNotIn('CSL mailbox boundary notification', value)
 
     def test_event_formats_stop_guard_and_new_message(self):
         self.send(); self.flush(self.a, 'bob')
@@ -65,26 +64,25 @@ class HookTests(unittest.TestCase):
                 envelope = decode(row['envelope']); envelope['expires_at'] = past
                 db.execute('UPDATE mail_messages SET envelope=? WHERE id=?', (encode(envelope), row['id']))
         live = self.send(body='Live after expired rows'); self.flush(self.a, 'bob')
-        self.assertIn(live['id'], self.notify(limit=1))
+        self.assertIn(live['id'][:8], self.notify(limit=1))
 
     def test_final_json_unicode_payload_is_bounded_with_explicit_body_omission(self):
         self.send(body='😀' * 12000); self.flush(self.a, 'bob')
         value = self.notify(event='PostToolUse', include_body=True)
         self.assertLessEqual(len(value.encode()), 48000)
         content = json.loads(value)['hookSpecificOutput']['additionalContext']
-        message = json.loads(content.split('\n', 1)[1])['messages'][0]
-        self.assertIn('body_omitted', message)
-        self.assertNotIn('body', message)
+        self.assertIn(' [truncated, csl receive for full text]', content)
+        self.assertEqual(content.count('😀'), 600)
 
     def test_page_bound_reports_more_without_consuming_remaining_messages(self):
         first, second = self.send(), self.send(body='Next page')
         self.flush(self.a, 'bob')
-        one = json.loads(self.notify(limit=1).split('\n', 1)[1])
-        self.assertTrue(one['more_available'])
-        self.assertEqual([item['id'] for item in one['messages']], [first['id']])
-        two = json.loads(self.notify(limit=1).split('\n', 1)[1])
-        self.assertFalse(two['more_available'])
-        self.assertEqual([item['id'] for item in two['messages']], [second['id']])
+        one = self.notify(limit=1)
+        self.assertIn('More CSL messages waiting', one)
+        self.assertIn(first['id'][:8], one)
+        two = self.notify(limit=1)
+        self.assertNotIn('More CSL messages waiting', two)
+        self.assertIn(second['id'][:8], two)
 
     def test_boundaries_validate_without_transcript_reads(self):
         self.send(); self.flush(self.a, 'bob')
