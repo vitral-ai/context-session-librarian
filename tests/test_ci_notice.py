@@ -75,6 +75,9 @@ class CompletionNoticeTests(unittest.TestCase):
         self.assertIn(result['id'], logs.output[0])
         with self.hub.connect() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM envelopes').fetchone()[0], 0)
+            row = db.execute('SELECT state,body FROM history WHERE id=?', (result['id'],)).fetchone()
+            self.assertEqual(row['state'], 'dropped')
+            self.assertIn('Head:', row['body'])
         with self.assertRaisesRegex(BridgeError, 'Unknown agent'):
             self.hub.call('owner', dict(action='send', source='ci-notices', target='unknown',
                                        id=str(uuid.uuid4()), text='ordinary message'))

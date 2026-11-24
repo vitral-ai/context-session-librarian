@@ -70,3 +70,5 @@ workflow under `docs/` before changing it.
 - Updates: `git pull --ff-only`; the installed launcher is a symlink to this repo.
 - Keep `csl_capabilities.py` and `docs/PROVIDER_MATRIX.md` synchronized with commands.
 - Use isolated CODEX_HOME and CLAUDE_CONFIG_DIR for tests. Never add fixtures to personal histories.
+
+Missed or lost a message? `csl agents history --with <agent>` (set `CSL_AGENT` to your registered name).

@@ -46,6 +46,18 @@ class MCPTests(unittest.TestCase):
         with self.assertRaises(BridgeError):
             configuration(self.home, 'worker', ['followup_task'])
 
+    def test_history_is_read_only_bound_and_calls_hub_without_runtime(self):
+        self.assertTrue(next(t for t in self.adapter.catalog() if t['name'] == 'history')['annotations']['readOnlyHint'])
+        with patch('csl_agents.config', return_value={}), patch('csl_agents.call', return_value={'messages': []}) as hub, patch('csl_bridge_mcp.local_call') as runtime:
+            result = self.adapter.call('history', {'with': 'other', 'last': 3})
+        hub.assert_called_once_with({}, {'action': 'history', 'source': 'worker', 'with': 'other', 'last': 3})
+        runtime.assert_not_called()
+        self.assertEqual(result['data'], {'messages': []})
+        with self.assertRaises(BridgeError):
+            self.adapter.call('history', {})
+        with self.assertRaises(BridgeError):
+            self.adapter.call('history', {'with': 'other', 'source': 'spoof'})
+
     def test_fixed_identity_and_no_sensitive_surfaces(self):
         with patch('csl_bridge_mcp.local_call', return_value={'state': 'delivered'}) as call:
             self.adapter.call('followup_task', {'peer': 'alice', 'target': 'coordinator', 'message': 'Synthetic review'})
@@ -98,7 +110,7 @@ class MCPTests(unittest.TestCase):
             serve(self.adapter, stdin, stdout)
         responses = {row['id']: row for row in map(json.loads, stdout.getvalue().splitlines())}
         self.assertEqual(responses[1]['result']['protocolVersion'], '2024-11-05')
-        self.assertEqual(len(responses[2]['result']['tools']), 15)
+        self.assertEqual(len(responses[2]['result']['tools']), 16)
         text = json.loads(responses[3]['result']['content'][0]['text'])
         self.assertEqual(text['bound_agent'], 'worker')
         self.assertEqual(text['data'], {'agents': []})

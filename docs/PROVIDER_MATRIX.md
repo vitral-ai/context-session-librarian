@@ -335,3 +335,5 @@ The hub pins agent sessions and machine identity, enforces directed approvals, a
 retains queued envelopes. Existing machine connectors deliver Codex turns or Claude
 mailbox boundary notifications. See [hub setup](AGENT_HUB.md); native delivery and
 model consumption are distinct, and interrupted native invocations are not replayed.
+
+Agent hub pair history: `csl agents history --with NAME` (set `CSL_AGENT`), or the read-only MCP `history` tool; full bodies and delivery states, default retention 200 per pair.

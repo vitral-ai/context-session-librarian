@@ -36,13 +36,25 @@ QUOTE_MARK = '> '
 def neutralize_headers(text):
     """Prefix every body line that could read as a bridge header. Any line
     boundary counts (splitlines), so a lone CR or Unicode separator cannot hide one."""
-    return ''.join(QUOTE_MARK + line if line.lstrip().startswith(HEADER_PREFIX) else line
+    return ''.join(QUOTE_MARK + line if line.lstrip().startswith((HEADER_PREFIX, 'CSL from ')) else line
                    for line in text.splitlines(keepends=True))
 
 
 def frame_message(source, task, session, text):
     """The only framing of bridge text placed in a native turn (requests and events)."""
-    return message_header(source, task, session) + neutralize_headers(text)
+    # Direct bridge tasks have no Hub history/mailbox fallback: never cut their body.
+    return 'CSL from ' + source + ' (' + task[:8] + '):\n' + neutralize_headers(text)
+
+
+def compact_message(source, task, text, limit=600):
+    """A bounded native preview; complete text remains in the mailbox/history."""
+    # Older durable mailbox rows already contain the authenticated bridge header.
+    first, separator, rest = text.partition('\n')
+    if first.startswith('[Message from=' + source + ';') and ('task=' + task + ']') in first:
+        text = rest if separator else ''
+    body = neutralize_headers(text[:limit])
+    return ('CSL from ' + source + ' (' + task[:8] + '):\n' + body +
+            (' [truncated, csl receive for full text]' if len(text) > limit else ''))
 
 
 def contains_findings(text):
