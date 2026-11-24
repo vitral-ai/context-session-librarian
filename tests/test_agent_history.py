@@ -151,6 +151,23 @@ class PrefixTests(HistoryTests):
         self.assertEqual(self.history(partner=None, id=old[:8]), [])
         self.assertEqual(self.send('client', 'claude', 'remote', in_reply_to=old[:8])['state'], 'queued')
 
+    def test_reply_pins_survive_history_expiry_and_name_reassignment(self):
+        self.hub = Hub(self.path, self.machines, history_retention=1)
+        self.allow()
+        old = self.send()['id']; self.send()
+        # Today's name approval must not confer access to an old machine's mail.
+        self.do('laptop', action='register', name='client', cli='codex', machine='third', session=str(uuid.uuid4()))
+        self.allow()
+        for selector in (old, old[:8]):
+            with self.assertRaisesRegex(BridgeError, 'reverse'):
+                self.send('client', 'claude', 'third', in_reply_to=selector)
+        # The original source pin matters too, even if the replying machine stayed.
+        self.do('laptop', action='register', name='client', cli='codex', machine='remote', session=str(uuid.uuid4()))
+        self.do('laptop', action='register', name='claude', cli='claude', machine='third', session=str(uuid.uuid4()))
+        self.allow()
+        with self.assertRaisesRegex(BridgeError, 'reverse'):
+            self.send('client', 'claude', 'remote', in_reply_to=old[:8])
+
 
 class ReplyCLITests(HistoryCLITests):
     def test_positional_prefix_infers_target_without_touching_body(self):

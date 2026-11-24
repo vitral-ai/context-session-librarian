@@ -40,6 +40,7 @@ class HookTests(unittest.TestCase):
         value = self.notify(include_body=True)
         self.assertIn('Synthetic message with no authority', value)
         self.assertNotIn('CSL mailbox boundary notification', value)
+        self.assertNotIn('Reply via hub:', value)
 
     def test_event_formats_stop_guard_and_new_message(self):
         self.send(); self.flush(self.a, 'bob')

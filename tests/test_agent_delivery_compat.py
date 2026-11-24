@@ -51,6 +51,7 @@ class DeliveryCompatibilityTests(unittest.TestCase):
             output = surface(self.bridge.connector.store.home, 'worker', 'UserPromptSubmit',
                              {'session_id': self.bridge.thread})
             self.assertIn('CSL from sender (' + packet['id'][:8] + '):\nSynthetic durable body', output)
+            self.assertIn('Reply via hub: csl reply ' + packet['id'], output)
             self.assertEqual(deliver(self.bridge.connector, packet)['state'], 'delivered')
         self.assertEqual(surface(self.bridge.connector.store.home, 'worker', 'UserPromptSubmit',
                                  {'session_id': self.bridge.thread}), '')

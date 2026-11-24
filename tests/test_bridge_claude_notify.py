@@ -63,8 +63,16 @@ class NotifyTests(unittest.TestCase):
         self.assertEqual(frames[1]['session_id'], self.session)
         self.assertEqual(frames[1]['priority'], 'next')
         self.assertEqual(frames[1]['from'], 'csl-mailbox')
-        self.assertEqual('CSL from sender (' + self.mid[:8] + '):\nSECRET REMOTE BODY\nReply via hub: csl reply ' + self.mid + ' --from target --text ...', frames[1]['message']['content'])
+        self.assertEqual('CSL from sender (' + self.mid[:8] + '):\nSECRET REMOTE BODY', frames[1]['message']['content'])
         self.assertIsNone(self.connector.mailbox.message(self.mid)['acknowledged_at'])
+
+    def test_hub_provenance_adds_reply_footer_only_to_hub_mail(self):
+        with self.connector.store.transaction() as db:
+            db.execute("UPDATE mail_messages SET peer='agent-hub' WHERE id=?", (self.mid,))
+        self.assertTrue(self.run_notify())
+        frames = [json.loads(line) for line in self.sock.sendall.call_args.args[0].decode().splitlines()]
+        self.assertTrue(frames[1]['message']['content'].endswith(
+            'Reply via hub: csl reply ' + self.mid + ' --from target --text ...'))
 
     def test_duplicate_pull_attempts_native_once(self):
         self.assertTrue(self.run_notify())

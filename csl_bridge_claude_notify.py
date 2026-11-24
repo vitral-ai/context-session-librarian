@@ -93,7 +93,7 @@ def notify(home, agent, message_id, config=None):
         if envelope.get('expires_at') and timestamp(envelope['expires_at']) <= timestamp(now()):
             return False
         record, path, token = endpoint(config or Path.home() / '.claude', session)
-        text = compact_message(row['source'], message_id, envelope['body'], target=agent)
+        text = compact_message(row['source'], message_id, envelope['body'], target=agent if row['peer'] == 'agent-hub' else None)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
             connection.settimeout(1)
             connection.connect(str(path))

@@ -235,10 +235,20 @@ class Hub:
                 reply = request.get('in_reply_to')
                 if reply is not None:
                     selector = message_selector(reply)
-                    originals = db.execute('SELECT id,source,target FROM envelopes WHERE id LIKE ? '
-                                           'AND source=? AND target=? LIMIT 2',
-                                           (selector + '%' if len(selector) < 36 else selector,
-                                            target['name'], source['name'])).fetchall()
+                    candidates = db.execute('SELECT id,source,target,packet FROM envelopes WHERE id LIKE ? '
+                                            'AND source=? AND target=?',
+                                            (selector + '%' if len(selector) < 36 else selector,
+                                             target['name'], source['name']))
+                    # Names can be reassigned to another machine. Resolve against the
+                    # immutable original pins, not just today's approved endpoint names.
+                    originals = []
+                    for candidate in candidates:
+                        pins = decode(candidate['packet'])
+                        if (pins['target']['machine'] == source['machine'] and
+                                pins['source']['machine'] == target['machine']):
+                            originals.append(candidate)
+                            if len(originals) == 2:
+                                break
                     if len(originals) > 1:
                         raise BridgeError('Ambiguous message ID prefix; use more characters')
                     original = originals[0] if originals else None
