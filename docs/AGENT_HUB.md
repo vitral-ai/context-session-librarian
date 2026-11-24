@@ -80,3 +80,32 @@ Use an unprivileged service user with only `CAP_NET_BIND_SERVICE`, private state
 and restart-on-failure. Keep existing sshd local and expose only 443 in the NSG.
 This replaces the cross-machine message route, not native runtime ownership or
 CLI-specific authorization. Existing SSH routes may remain as an opt-in fallback.
+
+## PR completion notices
+
+PR workflows finish with the reusable `pr-completion-notice.yml` job. It runs on
+GitHub-hosted runners without executing the PR checkout. Each workflow completion
+(success, failure, cancellation or skip) posts once; matrix jobs are summarized.
+The notice identifies the workflow, PR head and run link, rather than claiming
+that unrelated workflows have finished. Forks receive no notice secret.
+
+Use `codex/<hub-agent-name>/<topic>` for agent branches. For existing branches,
+the hub owner can add an exact `routes: {"branch": "agent"}` mapping to that
+repository's notice credential. The destination must be registered and allowed
+from `ci-notices`. Unknown branches refuse clearly; they never default to the
+coordinator or another agent.
+
+Each repository has secret `CSL_HUB_NOTICE_TOKEN` and public variables
+`CSL_HUB_URL` (HTTPS `/v1`) and `CSL_HUB_CA_PEM` (pinned certificate). Its token hash
+is a hub machines entry with `scope: notices`, `repository: owner/repo`,
+`source: ci-notices`, `source_machine: laptop` and optional `routes`. This token
+can only post structured completion metadata for that repository: no arbitrary
+text, mailbox reads, agent registration, approvals or delivery acknowledgments.
+The hub constructs the text and the UUID from repository/run/attempt, so retries
+cannot duplicate a completion. An intentional GitHub rerun gets a new notice.
+A notice failure is visible in its job log but does not change the CI verdict.
+
+To revoke a credential, remove its entry from the hub machines file, reload the
+existing hub service, then `gh secret delete CSL_HUB_NOTICE_TOKEN -R owner/repo`.
+No machine login token is used by GitHub Actions. There is no polling job or new
+service. Pin reusable workflow references and its trusted client to full SHAs.

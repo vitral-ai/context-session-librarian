@@ -1,0 +1,43 @@
+name: CSL completion notice
+on:
+  workflow_call:
+    inputs:
+      needs-json:
+        required: true
+        type: string
+      workflow-name:
+        required: true
+        type: string
+    secrets:
+      CSL_HUB_NOTICE_TOKEN:
+        required: true
+permissions:
+  contents: read
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Load trusted notice client
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: vitral-ai/context-session-librarian
+          ref: 0daa202d1074fdced317b01a7e43dc14d61a2574
+          persist-credentials: false
+          sparse-checkout: |
+            csl_ci_notice.py
+            csl_bridge_store.py
+          sparse-checkout-cone-mode: false
+      - name: Post completion once
+        continue-on-error: true # Notice delivery must not replace the existing CI verdict.
+        env:
+          CSL_EVENT: ${{ toJSON(github.event) }}
+          CSL_NEEDS: ${{ inputs.needs-json }}
+          CSL_REPOSITORY: ${{ github.repository }}
+          CSL_WORKFLOW: ${{ inputs.workflow-name }}
+          CSL_RUN_ID: ${{ github.run_id }}
+          CSL_RUN_ATTEMPT: ${{ github.run_attempt }}
+          CSL_HUB_URL: ${{ vars.CSL_HUB_URL }}
+          CSL_HUB_CA_PEM: ${{ vars.CSL_HUB_CA_PEM }}
+          CSL_HUB_NOTICE_TOKEN: ${{ secrets.CSL_HUB_NOTICE_TOKEN }}
+        run: python3 csl_ci_notice.py
