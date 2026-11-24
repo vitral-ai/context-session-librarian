@@ -35,3 +35,17 @@ class NoticeWorkflowTests(unittest.TestCase):
         self.assertIn('CSL_HUB_NOTICE_TOKEN: ${{ secrets.CSL_HUB_NOTICE_TOKEN }}', workflow)
         self.assertNotIn('secrets: inherit', workflow)
         self.assertNotIn('checkout', workflow)
+
+    def test_handler_filters_non_pr_and_cancelled_completions(self):
+        # Evaluate the actual caller expression for representative GitHub runs.
+        workflow = Path('.github/workflows/ci-completion-notice.yml').read_text()
+        expression = re.search(r"if: \$\{\{ (.*?) \}\}", workflow).group(1)
+        for event in ('pull_request', 'pull_request_target', 'push', 'workflow_dispatch'):
+            for conclusion in ('success', 'failure', 'cancelled', 'timed_out'):
+                with self.subTest(event=event, conclusion=conclusion):
+                    predicate = expression.replace('github.event.workflow_run.event', repr(event))
+                    predicate = predicate.replace('github.event.workflow_run.conclusion', repr(conclusion))
+                    predicate = predicate.replace('&&', ' and ').replace('||', ' or ')
+                    actual = eval(predicate, {'__builtins__': {}}, {})
+                    self.assertEqual(actual, event in ('pull_request', 'pull_request_target')
+                                     and conclusion != 'cancelled')
