@@ -11,8 +11,15 @@ import sqlite3
 import ssl
 import threading
 import time
+import uuid
+from datetime import datetime, timezone
 
 from csl_bridge_store import BridgeError, decode, encode, identifier, name
+
+
+NOTICE_SOURCE = {'name': 'hub-notifier', 'session': 'a38597e0-058a-5a72-9f71-50340e8242d3',
+                 'cli': 'hub', 'machine': 'hub'}
+COORDINATOR = 'laptop-orchestrator'
 
 
 class Hub:
@@ -20,6 +27,7 @@ class Hub:
         self.database, self.machines = str(database), machines
         with self.connect() as db:
             db.executescript('''
+                CREATE TABLE IF NOT EXISTS hub_notices(id TEXT PRIMARY KEY);
                 CREATE TABLE IF NOT EXISTS agents(name TEXT PRIMARY KEY, record TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS approvals(source TEXT, target TEXT, PRIMARY KEY(source,target));
                 CREATE TABLE IF NOT EXISTS envelopes(id TEXT PRIMARY KEY, source TEXT, target TEXT,
@@ -35,6 +43,29 @@ class Hub:
                 yield db
         finally:
             db.close()
+
+    def refuse_send(self, db, machine, source, target, mid, reason):
+        """Commit one hub-authored notice before returning the original refusal."""
+        coordinator = db.execute('SELECT record FROM agents WHERE name=?', (COORDINATOR,)).fetchone()
+        if coordinator:
+            recipient = decode(coordinator['record'])
+            # Retries of the same refusal never generate duplicate coordinator turns.
+            notice_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                encode([machine, source, target, mid, reason])))
+            created = datetime.now(timezone.utc).isoformat()
+            packet = {'id': notice_id, 'source': NOTICE_SOURCE, 'target': recipient,
+                      'text': f'refused: {source} -> {target}, {reason}, {created}, message id {mid}',
+                      'in_reply_to': None, 'created_at': created}
+            db.execute('INSERT OR IGNORE INTO envelopes VALUES(?,?,?,?,?,?,NULL,?)',
+                       (notice_id, NOTICE_SOURCE['name'], COORDINATOR, recipient['machine'],
+                        encode(packet), 'queued', time.time()))
+            db.execute('INSERT OR IGNORE INTO hub_notices VALUES(?)', (notice_id,))
+            # Raising inside connect() normally rolls back; the durable notice must survive.
+            db.commit()
+            suffix = 'Coordinator laptop-orchestrator has been notified (notice queued).'
+        else:
+            suffix = 'Coordinator notification unavailable: laptop-orchestrator is not registered.'
+        raise BridgeError(reason + '. ' + suffix + ' Do not retry through another channel.')
 
     def authenticate(self, token):
         digest = hashlib.sha256(token.encode()).hexdigest()
@@ -58,6 +89,8 @@ class Hub:
                 return decode(row['record'])
             if action == 'register':
                 record = {k: request[k] for k in ('name', 'session', 'cli', 'machine')}
+                if record['name'] == NOTICE_SOURCE['name']:
+                    raise BridgeError('Reserved hub notification identity')
                 name(record['name']); identifier(record['session']); name(record['machine'])
                 if record['cli'] not in ('codex', 'claude') or record['machine'] not in self.machines:
                     raise BridgeError('Unknown CLI or machine')
@@ -90,13 +123,23 @@ class Hub:
             if action == 'permissions':
                 return {'approvals': [dict(r) for r in db.execute('SELECT * FROM approvals ORDER BY source,target')]}
             if action == 'send':
-                source, target = agent(request['source']), agent(request['target'])
+                source_name, target_name = name(request['source']), name(request['target'])
+                mid = identifier(request['id'])
+                try:
+                    source = agent(source_name)
+                except BridgeError as error:
+                    self.refuse_send(db, machine, source_name, target_name, mid, str(error))
                 if source['machine'] != machine:
                     raise BridgeError('Source agent does not belong to authenticated machine')
+                try:
+                    target = agent(target_name)
+                except BridgeError as error:
+                    self.refuse_send(db, machine, source_name, target_name, mid, str(error))
                 if not db.execute('SELECT 1 FROM approvals WHERE source=? AND target=?',
                                   (source['name'], target['name'])).fetchone():
-                    raise BridgeError('Unapproved pair: ' + source['name'] + ' -> ' + target['name'])
-                mid, text = identifier(request['id']), request['text']
+                    self.refuse_send(db, machine, source_name, target_name, mid,
+                                     'Unapproved pair: ' + source['name'] + ' -> ' + target['name'])
+                text = request['text']
                 if not isinstance(text, str) or not text.strip() or len(text.encode()) > 10000:
                     raise BridgeError('Message must contain 1..10000 UTF-8 bytes')
                 reply = request.get('in_reply_to')
@@ -110,7 +153,6 @@ class Hub:
                     if {k: v for k, v in decode(previous['packet']).items() if k != 'created_at'} != packet:
                         raise BridgeError('Message ID collision')
                     return {'id': mid, 'state': previous['state'], 'receipt': decode(previous['receipt']) if previous['receipt'] else None}
-                from datetime import datetime, timezone
                 packet['created_at'] = datetime.now(timezone.utc).isoformat()
                 db.execute('INSERT INTO envelopes VALUES(?,?,?,?,?,?,NULL,?)',
                            (mid, source['name'], target['name'], target['machine'], encode(packet), 'queued', time.time()))
@@ -125,7 +167,10 @@ class Hub:
                     approved = db.execute('SELECT 1 FROM approvals WHERE source=? AND target=?',
                                           (packet['source']['name'], packet['target']['name'])).fetchone()
                     origin = db.execute('SELECT record FROM agents WHERE name=?', (packet['source']['name'],)).fetchone()
-                    if current and origin and decode(origin['record']) == packet['source'] and decode(current['record']) == packet['target'] and approved:
+                    system_notice = (packet['source'] == NOTICE_SOURCE and
+                        db.execute('SELECT 1 FROM hub_notices WHERE id=?', (packet['id'],)).fetchone())
+                    valid_origin = (origin and decode(origin['record']) == packet['source'] and approved)
+                    if current and decode(current['record']) == packet['target'] and (system_notice or valid_origin):
                         length = len(encode(packet).encode())
                         if size + length > 58000:
                             break

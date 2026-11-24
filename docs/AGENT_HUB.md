@@ -79,3 +79,10 @@ Use an unprivileged service user with only `CAP_NET_BIND_SERVICE`, private state
 and restart-on-failure. Keep existing sshd local and expose only 443 in the NSG.
 This replaces the cross-machine message route, not native runtime ownership or
 CLI-specific authorization. Existing SSH routes may remain as an opt-in fallback.
+
+Refused sends (unknown agent or unapproved pair) queue a short hub-authored
+notice to `laptop-orchestrator`, including endpoints, reason, timestamp and original
+message ID, without the rejected body. The sender is told that the coordinator
+has been notified and not to retry through another channel. Notices are durable
+and deduplicated for the same refusal; they do not grant pair access. If the
+coordinator is absent, the sender is explicitly told notification is unavailable.
