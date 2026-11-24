@@ -13,6 +13,8 @@ class NoticeWorkflowTests(unittest.TestCase):
         self.assertIn('runs-on: ubuntu-latest', workflow)
         self.assertEqual(re.findall(r'run: (.*)', workflow), ['python3 csl_ci_notice.py'])
         self.assertIn('environment: csl-ci-notices', workflow)
+        self.assertIn('pull-requests: read', workflow)
+        self.assertIn('CSL_GITHUB_TOKEN: ${{ github.token }}', workflow)
         self.assertIn('CSL_HUB_NOTICE_TOKEN:\n        required: true', workflow)
         self.assertIn("github.event_name == 'workflow_run'", workflow)
         self.assertIn('github.event.repository.default_branch', workflow)
