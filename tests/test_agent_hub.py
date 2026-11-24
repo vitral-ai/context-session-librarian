@@ -1,4 +1,5 @@
 import hashlib
+import json
 import tempfile
 from pathlib import Path
 import unittest
@@ -34,7 +35,7 @@ class HubTests(unittest.TestCase):
                        id=extra.pop('id', str(uuid.uuid4())), text=extra.pop('text', 'hello'), **extra)
 
     def test_refused_pair_never_queues(self):
-        with self.assertRaisesRegex(BridgeError, 'Unapproved pair'):
+        with self.assertRaisesRegex(BridgeError, 'Coordinator notification unavailable.*Do not retry through another channel'):
             self.send()
         self.assertEqual(self.do('remote', action='pull'), {'envelopes': []})
 
@@ -108,6 +109,60 @@ class HubTests(unittest.TestCase):
         self.assertLess(len(encode(packets).encode()), 65536)
         self.assertEqual(len(packets['envelopes']), 1)
         self.assertEqual(packets, self.do('remote', action='pull'))
+
+
+class RefusalNoticeTests(unittest.TestCase):
+    tearDown = HubTests.tearDown
+    do = HubTests.do
+    send = HubTests.send
+    def setUp(self):
+        HubTests.setUp(self)
+        self.do('laptop', action='register', name='laptop-orchestrator',
+                session=str(uuid.uuid4()), cli='claude', machine='laptop')
+
+    def test_refusal_notifies_only_coordinator_and_retry_is_idempotent(self):
+        mid = str(uuid.uuid4())
+        for _ in range(2):
+            with self.assertRaisesRegex(BridgeError, 'has been notified.*Do not retry through another channel'):
+                self.send(id=mid, text='PRIVATE REJECTED BODY')
+        self.hub = Hub(self.path, self.machines)
+        packets = self.do('laptop', action='pull')['envelopes']
+        self.assertEqual(len(packets), 1)
+        notice = packets[0]
+        self.assertEqual(notice['source']['name'], 'hub-notifier')
+        self.assertEqual(notice['target']['name'], 'laptop-orchestrator')
+        self.assertIn('refused: claude -> client', notice['text'])
+        self.assertIn(mid, notice['text'])
+        self.assertIn('Unapproved pair', notice['text'])
+        self.assertIn(notice['created_at'], notice['text'])
+        self.assertNotIn('PRIVATE REJECTED BODY', notice['text'])
+        self.assertEqual(self.do('remote', action='pull')['envelopes'], [])
+        self.do('laptop', action='ack', id=notice['id'], receipt={'state': 'delivered'})
+        self.assertEqual(self.do('laptop', action='pull')['envelopes'], [])
+
+    def test_unknown_recipient_and_sender_notify(self):
+        for source, target in [('claude', 'missing-target'), ('missing-source', 'client')]:
+            with self.assertRaisesRegex(BridgeError, 'Unknown agent.*has been notified'):
+                self.send(source=source, target=target)
+        with self.hub.connect() as db:
+            packets = [json.loads(r[0]) for r in db.execute('SELECT packet FROM envelopes')]
+        self.assertEqual(len(packets), 2)
+        self.assertTrue(all(p['target']['name'] == 'laptop-orchestrator' for p in packets))
+
+    def test_system_identity_cannot_be_registered_or_spoofed(self):
+        with self.assertRaisesRegex(BridgeError, 'Reserved'):
+            self.do('laptop', action='register', name='hub-notifier', session=str(uuid.uuid4()),
+                    cli='codex', machine='laptop')
+        with self.assertRaisesRegex(BridgeError, 'Source agent'):
+            self.send(machine='remote')
+        self.assertEqual(self.do('laptop', action='pull')['envelopes'], [])
+
+    def test_notice_does_not_follow_coordinator_rebind(self):
+        with self.assertRaises(BridgeError):
+            self.send()
+        self.do('laptop', action='register', name='laptop-orchestrator', session=str(uuid.uuid4()),
+                cli='claude', machine='laptop')
+        self.assertEqual(self.do('laptop', action='pull')['envelopes'], [])
 
 
 if __name__ == '__main__':
