@@ -115,3 +115,5 @@ To revoke a credential, remove its entry from the hub machines file, reload the
 existing hub service, then `gh secret delete CSL_HUB_NOTICE_TOKEN --env csl-ci-notices -R owner/repo`.
 No machine login token is used by GitHub Actions. There is no polling job or new
 service. Pin reusable workflow references and its trusted client to full SHAs.
+
+Completion notices read the current PR head once before posting. A different head skips the superseded notice; a failed lookup still posts the exact completed run head. The lookup uses GitHub read-only PR metadata access; notice credentials and hub delivery stay unchanged.
