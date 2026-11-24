@@ -1,4 +1,5 @@
 import hashlib
+import http.client
 import io
 import urllib.error
 from contextlib import redirect_stdout
@@ -149,6 +150,28 @@ class CompletionNoticeTests(unittest.TestCase):
                 self.assertEqual(json.loads(post.data)['sha'], 'a' * 40)
                 self.assertNotIn('github-read-token', output.getvalue())
                 self.assertNotIn('hub-notice-token', output.getvalue())
+
+    def test_truncated_lookup_body_posts_exact_run(self):
+        class TruncatedResponse(io.StringIO):
+            def read(self, *args, **kwargs):
+                raise http.client.IncompleteRead(b'{"head":', 80)
+        _, env = self.run_environment()
+        env.update(CSL_GITHUB_TOKEN='github-read-token', CSL_HUB_NOTICE_TOKEN='hub-notice-token',
+                   CSL_HUB_CA_PEM='test-ca', CSL_HUB_URL='https://hub.example/v1')
+        output = io.StringIO()
+        with patch.dict('os.environ', env, clear=True), redirect_stdout(output), patch(
+                'ssl.create_default_context'), patch('urllib.request.urlopen', side_effect=[
+                    TruncatedResponse(), io.StringIO(json.dumps({'ok': True, 'data': {
+                        'id': 'notice-id', 'state': 'queued'}}))]) as opener:
+            main()
+        self.assertEqual(opener.call_count, 2)
+        self.assertIsNone(opener.call_args_list[0].args[0].data)
+        post = opener.call_args_list[1].args[0]
+        self.assertEqual(post.full_url, 'https://hub.example/v1')
+        self.assertEqual(json.loads(post.data)['sha'], 'a' * 40)
+        self.assertIn('IncompleteRead', output.getvalue())
+        self.assertNotIn('github-read-token', output.getvalue())
+        self.assertNotIn('hub-notice-token', output.getvalue())
 
 
 if __name__ == '__main__':

@@ -1,4 +1,5 @@
 """Restricted GitHub workflow completion notices; no repository code is executed."""
+import http.client
 import json
 import os
 import re
@@ -91,7 +92,7 @@ def current_head_allows_notice(notice, env):
             head = json.load(response)['head']['sha']
         if not isinstance(head, str) or not re.fullmatch(r'[0-9a-f]{40}', head):
             raise ValueError('Invalid PR head')
-    except (OSError, ValueError, KeyError, TypeError) as error:
+    except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException) as error:
         # Do not log credentials or response bodies. The notice retains run.head_sha.
         print('Current PR head lookup failed (' + type(error).__name__ + '); sending exact-run notice')
         return True
