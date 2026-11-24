@@ -58,10 +58,27 @@ class CompletionNoticeTests(unittest.TestCase):
 
     def test_repo_scope_unknown_branch_agent_pair_and_free_text_refused(self):
         for changes in ({'repository': 'vitral-ai/other'}, {'branch': 'feat/no-mapping'},
-                        {'branch': 'codex/unknown/fix'}, {'text': 'arbitrary instructions'},
+                        {'text': 'arbitrary instructions'},
                         {'sha': 'not-a-sha'}, {'results': {'review': 'green'}}, {'number': True}):
             with self.subTest(changes=changes), self.assertRaises(BridgeError):
                 self.post(**changes)
+        self.hub.call('owner', dict(action='deny', source='ci-notices', target='client'))
+        with self.assertRaisesRegex(BridgeError, 'Unapproved pair'):
+            self.post()
+
+    def test_unknown_notice_target_is_dropped_and_logged_without_an_envelope(self):
+        with self.assertLogs('csl_agent_hub', level='WARNING') as logs:
+            result = self.post(branch='codex/unknown/fix')
+        self.assertEqual(result['state'], 'dropped')
+        self.assertEqual(result['reason'], 'unknown notice target')
+        self.assertIn('unknown target=unknown', logs.output[0])
+        self.assertIn(result['id'], logs.output[0])
+        with self.hub.connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM envelopes').fetchone()[0], 0)
+        with self.assertRaisesRegex(BridgeError, 'Unknown agent'):
+            self.hub.call('owner', dict(action='send', source='ci-notices', target='unknown',
+                                       id=str(uuid.uuid4()), text='ordinary message'))
+        # A known but unapproved target still follows the normal refusal path.
         self.hub.call('owner', dict(action='deny', source='ci-notices', target='client'))
         with self.assertRaisesRegex(BridgeError, 'Unapproved pair'):
             self.post()
