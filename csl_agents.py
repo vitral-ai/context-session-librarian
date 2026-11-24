@@ -105,7 +105,9 @@ def deliver(connector, packet):
         if old and old[0]['state'] in ('delivered', 'uncertain', 'invoking'):
             return decode(old[0]['result']) if old[0]['result'] else {'state': old[0]['state']}
         state = connector.current(target['name'])
-        if state['status'] != 'idle':
+        # Active Codex turns accept turn/steer at their next input boundary.
+        # Waiting for idle starves recipients that keep working in one turn.
+        if state['status'] not in ('idle', 'active'):
             return {'state': 'queued', 'reason': state['status']}
         request = {'version': 1, 'op': 'followup', 'id': packet['id'], 'source': source['name'],
                    'session': source['session'], 'target': target['name'], 'text': packet['text']}

@@ -50,8 +50,9 @@ Revoke a machine by removing its hash and restarting the hub; do not copy tokens
 
 `send` prints its ID before networking. `queued` means durable at the hub, not
 native delivery. Check `receipt`; reuse the SAME ID and text after a lost HTTP
-response. ID collisions refuse. Busy or unopened Codex recipients stay queued
-until idle/open, without blocking siblings. Delivered Codex receipts include the
+response. ID collisions refuse. Active Codex recipients receive native `turn/steer` input at their next
+boundary; they need not finish the turn first. Unopened or unavailable recipients
+stay queued until open, without blocking siblings. Delivered Codex receipts include the
 actual Native turn ID. Interrupted/uncertain Native invocations are NOT replayed.
 Replies are explicit `reply` messages, not implicit final-turn forwarding.
 
