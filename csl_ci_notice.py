@@ -56,17 +56,24 @@ def notice_request(policy, notice):
 
 
 def workflow_notice(env):
-    """Read trusted runner metadata; untrusted branch text is data, never shell code."""
+    """Use GitHub's completed-run metadata, never candidate code or artifacts."""
     event = json.loads(env['CSL_EVENT'])
-    pr = event['pull_request']
-    if pr['head']['repo']['full_name'] != env['CSL_REPOSITORY']:
+    run = event['workflow_run']
+    repo = env['CSL_REPOSITORY']
+    if run['head_repository']['full_name'] != repo:
         raise BridgeError('Fork PR notices do not receive a credential')
-    jobs = json.loads(env['CSL_NEEDS'])
-    return {'action': 'notice', 'repository': env['CSL_REPOSITORY'], 'number': pr['number'],
+    if run['event'] not in ('pull_request', 'pull_request_target') or run['status'] != 'completed':
+        raise BridgeError('Notice requires a completed PR workflow')
+    prs = run['pull_requests']
+    if len(prs) != 1 or prs[0]['head']['repo']['id'] != int(env['CSL_REPOSITORY_ID']):
+        raise BridgeError('Completion must identify exactly one same-repository PR')
+    pr = prs[0]
+    return {'action': 'notice', 'repository': repo, 'number': pr['number'],
             'branch': pr['head']['ref'], 'sha': pr['head']['sha'],
-            'workflow': env['CSL_WORKFLOW'], 'run_id': int(env['CSL_RUN_ID']),
-            'attempt': int(env['CSL_RUN_ATTEMPT']),
-            'results': {key: job['result'] for key, job in jobs.items()}}
+            'workflow': run['name'], 'run_id': run['id'], 'attempt': run['run_attempt'],
+            'results': {'completion': {'timed_out': 'failure', 'action_required': 'failure',
+                                      'startup_failure': 'failure', 'neutral': 'skipped',
+                                      'stale': 'cancelled'}.get(run['conclusion'], run['conclusion'])}}
 
 
 def main():

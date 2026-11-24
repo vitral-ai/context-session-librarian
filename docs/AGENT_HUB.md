@@ -83,9 +83,10 @@ CLI-specific authorization. Existing SSH routes may remain as an opt-in fallback
 
 ## PR completion notices
 
-PR workflows finish with the reusable `pr-completion-notice.yml` job. It runs on
-GitHub-hosted runners without executing the PR checkout. Each workflow completion
-(success, failure, cancellation or skip) posts once; matrix jobs are summarized.
+A default-branch `workflow_run` handler calls the pinned reusable
+`pr-completion-notice.yml` job after a reviewed CI workflow completes. It runs on
+GitHub-hosted runners without executing PR code or consuming its artifacts. Each
+completion posts once using GitHub's PR/run metadata and overall conclusion.
 The notice identifies the workflow, PR head and run link, rather than claiming
 that unrelated workflows have finished. Forks receive no notice secret.
 
@@ -95,7 +96,12 @@ repository's notice credential. The destination must be registered and allowed
 from `ci-notices`. Unknown branches refuse clearly; they never default to the
 coordinator or another agent.
 
-Each repository has secret `CSL_HUB_NOTICE_TOKEN` and public variables
+Each repository stores `CSL_HUB_NOTICE_TOKEN` ONLY in environment
+`csl-ci-notices`, with custom deployment branches allowing only the default
+branch (`main`). No repository-level copy, PR refs, tags or wildcard policies are
+allowed. A candidate workflow naming this environment is rejected by GitHub, not
+merely by an editable YAML condition. Configure this policy before storing the
+secret, and verify it on readback. Each repository also has public variables
 `CSL_HUB_URL` (HTTPS `/v1`) and `CSL_HUB_CA_PEM` (pinned certificate). Its token hash
 is a hub machines entry with `scope: notices`, `repository: owner/repo`,
 `source: ci-notices`, `source_machine: laptop` and optional `routes`. This token
@@ -106,6 +112,6 @@ cannot duplicate a completion. An intentional GitHub rerun gets a new notice.
 A notice failure is visible in its job log but does not change the CI verdict.
 
 To revoke a credential, remove its entry from the hub machines file, reload the
-existing hub service, then `gh secret delete CSL_HUB_NOTICE_TOKEN -R owner/repo`.
+existing hub service, then `gh secret delete CSL_HUB_NOTICE_TOKEN --env csl-ci-notices -R owner/repo`.
 No machine login token is used by GitHub Actions. There is no polling job or new
 service. Pin reusable workflow references and its trusted client to full SHAs.

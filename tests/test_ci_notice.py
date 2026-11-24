@@ -75,20 +75,34 @@ class CompletionNoticeTests(unittest.TestCase):
         with self.assertRaisesRegex(BridgeError, 'collision'):
             self.post(results={'review': 'failure'})
 
-    def test_runner_metadata_ignores_outputs_and_never_executes_branch(self):
-        pr = dict(number=799, head={'repo': {'full_name': 'vitral-ai/example'},
-                                   'ref': 'codex/client/$(touch /tmp/untrusted)', 'sha': 'a' * 40})
-        env = dict(CSL_EVENT=json.dumps({'pull_request': pr}), CSL_REPOSITORY='vitral-ai/example',
-                   CSL_NEEDS=json.dumps({'review': {'result': 'failure', 'outputs': {'private': 'NOT SENT'}}}),
-                   CSL_WORKFLOW='Codex PR Review', CSL_RUN_ID='123', CSL_RUN_ATTEMPT='1')
+    def run_environment(self):
+        run = dict(id=123, run_attempt=1, name='Codex PR Review', status='completed',
+                   event='pull_request_target', conclusion='failure',
+                   head_repository={'full_name': 'vitral-ai/example'},
+                   pull_requests=[dict(number=799, head={'repo': {'id': 42},
+                       'ref': 'codex/client/$(touch /tmp/untrusted)', 'sha': 'a' * 40})])
+        return run, dict(CSL_EVENT=json.dumps({'workflow_run': run}),
+                         CSL_REPOSITORY='vitral-ai/example', CSL_REPOSITORY_ID='42')
+
+    def test_completed_run_metadata_is_data_and_requires_one_same_repo_pr(self):
+        run, env = self.run_environment()
         payload = workflow_notice(env)
-        self.assertEqual(payload['results'], {'review': 'failure'})
-        self.assertNotIn('NOT SENT', json.dumps(payload))
+        self.assertEqual(payload['results'], {'completion': 'failure'})
         self.assertEqual(notice_request(self.policy, payload)['target'], 'client')
-        pr['head']['repo']['full_name'] = 'fork/example'
-        env['CSL_EVENT'] = json.dumps({'pull_request': pr})
-        with self.assertRaisesRegex(BridgeError, 'Fork'):
-            workflow_notice(env)
+        for changes in ({'head_repository': {'full_name': 'fork/example'}},
+                        {'event': 'push'}, {'status': 'in_progress'}, {'pull_requests': []},
+                        {'pull_requests': [run['pull_requests'][0]] * 2},
+                        {'pull_requests': [dict(number=799, head={'repo': {'id': 43}})]}):
+            with self.subTest(changes=changes), self.assertRaises(BridgeError):
+                workflow_notice(dict(env, CSL_EVENT=json.dumps({'workflow_run': dict(run, **changes)})))
+
+    def test_completion_outcomes_include_timeout_and_neutral(self):
+        run, env = self.run_environment()
+        for conclusion, result in [('timed_out', 'failure'), ('neutral', 'skipped'),
+                                   ('success', 'success'), ('cancelled', 'cancelled')]:
+            payload = workflow_notice(dict(env, CSL_EVENT=json.dumps(
+                {'workflow_run': dict(run, conclusion=conclusion)})))
+            self.assertEqual(payload['results'], {'completion': result})
 
 
 if __name__ == '__main__':
