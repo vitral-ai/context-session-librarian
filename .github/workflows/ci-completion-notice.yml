@@ -7,4 +7,6 @@ permissions:
   contents: read
 jobs:
   notify:
-    uses: vitral-ai/context-session-librarian/.github/workflows/pr-completion-notice.yml@3ee6122674136660e6385ed3933986af5410c534
+    uses: vitral-ai/context-session-librarian/.github/workflows/pr-completion-notice.yml@55f3cca4dc0ec463d0d0c203ff9310078ac2be9a
+    secrets:
+      CSL_HUB_NOTICE_TOKEN: ${{ secrets.CSL_HUB_NOTICE_TOKEN }}
