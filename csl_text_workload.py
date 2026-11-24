@@ -256,6 +256,7 @@ def blocks(value, *, claude=False):
 
 class WorkloadTextProvider(PreparedProvider):
     expected_session = None
+    host_id = None
 
     def __init__(self, provider, sources, store, *, expected_session=None, host_id=None, **options):
         if not isinstance(provider, str) or provider not in PROFILES:

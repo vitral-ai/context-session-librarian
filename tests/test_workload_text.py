@@ -221,7 +221,6 @@ class WorkloadTextTests(unittest.TestCase):
             for permission in permissions:
                 adapter = WorkloadTextProvider.__new__(WorkloadTextProvider)
                 adapter.provider, adapter.profile = 'codex', 'codex-0.169.0-text-v1'
-                adapter.host_id = None
                 adapter.bounds, adapter.redactor = Bounds(), Redactor(Bounds())
                 row = self.settings_record(); row['payload']['thread_settings']['permission_profile'] = permission
                 metadata, output, view = adapter.project(native('codex')+[row])
