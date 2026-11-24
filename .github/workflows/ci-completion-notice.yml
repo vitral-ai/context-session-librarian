@@ -1,0 +1,12 @@
+name: Notify source agent of CI completion
+on:
+  workflow_run:
+    workflows: ["Tests", "Workload image source"]
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  notify:
+    uses: vitral-ai/context-session-librarian/.github/workflows/pr-completion-notice.yml@55f3cca4dc0ec463d0d0c203ff9310078ac2be9a
+    secrets:
+      CSL_HUB_NOTICE_TOKEN: ${{ secrets.CSL_HUB_NOTICE_TOKEN }}

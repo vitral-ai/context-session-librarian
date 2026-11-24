@@ -48,6 +48,14 @@ class Hub:
         if not isinstance(request, dict):
             raise BridgeError('Expected an object')
         action = request.get('action')
+        policy = self.machines[machine]
+        if policy.get('scope') == 'notices':
+            from csl_ci_notice import notice_request
+            request = notice_request(policy, request)
+            machine, admin = policy['source_machine'], False
+            action = 'send'
+        elif action == 'notice':
+            raise BridgeError('A repository-scoped notice credential is required')
         with self.connect() as db:
             # Serialize registry/allow-list reads with enqueue and revocation.
             db.execute('BEGIN IMMEDIATE')
