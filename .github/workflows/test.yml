@@ -66,13 +66,3 @@ jobs:
           CSL_RUN_MEDIA_TESTS: '1'
           # Generated fixtures are trusted; hosted runner namespace support varies.
           CSL_MEDIA_SANDBOX: process
-
-  csl-completion-notice:
-    if: ${{ always() && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository }}
-    needs: [transfer, media]
-    uses: ./.github/workflows/pr-completion-notice.yml
-    with:
-      needs-json: ${{ toJSON(needs) }}
-      workflow-name: ${{ github.workflow }}
-    secrets:
-      CSL_HUB_NOTICE_TOKEN: ${{ secrets.CSL_HUB_NOTICE_TOKEN }}
