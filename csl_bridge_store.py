@@ -42,7 +42,8 @@ def neutralize_headers(text):
 
 def frame_message(source, task, session, text):
     """The only framing of bridge text placed in a native turn (requests and events)."""
-    return compact_message(source, task, text)
+    # Direct bridge tasks have no Hub history/mailbox fallback: never cut their body.
+    return 'CSL from ' + source + ' (' + task[:8] + '):\n' + neutralize_headers(text)
 
 
 def compact_message(source, task, text, limit=600):

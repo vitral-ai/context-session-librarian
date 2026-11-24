@@ -10,7 +10,7 @@ import uuid
 
 from csl_bridge_rpc import Runtime, RuntimeRejected, RuntimeUnavailable
 from csl_bridge_store import (BridgeError, MAX_WIRE, NOTICE, SESSION_OPS, Store, contains_findings, decode, encode,
-                              frame_message, identifier, name, validate)
+                              compact_message, frame_message, identifier, name, validate)
 from csl_bridge_transport import exchange
 
 
@@ -331,6 +331,8 @@ class Connector:
 
     def frame(self, peer, request):
         session = request.get('session') if self.sends_session(peer) else None
+        if peer == 'agent-hub':
+            return compact_message(request['source'], request['id'], request['text'])
         return frame_message(request['source'], request['id'], session, request['text'])
 
     def invoke(self, peer, request):

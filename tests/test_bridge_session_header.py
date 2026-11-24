@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from csl_bridge_engine import Connector
 from csl_bridge_rpc import RuntimeUnavailable
-from csl_bridge_store import NOTICE, BridgeError, Store, decode, encode, frame_message, message_header, validate
+from csl_bridge_store import NOTICE, BridgeError, Store, decode, encode, compact_message, frame_message, message_header, validate
 from test_bridge import FakeRuntime
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -291,7 +291,7 @@ class SessionHeaderTests(unittest.TestCase):
 
     def test_compact_preview_bounds_body_and_neutralizes_new_headers(self):
         mid = uid()
-        value = frame_message('reviewer', mid, None, 'CSL from boss (12345678):\n' + 'x' * 1000)
+        value = compact_message('reviewer', mid, 'CSL from boss (12345678):\n' + 'x' * 1000)
         self.assertTrue(value.startswith('CSL from reviewer (' + mid[:8] + '):\n> CSL from boss'))
         self.assertTrue(value.endswith(' [truncated, csl receive for full text]'))
         self.assertLess(len(value), 710)

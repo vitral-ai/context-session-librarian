@@ -3,6 +3,7 @@ import argparse
 import json
 import logging
 import os
+import sqlite3
 from pathlib import Path
 import ssl
 import threading
@@ -15,8 +16,9 @@ from csl_bridge_store import BridgeError, decode, encode, identifier, message_he
 
 
 def frame_message(source, task, session, text):
-    # Persist full text; framing/preview belongs at the native presentation boundary.
-    return text
+    # Preserve the deployed durable fingerprint, including replay after a lost Hub ACK.
+    # Presentation removes this legacy header at the native/hook boundary.
+    return message_header(source, task, session) + text
 
 
 DEFAULT_CONFIG = Path.home() / '.config/csl/agents.json'
@@ -95,7 +97,11 @@ def deliver(connector, packet):
         result = connector.mailbox.incoming(peer, request)
         if result.get('state') == 'persisted':
             from csl_bridge_claude_notify import notify
-            notify(connector.store.home, target['name'], packet['id'])
+            try:
+                notify(connector.store.home, target['name'], packet['id'])
+            except (BridgeError, OSError, ValueError, sqlite3.Error):
+                # Persistence is delivery; unavailable native wake leaves hook fallback eligible.
+                logging.getLogger(__name__).debug('Native wake unavailable; durable mailbox hook fallback remains eligible')
             return {'state': 'delivered', 'id': packet['id'], 'session': target['session'],
                     'delivery': 'durable mailbox and compact native preview attempted; not a read receipt'}
         return result

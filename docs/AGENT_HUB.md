@@ -146,3 +146,5 @@ No machine login token is used by GitHub Actions. There is no polling job or new
 service. Pin reusable workflow references and its trusted client to full SHAs.
 
 Completion notices read the current PR head once before posting. A different head skips the superseded notice; a failed lookup still posts the exact completed run head. The lookup uses GitHub read-only PR metadata access; notice credentials and hub delivery stay unchanged.
+
+Direct bridge tasks retain their full bodies because they have no hub-history fallback. Hub Codex messages use previews; Claude durable mail retains its legacy full-body fingerprint across upgrades. An unavailable native wake does not unset durable mailbox delivery; the hook remains eligible.
