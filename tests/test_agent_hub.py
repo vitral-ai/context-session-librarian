@@ -148,6 +148,70 @@ class NativeDeliveryTests(unittest.TestCase):
             self.assertEqual(deliver(connector,packet),result)
             self.assertEqual(connector.incoming.call_count,1)
 
+class ActiveNativeDeliveryTests(unittest.TestCase):
+    def setUp(self):
+        from test_bridge import BridgeTests
+        self.bridge = BridgeTests()
+        self.bridge.setUp()
+        self.addCleanup(self.bridge.tearDown)
+        from unittest.mock import patch
+        setting = patch('csl_agents.config', return_value={'machine': 'remote'})
+        setting.start()
+        self.addCleanup(setting.stop)
+
+    def packet(self):
+        return {'id': str(uuid.uuid4()), 'text': 'Synthetic boundary message',
+                'source': {'name': 'claude', 'session': str(uuid.uuid4()),
+                           'cli': 'claude', 'machine': 'laptop'},
+                'target': {'name': 'worker', 'session': self.bridge.thread,
+                           'cli': 'codex', 'machine': 'remote'}}
+
+    def test_continuously_active_turn_accepts_ordered_messages_once(self):
+        from csl_agents import deliver
+        runtime = self.bridge.runtime
+        original = self.bridge.connector.incoming('alice', self.bridge.request())
+        packets = [self.packet(), self.packet()]
+        for packet in packets:
+            receipt = deliver(self.bridge.connector, packet)
+            self.assertEqual(receipt['state'], 'delivered')
+            self.assertEqual(receipt['turn_id'], original['turn_id'])
+            self.assertEqual(deliver(self.bridge.connector, packet), receipt)
+        steers = [p for m, p in runtime.calls if m == 'turn/steer']
+        self.assertEqual([p['clientUserMessageId'] for p in steers],
+                         [p['id'] for p in packets])
+        self.assertTrue(all(p['expectedTurnId'] == original['turn_id'] for p in steers))
+        self.assertEqual(sum(m == 'turn/start' for m, _ in runtime.calls), 1)
+
+    def test_active_delivery_lost_ack_is_not_replayed(self):
+        from csl_agents import deliver
+        self.bridge.connector.incoming('alice', self.bridge.request())
+        self.bridge.runtime.lose_ack = True
+        packet = self.packet()
+        self.assertEqual(deliver(self.bridge.connector, packet)['state'], 'uncertain')
+        self.assertEqual(deliver(self.bridge.connector, packet)['state'], 'uncertain')
+        self.assertEqual(sum(m == 'turn/steer' for m, _ in self.bridge.runtime.calls), 1)
+
+    def test_turn_finishes_before_steer_uses_existing_idle_race_recovery(self):
+        from csl_agents import deliver
+        from csl_bridge_rpc import RuntimeRejected
+        runtime = self.bridge.runtime
+        self.bridge.connector.incoming('alice', self.bridge.request())
+        original_call = runtime.call
+        def finish_before_steer(method, params, **kwargs):
+            if method == 'turn/steer':
+                runtime.history[-1]['status'] = 'completed'
+                runtime.turn = None
+                runtime.call = original_call
+                raise RuntimeRejected('Turn finished before steer')
+            return original_call(method, params, **kwargs)
+        runtime.call = finish_before_steer
+        packet = self.packet()
+        receipt = deliver(self.bridge.connector, packet)
+        self.assertEqual(receipt['state'], 'delivered')
+        self.assertEqual(len(runtime.history), 2)
+        self.assertEqual(runtime.history[-1]['items'][0]['clientId'], packet['id'])
+
+
 class HTTPSAndMuxTests(unittest.TestCase):
     def test_tls_authenticated_request_and_ssh_share_one_listener(self):
         import json, shutil, socket, subprocess, threading, urllib.request, ssl
