@@ -7,6 +7,23 @@ import stat
 from csl_canonical import strict_json
 from csl_sync_state import SyncError, private_directory
 
+HOST_ID = re.compile(r'host-[a-f0-9]{16}')
+
+
+def adjacent_host_id(root):
+    """Read the optional public host ID handoff, never the tunnel state."""
+    try:
+        fd = os.open(root/'host-id', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 22
+                    or info.st_uid not in (0, os.getuid()) or info.st_mode & 0o022):
+                return None
+            value = stream.read(23).decode('ascii').removesuffix('\n')
+    except (OSError, UnicodeError):
+        return None
+    return value if HOST_ID.fullmatch(value) else None
+
 
 def child(root, name):
     if (not isinstance(name, str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', name)

@@ -451,6 +451,36 @@ class UploaderTests(unittest.TestCase):
         self.assertEqual(self.config.state_root.stat().st_mode & 0o777, 0o770)
         self.assertEqual((self.config.state_root/'identity').stat().st_mode & 0o777, 0o700)
 
+    def test_adjacent_host_metadata_updates_the_same_redacted_snapshot(self):
+        rows = native('codex')
+        rows[0]['payload']['cwd'] = '/home/agent/project'
+        self.write(rows)
+        handoff = self.config.state_root/'host-id'
+        self.assertTrue(self.one_pass()['ok'])
+        first = dict(next(iter(self.peer.sessions.values())))
+        self.assertNotIn('host_id', first)
+        self.assertNotIn('cwd', first)
+
+        handoff.write_text('host-0123abcdef456789\n')
+        handoff.chmod(0o600)
+        self.assertTrue(self.one_pass()['ok'])
+        bound = next(iter(self.peer.sessions.values()))
+        self.assertEqual(bound['host_id'], 'host-0123abcdef456789')
+        self.assertEqual(bound['cwd'], '/home/agent/project')
+        self.assertFalse(bound['package']['available'])
+        for data in self.peer.files.values():
+            self.assertNotIn(b'/home/agent/project', data)
+        self.assertNotIn('/home/agent/project', json.dumps(list(self.peer.views.values())))
+        self.assertTrue(self.one_pass()['ok'])
+        self.assertEqual(next(iter(self.peer.sessions.values()))['snapshot_id'], bound['snapshot_id'])
+
+        handoff.chmod(0o666)
+        self.assertTrue(self.one_pass()['ok'])
+        cleared = next(iter(self.peer.sessions.values()))
+        self.assertNotIn('host_id', cleared)
+        self.assertNotIn('cwd', cleared)
+        self.assertNotIn(cleared['snapshot_id'], (first['snapshot_id'], bound['snapshot_id']))
+
     def test_claude_profile_uses_same_actual_runtime_boundary(self):
         self.config = replace(self.config, provider='claude', profile=PROVIDER_PROFILES['claude'])
         self.write(native('claude'))

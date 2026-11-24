@@ -43,6 +43,15 @@ necessary IDs, timestamp/model/title and safe event tags are selected. CWD,
 repository, instructions, auxiliary private payloads and unneeded native
 metadata are not copied. The source file itself is unchanged.
 
+For an enrolled adjacent tunnel, place the public `host-…` ID in `host-id`
+under the isolated collector state directory. The collector reads a small
+regular file owned by root or the collector with group and other writes
+disabled. When that ID is valid, snapshot metadata carries `host_id` and, if
+the native working directory passes path and redaction checks, `cwd`. The
+registry validates the host binding and exposes the working directory only
+to the owner. The sanitized transcript and readable view keep their existing
+redaction rules, and resume packages remain unavailable.
+
 Known Codex reasoning records and Claude thinking/redacted-thinking blocks are
 explicitly excluded from this view-only representation. Their contents,
 signatures, ciphertext and per-field lengths/hashes are NOT uploaded or retained
