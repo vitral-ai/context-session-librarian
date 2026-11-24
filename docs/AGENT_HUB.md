@@ -79,7 +79,7 @@ Set `CSL_AGENT` to your registered name, or pass `--from NAME`:
 export CSL_AGENT=client
 csl agents history --with coordinator              # last 5, oldest to newest
 csl agents history --with coordinator --last 20    # no more than retention
-csl agents history --id MESSAGE_UUID               # one complete retained body
+csl agents history --id MESSAGE_UUID_OR_PREFIX     # unique prefix, at least 8 characters
 ```
 
 Results contain id, source, target, time, state and complete body in both directions.
@@ -148,3 +148,5 @@ service. Pin reusable workflow references and its trusted client to full SHAs.
 Completion notices read the current PR head once before posting. A different head skips the superseded notice; a failed lookup still posts the exact completed run head. The lookup uses GitHub read-only PR metadata access; notice credentials and hub delivery stay unchanged.
 
 Direct bridge tasks retain their full bodies because they have no hub-history fallback. Hub Codex messages use previews; Claude durable mail retains its legacy full-body fingerprint across upgrades. An unavailable native wake does not unset durable mailbox delivery; the hook remains eligible.
+
+Hub native messages include a one-line `Reply via hub: csl reply FULL_ID --from YOUR_NAME --text ...` footer. Replace `...` with quoted reply text (or use `--text-file FILE`). Inline native final answers are not mailed automatically. `csl reply ID_OR_PREFIX --from YOUR_NAME --text "reply"` resolves the sender from retained incoming history. History `--id` and reply `--in-reply-to` also accept unique UUID prefixes of at least 8 characters; ambiguous prefixes ask for more characters. Explicit `--to` plus `--in-reply-to` works beyond history retention using the durable delivery ledger.

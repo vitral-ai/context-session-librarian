@@ -46,15 +46,16 @@ def frame_message(source, task, session, text):
     return 'CSL from ' + source + ' (' + task[:8] + '):\n' + neutralize_headers(text)
 
 
-def compact_message(source, task, text, limit=600):
+def compact_message(source, task, text, limit=600, *, target=None):
     """A bounded native preview; complete text remains in the mailbox/history."""
     # Older durable mailbox rows already contain the authenticated bridge header.
     first, separator, rest = text.partition('\n')
     if first.startswith('[Message from=' + source + ';') and ('task=' + task + ']') in first:
         text = rest if separator else ''
     body = neutralize_headers(text[:limit])
+    footer = ('\nReply via hub: csl reply ' + identifier(task) + ' --from ' + name(target) + ' --text ...') if target else ''
     return ('CSL from ' + source + ' (' + task[:8] + '):\n' + body +
-            (' [truncated, csl receive for full text]' if len(text) > limit else ''))
+            (' [truncated, csl receive for full text]' if len(text) > limit else '') + footer)
 
 
 def contains_findings(text):
@@ -77,6 +78,16 @@ def identifier(value):
             raise ValueError
     except (ValueError, AttributeError):
         raise BridgeError('Invalid bridge UUID') from None
+    return value
+
+
+def message_selector(value):
+    """A canonical UUID or its literal prefix, at least eight characters long."""
+    template = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+    if (not isinstance(value, str) or not 8 <= len(value) <= 36 or
+            any(c != '-' if template[i] == '-' else c not in '0123456789abcdef'
+                for i, c in enumerate(value))):
+        raise BridgeError('Message ID must be a UUID or a prefix of at least 8 characters')
     return value
 
 

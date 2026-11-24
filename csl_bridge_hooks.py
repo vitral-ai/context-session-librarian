@@ -47,7 +47,7 @@ def surface(home, agent, event, payload, include_body=False, limit=10, session_b
                     continue
                 item = {'id': row['id'], 'from': {'peer': row['peer'], 'agent': row['source']},
                         'kind': envelope['kind']}
-                item['preview'] = compact_message(row['source'], row['id'], envelope['body'])
+                item['preview'] = compact_message(row['source'], row['id'], envelope['body'], target=agent if row['peer'] == 'agent-hub' else None)
                 headers.append(item)
                 if len(headers) > limit:
                     break

@@ -32,7 +32,7 @@ class ToolFieldsError(BridgeError):
 
 TOOLS = {
     'history': ('Read your retained hub pair history, both directions, without acknowledging or waking anyone.',
-                {'with': NAME, 'id': UUID, 'last': {'type': 'integer', 'minimum': 1, 'maximum': 10000}}, []),
+                {'with': NAME, 'id': {'type': 'string', 'format': 'message-selector'}, 'last': {'type': 'integer', 'minimum': 1, 'maximum': 10000}}, []),
     'inbox_status': ('Read only counts and pending id/from/kind headers for this endpoint; no bodies, scopes, acknowledgement or wake.',
                      {'after': {'type': 'integer', 'minimum': 0, 'maximum': 2**63-1},
                       'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100}}, []),
@@ -133,6 +133,12 @@ class Adapter:
             elif schema['type'] == 'boolean':
                 if type(value) is not bool:
                     raise ToolFieldsError(invalid=[key])
+            elif schema.get('format') == 'message-selector':
+                from csl_bridge_store import message_selector
+                try:
+                    message_selector(value)
+                except BridgeError:
+                    raise ToolFieldsError(invalid=[key]) from None
             elif schema.get('format') == 'uuid':
                 try:
                     identifier(value)
