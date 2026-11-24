@@ -18,7 +18,9 @@ from csl_bridge_store import BridgeError, decode, encode, identifier, message_he
 def frame_message(source, task, session, text):
     # Preserve the deployed durable fingerprint, including replay after a lost Hub ACK.
     # Presentation removes this legacy header at the native/hook boundary.
-    return message_header(source, task, session) + text
+    body = ''.join('> ' + line if line.lstrip().startswith('[Message ') else line
+                   for line in text.splitlines(keepends=True))
+    return message_header(source, task, session) + body
 
 
 DEFAULT_CONFIG = Path.home() / '.config/csl/agents.json'

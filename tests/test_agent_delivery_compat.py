@@ -23,13 +23,25 @@ class DeliveryCompatibilityTests(unittest.TestCase):
                 'target': {'name': 'worker', 'session': self.bridge.thread, 'cli': cli, 'machine': 'remote'}}
 
     def test_replay_of_preupgrade_mail_keeps_original_fingerprint(self):
-        packet = self.packet()
-        with patch('csl_agents.frame_message', side_effect=lambda a,b,c,d: message_header(a,b,c)+d), \
-             patch('csl_bridge_claude_notify.notify', return_value=True):
-            self.assertEqual(deliver(self.bridge.connector, packet)['state'], 'delivered')
-        with patch('csl_bridge_claude_notify.notify', return_value=False):
-            self.assertEqual(deliver(self.bridge.connector, packet)['state'], 'delivered')
-        self.assertEqual(len(self.bridge.connector.store.rows('SELECT * FROM mail_messages')), 1)
+        def deployed_frame(source, task, session, text):
+            body = ''.join('> ' + line if line.lstrip().startswith('[Message ') else line
+                           for line in text.splitlines(keepends=True))
+            return message_header(source, task, session) + body
+
+        bodies = ['Synthetic durable body',
+                  'Quoted envelope:\n[Message from=other; task=example]\r\n'
+                  '  [Message indented header]\nordinary final line']
+        for body in bodies:
+            with self.subTest(body=body):
+                packet = self.packet(text=body)
+                self.assertEqual(frame_message('s', packet['id'], None, body),
+                                 deployed_frame('s', packet['id'], None, body))
+                with patch('csl_agents.frame_message', side_effect=deployed_frame), \
+                     patch('csl_bridge_claude_notify.notify', return_value=True):
+                    self.assertEqual(deliver(self.bridge.connector, packet)['state'], 'delivered')
+                with patch('csl_bridge_claude_notify.notify', return_value=False):
+                    self.assertEqual(deliver(self.bridge.connector, packet)['state'], 'delivered')
+        self.assertEqual(len(self.bridge.connector.store.rows('SELECT * FROM mail_messages')), 2)
         self.assertEqual(frame_message('s', packet['id'], None, 'body'), message_header('s', packet['id'], None)+'body')
 
     def test_failed_push_settles_durable_mail_and_hook_emits_once(self):
