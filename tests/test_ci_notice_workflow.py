@@ -12,15 +12,24 @@ class NoticeWorkflowTests(unittest.TestCase):
         self.assertIn('persist-credentials: false', workflow)
         self.assertIn('runs-on: ubuntu-latest', workflow)
         self.assertEqual(re.findall(r'run: (.*)', workflow), ['python3 csl_ci_notice.py'])
+        self.assertIn('environment: csl-ci-notices', workflow)
+        self.assertIn("github.event_name == 'workflow_run'", workflow)
+        self.assertIn('github.event.repository.default_branch', workflow)
         self.assertNotIn('secrets: inherit', workflow)
+        self.assertNotIn('inputs:', workflow)
+        self.assertNotIn('download-artifact', workflow)
 
-    def test_existing_jobs_all_finish_before_notice_and_push_does_not_notify(self):
+    def test_unprivileged_producers_have_no_notice_credentials(self):
         for filename in ('test.yml', 'workload-image.yml'):
             workflow = Path('.github/workflows', filename).read_text()
-            before, notice = workflow.split('  csl-completion-notice:')
-            jobs = re.findall(r'^  ([A-Za-z0-9_-]+):\n', before.split('\njobs:\n')[1], re.M)
-            self.assertIn('needs: [' + ', '.join(jobs) + ']', notice)
-            self.assertIn('always() && github.event.pull_request &&', notice)
-            self.assertIn('head.repo.full_name == github.repository', notice)
-            self.assertIn('toJSON(needs)', notice)
-            self.assertNotIn('secrets: inherit', notice)
+            self.assertNotIn('CSL_HUB_NOTICE_TOKEN', workflow)
+            self.assertNotIn('csl-completion-notice:', workflow)
+
+    def test_default_branch_completed_handler_pins_reviewed_workflow(self):
+        workflow = Path('.github/workflows/ci-completion-notice.yml').read_text()
+        self.assertIn('workflow_run:', workflow)
+        self.assertIn('types: [completed]', workflow)
+        self.assertRegex(workflow, r'pr-completion-notice.yml@[0-9a-f]{40}')
+        self.assertNotIn('pull_request:', workflow)
+        self.assertNotIn('secrets:', workflow)
+        self.assertNotIn('checkout', workflow)
