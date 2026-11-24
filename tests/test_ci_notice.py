@@ -1,4 +1,9 @@
 import hashlib
+import http.client
+import io
+import urllib.error
+from contextlib import redirect_stdout
+from unittest.mock import patch
 import json
 from pathlib import Path
 import tempfile
@@ -7,7 +12,7 @@ import uuid
 
 from csl_agent_hub import Hub
 from csl_bridge_store import BridgeError
-from csl_ci_notice import notice_request, workflow_notice
+from csl_ci_notice import notice_request, workflow_notice, main
 
 
 class CompletionNoticeTests(unittest.TestCase):
@@ -107,6 +112,66 @@ class CompletionNoticeTests(unittest.TestCase):
             payload = workflow_notice(dict(env, CSL_EVENT=json.dumps(
                 {'workflow_run': dict(run, conclusion=conclusion)})))
             self.assertEqual(payload['results'], {'completion': result})
+
+    def test_current_head_lookup_skips_superseded_before_hub_post(self):
+        _, env = self.run_environment()
+        env.update(CSL_GITHUB_TOKEN='github-read-token')
+        output = io.StringIO()
+        with patch.dict('os.environ', env, clear=True), redirect_stdout(output), patch(
+                'urllib.request.urlopen', return_value=io.StringIO(
+                    json.dumps({'head': {'sha': 'b' * 40}}))) as opener:
+            main()
+        self.assertEqual(opener.call_count, 1)
+        request = opener.call_args.args[0]
+        self.assertEqual(request.full_url, 'https://api.github.com/repos/vitral-ai/example/pulls/799')
+        self.assertIsNone(request.data)
+        self.assertIn('superseded by ' + 'b' * 40, output.getvalue())
+        self.assertNotIn('github-read-token', output.getvalue())
+
+    def test_matching_head_and_lookup_failures_post_exact_run(self):
+        _, env = self.run_environment()
+        env.update(CSL_GITHUB_TOKEN='github-read-token', CSL_HUB_NOTICE_TOKEN='hub-notice-token',
+                   CSL_HUB_CA_PEM='test-ca', CSL_HUB_URL='https://hub.example/v1')
+        cases = [json.dumps({'head': {'sha': 'a' * 40}}),
+                 urllib.error.HTTPError('https://api.github.com', 403, 'forbidden', {}, None),
+                 TimeoutError('timeout'), 'not JSON', '{}', json.dumps({'head': {'sha': 'invalid'}})]
+        for first in cases:
+            with self.subTest(first=type(first).__name__):
+                response = first if isinstance(first, Exception) else io.StringIO(first)
+                output = io.StringIO()
+                with patch.dict('os.environ', env, clear=True), redirect_stdout(output), patch(
+                        'ssl.create_default_context'), patch('urllib.request.urlopen', side_effect=[
+                            response, io.StringIO(json.dumps({'ok': True, 'data': {
+                                'id': 'notice-id', 'state': 'queued'}}))]) as opener:
+                    main()
+                self.assertEqual(opener.call_count, 2)
+                post = opener.call_args.args[0]
+                self.assertEqual(post.full_url, 'https://hub.example/v1')
+                self.assertEqual(json.loads(post.data)['sha'], 'a' * 40)
+                self.assertNotIn('github-read-token', output.getvalue())
+                self.assertNotIn('hub-notice-token', output.getvalue())
+
+    def test_truncated_lookup_body_posts_exact_run(self):
+        class TruncatedResponse(io.StringIO):
+            def read(self, *args, **kwargs):
+                raise http.client.IncompleteRead(b'{"head":', 80)
+        _, env = self.run_environment()
+        env.update(CSL_GITHUB_TOKEN='github-read-token', CSL_HUB_NOTICE_TOKEN='hub-notice-token',
+                   CSL_HUB_CA_PEM='test-ca', CSL_HUB_URL='https://hub.example/v1')
+        output = io.StringIO()
+        with patch.dict('os.environ', env, clear=True), redirect_stdout(output), patch(
+                'ssl.create_default_context'), patch('urllib.request.urlopen', side_effect=[
+                    TruncatedResponse(), io.StringIO(json.dumps({'ok': True, 'data': {
+                        'id': 'notice-id', 'state': 'queued'}}))]) as opener:
+            main()
+        self.assertEqual(opener.call_count, 2)
+        self.assertIsNone(opener.call_args_list[0].args[0].data)
+        post = opener.call_args_list[1].args[0]
+        self.assertEqual(post.full_url, 'https://hub.example/v1')
+        self.assertEqual(json.loads(post.data)['sha'], 'a' * 40)
+        self.assertIn('IncompleteRead', output.getvalue())
+        self.assertNotIn('github-read-token', output.getvalue())
+        self.assertNotIn('hub-notice-token', output.getvalue())
 
 
 if __name__ == '__main__':
