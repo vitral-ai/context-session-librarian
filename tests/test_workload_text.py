@@ -64,6 +64,19 @@ class WorkloadTextTests(unittest.TestCase):
             path.write_bytes(b''.join(json.dumps(row).encode()+b'\n' for row in records))
         return WorkloadTextProvider(provider, ((source,'main.jsonl'),), self.root/provider/'projection', **options), path
 
+    def test_adjacent_claude_only_publishes_safe_launch_cwd(self):
+        for cwd, expected in (('/home/agent/project', '/home/agent/project'),
+                              ('/home/' + CANARY, None), ('/home/../private', None),
+                              ('/home/agent\n', None)):
+            with self.subTest(cwd=cwd):
+                rows = native('claude')
+                rows[0]['cwd'] = cwd
+                adapter, _ = self.provider('claude', rows, host_id='host-0123abcdef456789')
+                metadata = adapter.list_sessions('claude')[0]
+                self.assertEqual(metadata['cwd'], expected)
+                self.assertEqual(metadata['host_id'], 'host-0123abcdef456789')
+                self.assertFalse(adapter.package_descriptor('claude', SID)['available'])
+
     def catalog(self, **fields):
         return {'type': 'response_item', 'payload': {'type': 'additional_tools', 'role': 'developer',
             'tools': [{'type': 'function', 'name': 'catalog-private-name',

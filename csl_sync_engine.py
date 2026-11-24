@@ -356,6 +356,18 @@ class Collector:
             snapshot = {'files': planned, 'view': {'generation': local['view']['generation'], 'last_seq': last_seq}, 'package': package}
             path = '/sessions/' + segment(provider) + '/' + segment(native_id)
             body = {k: metadata.get(k) for k in ['title','cwd','repository','created_at','updated_at','model','record_count','byte_count','parent','origin','state']}
+            binding_revision = ''
+            if self.state.get('settings', {}).get('kind') == 'workload':
+                host_id = metadata.get('host_id')
+                if host_id is not None:
+                    body['host_id'] = host_id
+                if host_id is None or body['cwd'] is None:
+                    del body['cwd']
+                live_binding = [host_id, body.get('cwd')]
+                if local.get('live_binding', [None, None]) != live_binding:
+                    # Clearing a binding must not replay an older unbound snapshot.
+                    local.update(live_binding=live_binding, live_binding_revision=str(uuid.uuid4()))
+                binding_revision = local.get('live_binding_revision', '')
             captured_bytes = sum(f['complete_length'] for f in files)
             if body['byte_count'] != captured_bytes:
                 raise SyncError('source_changed')  # Ask the provider for a fresh consistent inventory next pass.
@@ -364,7 +376,8 @@ class Collector:
             # The registry binds snapshot_id to the WHOLE input, not just files
             # and views. Version the identity so legacy inventory-only IDs cannot
             # remain poisoned after a metadata-only transition or lost response.
-            snapshot_id = str(uuid.uuid5(uuid.NAMESPACE_URL, 'csl-sync-snapshot-v2' + path + '/' + digest(body)))
+            snapshot_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                'csl-sync-snapshot-v2' + path + '/' + digest(body) + binding_revision))
             body['snapshot_id'] = snapshot_id
             local.update(snapshot_id=snapshot_id, status='syncing')
             self.state.save_session(provider, native_id, local)  # Fixed before the first remote write.

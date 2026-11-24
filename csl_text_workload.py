@@ -2,6 +2,7 @@
 from datetime import datetime
 from itertools import chain
 import hashlib
+from pathlib import PurePosixPath
 import re
 from urllib.parse import urlsplit
 
@@ -255,14 +256,30 @@ def blocks(value, *, claude=False):
 
 class WorkloadTextProvider(PreparedProvider):
     expected_session = None
+    host_id = None
 
-    def __init__(self, provider, sources, store, *, expected_session=None, **options):
+    def __init__(self, provider, sources, store, *, expected_session=None, host_id=None, **options):
         if not isinstance(provider, str) or provider not in PROFILES:
             raise SyncError('unsupported_provider')
         if expected_session is not None and provider != 'claude': raise SyncError('unsupported_provider')
         self.provider, self.profile = provider, PROFILES[provider]
         self.expected_session = expected_session
+        self.host_id = host_id
         super().__init__(sources, store, **options)
+
+    def _working_directory(self, records):
+        if self.provider == 'codex':
+            value = records[0]['payload'].get('cwd')
+        else:
+            value = next((row['cwd'] for row in records
+                          if row['type'] in ('user', 'assistant') and 'cwd' in row), None)
+        if (not isinstance(value, str) or not value.isprintable() or not value.startswith('/')
+                or value.startswith('//') or len(value.encode()) > 4096):
+            return None
+        path = PurePosixPath(value)
+        if str(path) != value or '..' in path.parts or self.redactor.text(value) != value:
+            return None
+        return value
 
     @property
     def policy_fingerprint(self):
@@ -484,4 +501,7 @@ class WorkloadTextProvider(PreparedProvider):
         metadata = {'provider': self.provider, 'native_id': sid, 'title': (title or sid)[:200],
             'cwd': None, 'repository': None, 'created_at': created, 'updated_at': updated, 'model': model,
             'record_count': len(clean), 'byte_count': len(output), 'parent': None, 'origin': 'native', 'state': 'idle'}
+        if self.host_id is not None:
+            metadata['host_id'] = self.host_id
+            metadata['cwd'] = self._working_directory(records)
         return metadata, bytes(output), view

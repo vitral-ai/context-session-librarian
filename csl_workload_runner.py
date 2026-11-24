@@ -29,7 +29,7 @@ from csl_workload_config import Configuration, PREFIX
 from csl_workload_http import WorkloadHTTP
 from csl_workload_identity import WorkloadKey, canonical, metadata
 from csl_workload_stream import Bounds, opened_source, verify_prefix
-from csl_workload_state import child, read_record
+from csl_workload_state import adjacent_host_id, child, read_record
 from csl_workload_producer import Producer, recover as recover_producer
 from csl_workload_observation import Observation, receipt_valid
 from csl_workload_observation_driver import AcceptanceDriver
@@ -391,7 +391,7 @@ def run_pass(config, deadline, composition=None, expected_worker=None):
         adapter = (WorkloadAntigravityProvider(inputs, projection, bounds=limits)
                    if config.provider == 'antigravity' else
                    WorkloadTextProvider(config.provider, inputs, projection, bounds=limits,
-                        expected_session=config.expect_session,
+                        expected_session=config.expect_session, host_id=adjacent_host_id(config.state_root),
                         capture=http.observation if isinstance(http.observation, LaunchObservation) else None))
         state = State(sync)
         try:
