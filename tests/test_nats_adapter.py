@@ -17,7 +17,7 @@ from csl_agents import deliver as deliver_hub
 from csl_bridge_hooks import surface_nats
 from csl_bridge_store import BridgeError, Store, encode, neutralize_headers
 from csl_ci_notice import notice_request
-from codex_sessions import main
+from codex_sessions import build_parser, main
 from csl_nats import (MAX_DIGEST, NATIVE_PEER, ClaudeInbox, Client, ControlRejected, Ledger, agent_name, body_text, deliver_codex,
                       delivery_fingerprint, delivery_parts, post_saved, raw_fingerprint, receive_one, recover_acks, remember_send,
                       replay_outbox)
@@ -224,8 +224,8 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         surface_nats(self.home, 'vi', 'alice', event, payload, 10, output)
         output.assert_called_once()
         body = json.loads(output.call_args.args[0])['hookSpecificOutput']['additionalContext']
-        self.assertIn('x' * 49152 + '\n\nCSL from bob', body)
-        self.assertTrue(body.endswith('second body'))
+        self.assertIn('x' * 49152 + '\nReply via NATS: csl reply ' + self.id, body)
+        self.assertIn('\nsecond body\nReply via NATS: csl reply ', body)
         self.assertTrue(await receive_one(self.client, self.ledger, self.message,
                                            partial(inbox.stage, config_path=self.config_path)))
         self.assertEqual(self.rows()[0]['turn'], self.thread)
@@ -405,8 +405,16 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
             db.execute("INSERT INTO agents VALUES ('alice', ?)", (self.thread,))
 
         def invoke(_peer, request, *, native_text):
-            self.assertTrue(native_text.endswith('\nend'))
-            self.assertGreater(len(native_text), 12000)
+            body, footer = native_text.rsplit('\n', 1)
+            self.assertTrue(body.endswith('\nend'))
+            self.assertGreater(len(body), 12000)
+            label, command = footer.split(': ', 1)
+            self.assertEqual(label, 'Reply via NATS')
+            executable, *args = shlex.split(command)
+            self.assertEqual(executable, 'csl')
+            reply = build_parser().parse_args(args)
+            self.assertEqual((reply.source, reply.to, reply.nats_config), ('alice', 'bob', self.config_path))
+            self.assertEqual(args[:2], ['reply', self.id])
             result = {'state': 'delivered', 'request_id': request['id'],
                       'thread_id': self.thread, 'turn_id': self.turn}
             self.store.operation(request['id'], 'delivered', result)
@@ -421,6 +429,14 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         native.invoke.assert_called_once()
         with self.assertRaises(BridgeError):
             self.deliver_codex(native, self.thread, env, 'different')
+
+    def test_immediate_service_and_self_messages_omit_reply_footer(self):
+        envelope = json.loads(self.message.data)
+        for sender in ('ci-notices', 'csl-control', 'alice'):
+            with self.subTest(sender=sender):
+                [text] = delivery_parts(dict(envelope, body='Notice', **{'from': sender}), self.config_path)
+                self.assertTrue(text.endswith('\nNotice'))
+                self.assertNotIn('Reply via NATS:', text)
 
     def dual_transport(self):
         with self.store.transaction() as db:
