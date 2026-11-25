@@ -195,10 +195,10 @@ def command(args):
         return await client.request('ctl.' + args.hub_action, request)
 
     if not args.nats_config:
-        raise BridgeError('Use --nats-config PATH or set CSL_NATS_CONFIG')
+        raise BridgeError('No NATS enrollment for this agent; identify it with --from or pass --nats-config PATH')
     print(encode(call(args.nats_config, args.source, operation)))
 
 
 def add_options(parser):
-    parser.add_argument('--nats-config', type=Path, default=os.environ.get('CSL_NATS_CONFIG'))
+    parser.add_argument('--nats-config', type=Path)
     parser.add_argument('--from', dest='source')

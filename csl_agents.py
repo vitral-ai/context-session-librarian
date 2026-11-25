@@ -205,7 +205,7 @@ def reply_route(hub, nats_config, source, selector, target, enrolled):
     return sender, identifier(reply)
 
 
-def select_sender_route(args):
+def sender_routes():
     from csl_bridge_claude_notify import owned_json
 
     try:
@@ -218,17 +218,32 @@ def select_sender_route(args):
             or not isinstance(routes.get('nats_recipients'), list)
             or not all(isinstance(value, str) for value in routes['nats_recipients'])):
         raise BridgeError('Invalid CSL sender routing file')
-    source = args.source or os.environ.get('CSL_AGENT')
+    return routes
+
+
+def local_enrollment(source, routes):
+    if routes is None:
+        return
+    source = source or os.environ.get('CSL_AGENT')
     if not source:
-        source = config().get('agent')
+        try:
+            source = config().get('agent')
+        except FileNotFoundError:
+            return
     if source not in routes['senders']:
         return
     route = routes['senders'][source]
     if not isinstance(route, str) or not Path(route).expanduser().is_absolute():
         raise BridgeError('CSL sender routing needs an absolute NATS configuration path')
-    args.source = source
-    nats_config = Path(route).expanduser()
-    enrolled = routes['nats_recipients']
+    return source, Path(route).expanduser(), routes['nats_recipients']
+
+
+def select_sender_route(args):
+    enrollment = local_enrollment(args.source, sender_routes())
+    if enrollment is None:
+        return
+    args.source, nats_config, enrolled = enrollment
+    source = args.source
     if args.is_reply:
         if args.message_id and args.in_reply_to:
             raise BridgeError('Use the positional reply ID or --in-reply-to, not both')
@@ -246,17 +261,27 @@ def select_sender_route(args):
 
 
 def _execute(args):
-    if (args.hub_action == 'status' and getattr(args, 'owner', None) is None) or args.hub_action in ('versions', 'close', 'complete', 'put', 'fetch') or (
-            args.hub_action == 'history' and args.nats_config):
+    hub_config = getattr(args, 'hub_config', None)
+    nats_tool = ((args.hub_action == 'status' and getattr(args, 'owner', None) is None)
+                 or args.hub_action in ('versions', 'close', 'complete', 'put', 'fetch'))
+    if nats_tool or args.hub_action == 'history':
+        if args.nats_config is None and hub_config is None:
+            routes = sender_routes()
+            if enrollment := local_enrollment(args.source, routes):
+                args.source, args.nats_config, _ = enrollment
+            elif nats_tool or routes is None:
+                if legacy_config := os.environ.get('CSL_NATS_CONFIG'):
+                    args.nats_config = Path(legacy_config)
+    if nats_tool or (args.hub_action == 'history' and args.nats_config):
         from csl_nats_tools import command
         return command(args)
     if args.hub_action == 'send':
-        if args.nats_config is None and args.hub_config is None:
+        if args.nats_config is None and hub_config is None:
             if args.id:
                 raise BridgeError('Use --id with the original --nats-config or --hub-config path printed for the send')
             select_sender_route(args)
         flag = '--nats-config' if args.nats_config is not None else '--hub-config'
-        path = (args.nats_config or args.hub_config or DEFAULT_CONFIG).expanduser().absolute()
+        path = (args.nats_config or hub_config or DEFAULT_CONFIG).expanduser().absolute()
         print('retry_pin=' + shlex.join((flag, str(path))), file=sys.stderr)
     if getattr(args, 'nats_config', None):
         from csl_nats import send_command
@@ -265,7 +290,7 @@ def _execute(args):
         raise BridgeError('Urgency options require --nats-config')
     if getattr(args, 'attach', []):
         raise BridgeError('Attachments require --nats-config')
-    settings = config(args.hub_config or DEFAULT_CONFIG)
+    settings = config(hub_config or DEFAULT_CONFIG)
     request = {'action': args.hub_action}
     if args.hub_action == 'register':
         request.update({key: getattr(args, key) for key in ('name', 'session', 'cli', 'machine')})
@@ -327,7 +352,7 @@ def execute(args):
 def add_commands(subparsers, _):
     from csl_nats_tools import add_options
     parser = subparsers.add_parser('agents', help='Owner-approved cross-machine agent registry and directed approvals.')
-    parser.add_argument('--hub-config', type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument('--hub-config', type=Path)
     sub = parser.add_subparsers(dest='hub_action', required=True)
     register = sub.add_parser('register')
     for key in ('name', 'session', 'machine'):
@@ -369,10 +394,10 @@ def add_commands(subparsers, _):
     selection.add_argument('--with', dest='partner')
     selection.add_argument('--id', dest='message_id')
     add_options(history)
+    history.add_argument('--hub-config', dest='hub_config', type=Path, default=argparse.SUPPRESS)
     history.add_argument('--last', type=int)
     subparsers.add_parser('history', parents=[history], add_help=False,
-                          help='Read retained agent message history.').set_defaults(func=execute, hub_action='history',
-                                                                                    hub_config=DEFAULT_CONFIG)
+                          help='Read retained agent message history.').set_defaults(func=execute, hub_action='history')
     for action in ('status', 'versions', 'close', 'complete'):
         control = sub.add_parser(action)
         add_options(control)
