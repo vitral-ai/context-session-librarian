@@ -582,6 +582,12 @@ func localBroker(t *testing.T) fixtureBroker {
 	if err != nil {
 		t.Fatal(err)
 	}
+	endpoint := startFixtureBroker(t, server, operatorToken, systemKey, systemToken, accountKey, accountToken)
+	return fixtureBroker{endpoint, operator, account, system, claims}
+}
+
+func startFixtureBroker(t *testing.T, server, operatorToken, systemKey, systemToken, accountKey, accountToken string) string {
+	t.Helper()
 	dir := t.TempDir()
 	cfg := fmt.Sprintf(
 		"host: 127.0.0.1\nport: -1\nports_file_dir: %q\noperator: %q\nsystem_account: %s\nresolver: { type: full, dir: %q }\nresolver_preload: { %s: %q, %s: %q }\njetstream: {store_dir: %q, domain: fixture}\n",
@@ -612,13 +618,13 @@ func localBroker(t *testing.T) fixtureBroker {
 			Nats []string `json:"nats"`
 		}
 		if raw, err := os.ReadFile(portsPath); err == nil && json.Unmarshal(raw, &ports) == nil && len(ports.Nats) == 1 {
-			return fixtureBroker{ports.Nats[0], operator, account, system, claims}
+			return ports.Nats[0]
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	logs, _ := os.ReadFile(logPath)
 	t.Fatalf("local broker did not become ready: %s", logs)
-	return fixtureBroker{}
+	return ""
 }
 
 func fixtureCredentials(t *testing.T, account nkeys.KeyPair, name string, pub, sub []string) credentials {
