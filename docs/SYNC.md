@@ -103,6 +103,13 @@ Limit, prefix/revision conflict, tombstone, authentication and service errors ar
 visible rather than silently dropping files. A prefix mismatch starts a new raw
 revision on the next pass. Native source files are never modified.
 
+A malformed Codex/Claude session is reported by native ID and skipped for that
+pass while healthy sessions continue uploading. Duplicate native IDs skip every
+copy with `ambiguous_native_id`; no winner is chosen. Errors stay pending and
+are retried on later passes (or can be explicitly excluded). Sources and existing
+remote data remain unchanged. A provider discovery failure still reports a
+provider-level error.
+
 For active JSONL files, only complete newline-terminated records are captured.
 Rewritten JSON must be a complete valid provider snapshot. Selected raw files are
 temporarily copied into private snapshot files and hash-checked before upload;

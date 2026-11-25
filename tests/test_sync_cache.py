@@ -135,8 +135,52 @@ class CacheTests(unittest.TestCase):
         self.rows[0]['payload']['history_base'] = {'thread_id': 'fabricated-external-base'}
         self.write()
         self.assertEqual(self.run_pass()['pending'],1)
-        with self.assertRaises(SyncError): self.providers.list_sessions('codex')
+        listed = self.providers.list_sessions('codex')
+        self.assertEqual(listed[0]['native_id'], self.sid)
+        self.assertIn('error', listed[0])
         self.assertFalse(native.package_descriptor('codex',self.sid)['available'])
+
+    def test_bad_codex_session_does_not_block_healthy_upload_and_can_recover(self):
+        bad_id = str(uuid.uuid4())
+        bad = self.path.with_name('rollout-' + bad_id + '.jsonl')
+        rows = json.loads(json.dumps(self.rows))
+        rows[0]['payload'].update(id=bad_id, history_base={'thread_id': 'missing-base'})
+        bad.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        result = self.run_pass()
+        self.assertEqual((result['synced'], result['pending']), (1, 1))
+        failed = [row for row in result['sessions'] if row.get('native_id') == bad_id][0]
+        self.assertEqual(failed['status'], 'error')
+        self.assertEqual(self.local()['status'], 'synced')
+        self.assertNotIn(('codex', bad_id), self.providers.cache.entries)
+        rows[0]['payload'].pop('history_base')
+        bad.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        result = self.run_pass()
+        self.assertEqual((result['synced'], result['pending']), (2, 0))
+        self.assertIsNone(self.state.session('codex', bad_id)['last_error'])
+
+    def test_duplicate_claude_skips_both_copies_and_uploads_healthy_session(self):
+        home = self.root / 'claude'
+        duplicate_id, healthy_id = str(uuid.uuid4()), str(uuid.uuid4())
+        def write(project, sid, text):
+            path = home / 'projects' / project / (sid + '.jsonl')
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({'type': 'user', 'sessionId': sid,
+                'uuid': str(uuid.uuid4()), 'parentUuid': None,
+                'message': {'role': 'user', 'content': text}}) + '\n')
+            return path
+        first = write('a', duplicate_id, 'original copy')
+        with patch.dict(os.environ, CLAUDE_CONFIG_DIR=str(home)):
+            self.assertEqual(self.collector.run(days=None, providers=['claude'])['synced'], 1)
+            second = write('b', duplicate_id, 'different copy')
+            write('c', healthy_id, 'healthy session')
+            originals = (first.read_bytes(), second.read_bytes())
+            result = self.collector.run(days=None, providers=['claude'])
+            self.assertEqual((result['synced'], result['pending']), (1, 1))
+            failed = [row for row in result['sessions'] if row.get('native_id') == duplicate_id][0]
+            self.assertEqual(failed['error'], 'ambiguous_native_id')
+            self.assertNotIn(('claude', duplicate_id), self.providers.cache.entries)
+            self.assertEqual((first.read_bytes(), second.read_bytes()), originals)
+            self.assertEqual(self.state.session('claude', healthy_id)['status'], 'synced')
 
     def test_claude_companion_changes_invalidate_cache(self):
         home = self.root / 'claude'

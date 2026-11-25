@@ -6,6 +6,7 @@ before use; unchanged inputs retain their previous completeness timestamp.
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import sqlite3
@@ -87,43 +88,68 @@ class CachedProviders:
         rows, seen = [], set()
         discovered = self.module._paths(provider, home)
         self.listed[provider] = (home, discovered)
+        # Ambiguous names have no safe winner; omit every copy, not just the
+        # second one. A bad session must not abort the provider's whole listing.
+        names = {}
         for path in discovered:
-            key = hashlib.sha256(encoded([provider, str(home), str(path)])).hexdigest()
-            directory = private_directory(self.root / key)
-            info_path = directory / 'entry.json'
-            entry = read_private_json(info_path)
-            paths = self.sources(provider, path, home, entry)
-            stamp = self.fingerprint(paths, home)
-            elapsed = self.clock() - entry['checked_at'] if entry else -1
-            reusable = bool(entry and entry.get('schema') == 2 and entry.get('index_valid', True))
-            reuse = bool(reusable and entry.get('fingerprint') == stamp and
-                         0 <= elapsed < self.verify_seconds)
-            if not reuse and reusable and entry.get('fingerprint') == stamp:
-                # Expired or backwards wall clock: verify bytes, not merely stat.
-                if self.verify_entry(entry):
-                    entry['checked_at'] = self.clock()
+            ids = self.module.csl_codex_history.identity(path) if provider == 'codex' else None
+            match = re.search(r'([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$', path.stem)
+            sid = ids[0] if ids else match.group(1) if match else path.stem
+            names.setdefault(sid, []).append(path)
+        for sid, paths_for_id in names.items():
+            if len(paths_for_id) != 1:
+                rows.append({'native_id': sid, 'error': 'ambiguous_native_id'})
+                continue
+            path = paths_for_id[0]
+            try:
+                key = hashlib.sha256(encoded([provider, str(home), str(path)])).hexdigest()
+                directory = private_directory(self.root / key)
+                info_path = directory / 'entry.json'
+                entry = read_private_json(info_path)
+                paths = self.sources(provider, path, home, entry)
+                stamp = self.fingerprint(paths, home)
+                elapsed = self.clock() - entry['checked_at'] if entry else -1
+                reusable = bool(entry and entry.get('schema') == 2 and entry.get('index_valid', True))
+                reuse = bool(reusable and entry.get('fingerprint') == stamp and
+                             0 <= elapsed < self.verify_seconds)
+                if not reuse and reusable and entry.get('fingerprint') == stamp:
+                    # Expired or backwards wall clock: verify bytes, not merely stat.
+                    if self.verify_entry(entry):
+                        entry['checked_at'] = self.clock()
+                        private_json(info_path, entry)
+                        reuse = True
+                if not reuse:
+                    entry = self.prepare(provider, path, home, paths, stamp, directory, entry)
                     private_json(info_path, entry)
-                    reuse = True
-            if not reuse:
-                entry = self.prepare(provider, path, home, paths, stamp, directory, entry)
-                private_json(info_path, entry)
-            paths = [home / row[0] for row in entry['fingerprint']]
-            sid = entry['metadata']['native_id']
-            if sid in seen: raise SyncError('ambiguous_native_id')
-            seen.add(sid)
-            self.entries[(provider, sid)] = (directory, entry, paths, home)
-            if reuse: self.reused.add((provider, sid))
-            else: self.reused.discard((provider, sid))
-            row = dict(entry['metadata'])
-            # Activity is an observation, not a cached claim about a process.
-            row['state'] = 'archived' if 'archived_sessions' in path.parts else (
-                'active' if 0 <= self.clock() - path.stat().st_mtime <= 300 else 'idle')
-            rows.append(row)
+                paths = [home / row[0] for row in entry['fingerprint']]
+                sid = entry['metadata']['native_id']
+                self.entries[(provider, sid)] = (directory, entry, paths, home)
+                if reuse: self.reused.add((provider, sid))
+                else: self.reused.discard((provider, sid))
+                row = dict(entry['metadata'])
+                # Activity is an observation, not a cached claim about a process.
+                row['state'] = 'archived' if 'archived_sessions' in path.parts else (
+                    'active' if 0 <= self.clock() - path.stat().st_mtime <= 300 else 'idle')
+                rows.append(row)
+            except (SyncError, self.module.ProviderError, self.module.csl_codex_history.HistoryError, OSError) as error:
+                code = getattr(error, 'code', None)
+                if code is None:
+                    code = str(error) if isinstance(error, self.module.csl_codex_history.HistoryError) else 'source_unavailable'
+                rows.append({'native_id': sid, 'error': code})
+        # Metadata may resolve a legacy filename to a shared native ID too.
+        counts = {}
+        for row in rows:
+            sid = row['native_id']
+            counts[sid] = counts.get(sid, 0) + 1
+        ambiguous = {sid for sid, count in counts.items() if count > 1}
+        rows = [row for row in rows if row['native_id'] not in ambiguous]
+        rows.extend({'native_id': sid, 'error': 'ambiguous_native_id'} for sid in sorted(ambiguous))
+        seen = {row['native_id'] for row in rows if 'error' not in row}
         for key in list(self.entries):
             if key[0] == provider and key[1] not in seen:
                 self.entries.pop(key)
                 self.reused.discard(key)
-        return sorted(rows, key=lambda r: (r['updated_at'] or '', r['native_id']), reverse=True)
+        return sorted(rows, key=lambda r: (r.get('updated_at') or '', r['native_id']), reverse=True)
 
     def changed(self):
         """A cheap wake hint, never evidence of integrity or completeness."""

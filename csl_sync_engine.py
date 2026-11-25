@@ -136,6 +136,16 @@ class Collector:
                 continue
             for metadata in rows:
                 native_id = metadata['native_id']
+                if metadata.get('error'):
+                    if self.state.selection(provider, native_id) is False:
+                        continue
+                    code = safe_id(metadata['error'])
+                    local = self.state.session(provider, native_id)
+                    local.update(status='error', last_error=code)
+                    self.state.save_session(provider, native_id, local)
+                    results.append({'provider': provider, 'native_id': safe_id(native_id),
+                                    'status': 'error', 'error': code})
+                    continue
                 if not self.selected(provider, metadata, days, tracked):
                     continue
                 if metadata.get('state') == 'active' and metadata.get('updated_at'):
