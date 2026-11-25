@@ -1,6 +1,7 @@
 from functools import partial
 import io
 import json
+import logging
 from pathlib import Path
 import shlex
 import subprocess
@@ -241,7 +242,14 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
             'agents': {'alice': {'cli': 'claude', 'session': self.thread, 'credentials': str(creds),
                                  'mailbox_home': str(self.home), 'claude_config': str(self.home)}},
         }))
-        self.connection.close = AsyncMock()
+        asyncio_log = logging.getLogger('asyncio')
+        eof_warning = 'returning true from eof_received() has no effect when using ssl'
+
+        async def close():
+            asyncio_log.warning(eof_warning)
+            asyncio_log.warning('another asyncio warning')
+
+        self.connection.close = AsyncMock(side_effect=close)
 
         async def response(subject, payload, **_):
             data = json.loads(payload)
@@ -249,10 +257,15 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
             return SimpleNamespace(data=encode(result).encode())
 
         self.connection.request.side_effect = response
-        with (patch.object(Client, 'connect', new=AsyncMock(return_value=self.client)),
+        with (self.assertLogs(asyncio_log, level='WARNING') as logs,
+              patch.object(Client, 'connect', new=AsyncMock(return_value=self.client)),
               patch('csl_agents.call', side_effect=AssertionError('unexpected Hub request')) as hub,
               patch('sys.stdout', new_callable=io.StringIO), patch('sys.stderr', new_callable=io.StringIO)):
             self.assertEqual(main(args), 0)
+        self.assertEqual([record.getMessage() for record in logs.records], ['another asyncio warning'])
+        with self.assertLogs(asyncio_log, level='WARNING') as logs:
+            asyncio_log.warning(eof_warning)
+        self.assertEqual([record.getMessage() for record in logs.records], [eof_warning])
         hub.assert_not_called()
         (subject, payload), kwargs = self.connection.request.await_args
         self.assertEqual(subject, 'csl.vi.send.alice')

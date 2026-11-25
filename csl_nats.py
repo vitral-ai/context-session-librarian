@@ -645,6 +645,13 @@ def send_command(args):
         finally:
             await client.connection.close()
 
+    def keep_tls_log(record):
+        return (record.levelno != logging.WARNING or
+                record.getMessage() != 'returning true from eof_received() has no effect when using ssl')
+
+    # asyncio reports the stream reader's ignored half-close flag during TLS shutdown.
+    asyncio_log = logging.getLogger('asyncio')
+    asyncio_log.addFilter(keep_tls_log)
     try:
         result = asyncio.run(send())
     except BridgeError:
@@ -652,6 +659,8 @@ def send_command(args):
     except Exception as error:
         # The same persisted envelope is safe to retry with the printed UUID.
         raise BridgeError(f'NATS send unconfirmed ({type(error).__name__}); retry with --id {message_id}') from None
+    finally:
+        asyncio_log.removeFilter(keep_tls_log)
     if result.get('id') != message_id or result.get('state') not in ('queued', 'delivered', 'acked', 'refused', 'dropped'):
         raise BridgeError(f'Unexpected NATS send receipt; retry with --id {message_id}')
     print(encode(result))
