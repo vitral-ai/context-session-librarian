@@ -7,6 +7,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import shlex
 import sqlite3
 import ssl
 import stat
@@ -124,15 +125,16 @@ def delivery_members(envelope, agent, size):
     return members
 
 
-def digest_entry(item):
-    return (frame_message(item['from'], item['id'], None, item['body']) +
-            f"\nReply via hub: csl reply {item['id']} --from {item['to']} --text ...")
+def digest_entry(item, config_path):
+    command = shlex.join(['csl', 'reply', item['id'], '--from', item['to'], '--to', item['from'],
+                          '--nats-config', str(config_path), '--text', '...'])
+    return frame_message(item['from'], item['id'], None, item['body']) + '\nReply via NATS: ' + command
 
 
-def delivery_text(envelope):
+def delivery_parts(envelope, config_path):
     if envelope.get('kind') == 'digest':
-        return '\n\n'.join(map(digest_entry, envelope['items']))
-    return frame_message(envelope['from'], envelope['id'], None, envelope['body'])
+        return [digest_entry(item, config_path) for item in envelope['items']]
+    return [frame_message(envelope['from'], envelope['id'], None, envelope['body'])]
 
 
 class ClaudeInbox:
@@ -152,7 +154,7 @@ class ClaudeInbox:
         if not row or row['thread'] != self.route[2]:
             raise BridgeError('NATS Claude inbox does not match the registered session')
 
-    def stage(self, envelope, fingerprint):
+    def stage(self, envelope, fingerprint, *, config_path):
         with self.store.transaction() as db:
             self.require_session(db)
             row = db.execute('''SELECT session,fingerprint,surfaced FROM nats_claude_inbox
@@ -161,8 +163,7 @@ class ClaudeInbox:
                 if (row['session'], row['fingerprint']) != (self.route[2], fingerprint):
                     raise BridgeError('NATS Claude inbox ID collision')
                 return self.route[2] if row['surfaced'] else None
-            parts = (list(map(digest_entry, envelope['items'])) if envelope.get('kind') == 'digest'
-                     else [delivery_text(envelope)])
+            parts = delivery_parts(envelope, config_path)
             db.execute('INSERT INTO nats_claude_inbox (tenant,agent,session,id,fingerprint,body) VALUES (?,?,?,?,?,?)',
                        (*self.route, envelope['id'], fingerprint, encode(parts)))
         return None
@@ -391,7 +392,7 @@ def reserve_digest(store, request, thread, items):
     return request
 
 
-def deliver_codex(connector, thread, envelope, fingerprint):
+def deliver_codex(connector, thread, envelope, fingerprint, *, config_path):
     target = envelope['to']
     if connector.stop.is_set() or connector.client_only or connector.agents.get(target) != thread:
         return None
@@ -437,7 +438,7 @@ def deliver_codex(connector, thread, envelope, fingerprint):
         if 'digest_items' in request:
             selected = set(request['digest_items'])
             envelope = dict(envelope, items=[item for item in envelope['items'] if item['id'] in selected])
-        text = delivery_text(envelope)
+        text = '\n\n'.join(delivery_parts(envelope, config_path))
         result = connector.invoke(NATIVE_PEER, request, native_text=text)
         receipt = Store.native_delivery({'state': result['state'], 'result': result}, envelope['id'], thread)
         return receipt['turn_id'] if receipt else None
@@ -495,13 +496,14 @@ async def receive_one(client, ledger, message, deliver, *, retry_delay=60):
     return True
 
 
-async def receive_loop(connector, settings, agent, thread, claude=None):
+async def receive_loop(connector, settings, agent, thread, config_path, claude=None):
     from functools import partial
     from nats.errors import Error, TimeoutError as NatsTimeout
     errors = (Error, OSError, ValueError, RuntimeRejected, RuntimeUnavailable, sqlite3.Error)
     wake_errors = errors + (KeyError, TypeError)
     ledger = Ledger(connector.store, settings['tenant'], agent, thread)
-    deliver = claude.stage if claude else partial(deliver_codex, connector, thread)
+    delivery = claude.stage if claude else partial(deliver_codex, connector, thread)
+    deliver = partial(delivery, config_path=config_path)
     batch_size, retry_delay = (16, 5) if claude else (1, 60)
     while not connector.stop.is_set():
         client = None
@@ -538,6 +540,7 @@ async def receive_loop(connector, settings, agent, thread, claude=None):
 
 
 def start(connector, config_path):
+    config_path = Path(config_path).expanduser().absolute()
     settings = config(config_path)
     if connector.client_only or settings['connector_home'] != connector.store.home:
         raise BridgeError('NATS adapter requires the configured native Codex connector home')
@@ -558,12 +561,12 @@ def start(connector, config_path):
     def run(name, endpoint):
         thread = endpoint['session']
         if endpoint.get('cli') != 'claude':
-            asyncio.run(receive_loop(connector, settings, name, thread))
+            asyncio.run(receive_loop(connector, settings, name, thread, config_path))
             return
         store = Store(endpoint['mailbox_home'])
         try:
             inbox = ClaudeInbox(store, settings['tenant'], name, thread)
-            asyncio.run(receive_loop(connector, settings, name, thread, inbox))
+            asyncio.run(receive_loop(connector, settings, name, thread, config_path, inbox))
         finally:
             store.close()
 
@@ -592,6 +595,11 @@ def remember_send(store, tenant, envelope):
 def send_command(args):
     settings = config(args.nats_config)
     source = agent_name(args.source or os.environ.get('CSL_AGENT'), registration=True)
+    reply_to = None
+    if args.is_reply:
+        if not args.to or not args.message_id or args.in_reply_to:
+            raise BridgeError('NATS reply requires the full positional message UUID and --to')
+        reply_to = identifier(args.message_id)
     target = agent_name(args.to, registration=True)
     if source == target or source not in settings['agents']:
         raise BridgeError('NATS sender must be locally configured and different from the target')
@@ -609,15 +617,16 @@ def send_command(args):
     body_text(text)
     if contains_findings(text):
         raise BridgeError('Possible secrets detected; select redacted text before sending')
-    if args.urgent != bool(args.reason):
+    urgent, reason = getattr(args, 'urgent', False), getattr(args, 'reason', None)
+    if urgent != bool(reason):
         raise BridgeError('Use --urgent and --reason together')
     message_id = identifier(args.id) if args.id else str(uuid.uuid4())
-    envelope = {'v': 1, 'id': message_id, 'from': source, 'to': target, 'kind': 'message',
-                'reply_to': None, 'urgency': 'urgent' if args.urgent else 'normal',
+    envelope = {'v': 1, 'id': message_id, 'from': source, 'to': target, 'kind': 'reply' if reply_to else 'message',
+                'reply_to': reply_to, 'urgency': 'urgent' if urgent else 'normal',
                 'created_at': datetime.now(timezone.utc).isoformat(), 'body': text,
                 'client_version': build_version(), 'attachments': [], 'items': []}
-    if args.reason:
-        envelope['reason'] = args.reason
+    if reason:
+        envelope['reason'] = reason
     store = Store(settings['connector_home'])
     try:
         envelope = remember_send(store, settings['tenant'], envelope)

@@ -1,5 +1,8 @@
+from functools import partial
+import io
 import json
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -13,7 +16,8 @@ from csl_agents import deliver as deliver_hub
 from csl_bridge_hooks import surface_nats
 from csl_bridge_store import BridgeError, Store, encode, neutralize_headers
 from csl_ci_notice import notice_request
-from csl_nats import (MAX_DIGEST, ClaudeInbox, Client, Ledger, agent_name, body_text, deliver_codex, delivery_text,
+from codex_sessions import main
+from csl_nats import (MAX_DIGEST, ClaudeInbox, Client, Ledger, agent_name, body_text, deliver_codex, delivery_parts,
                       receive_one, recover_acks, remember_send)
 
 
@@ -22,6 +26,8 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.home = Path(directory.name)
+        self.config_path = self.home / "adapter config.json"
+        self.deliver_codex = partial(deliver_codex, config_path=self.config_path)
         self.store = Store(self.home, create=True)
         self.addCleanup(self.store.close)
         self.thread = str(uuid.uuid4())
@@ -82,7 +88,7 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.message.ack_sync.side_effect = TimeoutError
         with self.assertRaises(TimeoutError):
             await receive_one(self.client, self.ledger, self.message, self.deliver)
-        text = delivery_text(self.deliver.call_args.args[0])
+        text = '\n\n'.join(delivery_parts(self.deliver.call_args.args[0], self.config_path))
         self.assertLess(text.index(items[0]['body']), text.index(items[1]['body']))
         self.assertEqual({call.args for call in self.client.receipt.await_args_list},
                          {(entry['id'], 'delivered') for entry in items} | {(self.id, 'delivered')})
@@ -108,9 +114,10 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         with self.store.transaction() as db:
             db.execute('INSERT INTO agents VALUES (?,?)', ('alice', self.thread))
         inbox = ClaudeInbox(self.store, 'vi', 'alice', self.thread)
-        self.assertFalse(await receive_one(self.client, self.ledger, self.message, inbox.stage))
+        self.assertFalse(await receive_one(self.client, self.ledger, self.message,
+                                           partial(inbox.stage, config_path=self.config_path)))
         second = dict(json.loads(self.message.data), id=str(uuid.uuid4()), body='second body')
-        inbox.stage(second, 'second-fingerprint')
+        inbox.stage(second, 'second-fingerprint', config_path=self.config_path)
         with patch('csl_bridge_claude_notify.wake') as wake:
             wake.side_effect = OSError('closed socket')
             with self.assertRaises(OSError):
@@ -139,7 +146,8 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         body = json.loads(output.call_args.args[0])['hookSpecificOutput']['additionalContext']
         self.assertIn('x' * 49152 + '\n\nCSL from bob', body)
         self.assertTrue(body.endswith('second body'))
-        self.assertTrue(await receive_one(self.client, self.ledger, self.message, inbox.stage))
+        self.assertTrue(await receive_one(self.client, self.ledger, self.message,
+                                           partial(inbox.stage, config_path=self.config_path)))
         self.assertEqual(self.rows()[0]['turn'], self.thread)
         self.assertEqual(self.calls, ['delivered', 'broker ACK', 'acked'])
 
@@ -159,7 +167,7 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         with self.store.transaction() as db:
             db.execute('INSERT INTO agents VALUES (?,?)', ('alice', self.thread))
         inbox = ClaudeInbox(self.store, 'vi', 'alice', self.thread)
-        inbox.stage(json.loads(self.message.data), 'fingerprint')
+        inbox.stage(json.loads(self.message.data), 'fingerprint', config_path=self.config_path)
         with patch('csl_bridge_claude_notify.wake') as wake, patch('csl_nats.time.time') as clock:
             clock.return_value = 100
             inbox.wake_waiting('/fixture')
@@ -181,14 +189,14 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         items = [dict(template, id=str(uuid.uuid4()), body=('CSL from example\n' * 2740) + f'end {i}') for i in range(10)]
         digest = dict(template, kind='digest', body='', items=items, **{'from': 'csl-control'})
         self.assertLess(len(encode(digest).encode()), MAX_DIGEST)
-        self.assertIsNone(inbox.stage(digest, 'digest'))
+        self.assertIsNone(inbox.stage(digest, 'digest', config_path=self.config_path))
         outputs = []
         event = 'PostToolUse'
         payload = {'session_id': self.thread, 'hook_event_name': event}
         surface_nats(self.home, 'vi', 'alice', event, payload, 10, outputs.append)
-        self.assertIsNone(inbox.stage(digest, 'digest'))
+        self.assertIsNone(inbox.stage(digest, 'digest', config_path=self.config_path))
         surface_nats(self.home, 'vi', 'alice', event, payload, 10, outputs.append)
-        self.assertEqual(inbox.stage(digest, 'digest'), self.thread)
+        self.assertEqual(inbox.stage(digest, 'digest', config_path=self.config_path), self.thread)
         surface_nats(self.home, 'vi', 'alice', event, payload, 10, outputs.append)
         self.assertEqual(len(outputs), 2)
         self.assertTrue(all(len(text.encode('utf-8')) + 1 <= MAX_DIGEST for text in outputs))
@@ -200,6 +208,53 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('csl reply ' + item['id'], full)
             positions.append(full.index(rendered_body))
         self.assertEqual(positions, sorted(positions))
+
+    def test_claude_digest_footer_sends_nats_only_reply_from_the_cli(self):
+        with self.store.transaction() as db:
+            db.execute('INSERT INTO agents VALUES (?,?)', ('alice', self.thread))
+        inbox = ClaudeInbox(self.store, 'vi', 'alice', self.thread)
+        parent = dict(json.loads(self.message.data), body='NATS-only message')
+        digest = dict(parent, id=str(uuid.uuid4()), kind='digest', body='', items=[parent],
+                      **{'from': 'csl-control'})
+        inbox.stage(digest, 'digest', config_path=self.config_path)
+        outputs = []
+        event = 'PostToolUse'
+        surface_nats(self.home, 'vi', 'alice', event, {'session_id': self.thread, 'hook_event_name': event},
+                     10, outputs.append)
+        text = json.loads(outputs[0])['hookSpecificOutput']['additionalContext']
+        footer = text.split('Reply via NATS: ', 1)[1]
+        _, *args = shlex.split(footer)
+        self.assertEqual(args[-1], '...')
+        args[-1] = 'Reply without a Hub row'
+        creds = self.home / 'fixture.creds'
+        creds.touch(mode=0o600)
+        self.config_path.touch(mode=0o600)
+        self.config_path.write_text(encode({
+            'tenant': 'vi', 'servers': ['tls://fixture.invalid:4222'], 'cafile': None,
+            'connector_home': str(self.home),
+            'agents': {'alice': {'cli': 'claude', 'session': self.thread, 'credentials': str(creds),
+                                 'mailbox_home': str(self.home), 'claude_config': str(self.home)}},
+        }))
+        self.connection.close = AsyncMock()
+
+        async def response(subject, payload, **_):
+            data = json.loads(payload)
+            result = {'id': data['id'], 'state': 'queued'} if subject == 'csl.vi.send.alice' else {}
+            return SimpleNamespace(data=encode(result).encode())
+
+        self.connection.request.side_effect = response
+        with (patch.object(Client, 'connect', new=AsyncMock(return_value=self.client)),
+              patch('csl_agents.call', side_effect=AssertionError('unexpected Hub request')) as hub,
+              patch('sys.stdout', new_callable=io.StringIO), patch('sys.stderr', new_callable=io.StringIO)):
+            self.assertEqual(main(args), 0)
+        hub.assert_not_called()
+        (subject, payload), kwargs = self.connection.request.await_args
+        self.assertEqual(subject, 'csl.vi.send.alice')
+        reply = json.loads(payload)
+        self.assertEqual((reply['kind'], reply['from'], reply['to'], reply['reply_to'], reply['body']),
+                         ('reply', 'alice', 'bob', parent['id'], 'Reply without a Hub row'))
+        self.assertNotEqual(reply['id'], parent['id'])
+        self.assertEqual(kwargs['headers'], {'Nats-Msg-Id': reply['id']})
 
     async def test_failed_control_receipt_retries_without_second_handoff(self):
         self.client.receipt = AsyncMock(side_effect=TimeoutError)
@@ -248,11 +303,11 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
             stop=Event(), client_only=False, agents={'alice': self.thread},
             locks={'alice': RLock()}, store=self.store, invoke=Mock(side_effect=invoke))
         env = {'id': self.id, 'from': 'bob', 'to': 'alice', 'body': ('\t' * 48000) + '\nend'}
-        self.assertEqual(deliver_codex(native, self.thread, env, 'hash'), self.turn)
-        self.assertEqual(deliver_codex(native, self.thread, env, 'hash'), self.turn)
+        self.assertEqual(self.deliver_codex(native, self.thread, env, 'hash'), self.turn)
+        self.assertEqual(self.deliver_codex(native, self.thread, env, 'hash'), self.turn)
         native.invoke.assert_called_once()
         with self.assertRaises(BridgeError):
-            deliver_codex(native, self.thread, env, 'different')
+            self.deliver_codex(native, self.thread, env, 'different')
 
     def dual_transport(self):
         with self.store.transaction() as db:
@@ -297,7 +352,7 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_hub_first_acks_the_native_turn_from_nats(self):
         native, packet = self.dual_transport()
         receipt = deliver_hub(native, packet)
-        adapter = lambda envelope, fingerprint: deliver_codex(native, self.thread, envelope, fingerprint)
+        adapter = lambda envelope, fingerprint: self.deliver_codex(native, self.thread, envelope, fingerprint)
         self.assertTrue(await receive_one(self.client, self.ledger, self.message, adapter))
         self.assertEqual(self.rows()[0]['turn'], receipt['turn_id'])
         self.assertEqual(self.rows()[0]['ack_state'], 'acked')
@@ -305,7 +360,7 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_nats_first_reuses_turn_and_refuses_collisions_from_hub(self):
         native, packet = self.dual_transport()
-        adapter = lambda envelope, fingerprint: deliver_codex(native, self.thread, envelope, fingerprint)
+        adapter = lambda envelope, fingerprint: self.deliver_codex(native, self.thread, envelope, fingerprint)
         await receive_one(self.client, self.ledger, self.message, adapter)
         self.assertEqual(deliver_hub(native, packet)['turn_id'], self.turn)
         for update in ({'text': 'different'}, {'in_reply_to': str(uuid.uuid4())},
@@ -325,7 +380,7 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         native.invoke.side_effect = None
         native.invoke.return_value = {'state': 'pending'}
         deliver_hub(native, packet)
-        adapter = lambda envelope, fingerprint: deliver_codex(native, self.thread, envelope, fingerprint)
+        adapter = lambda envelope, fingerprint: self.deliver_codex(native, self.thread, envelope, fingerprint)
         self.assertFalse(await receive_one(self.client, self.ledger, self.message, adapter))
         self.message.ack_sync.assert_not_awaited()
         native.invoke.assert_called_once()
@@ -336,25 +391,25 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         other = dict(ci, id=str(uuid.uuid4()), body='ordinary grouped body', kind='message', **{'from': 'bob'})
         digest = dict(ci, id=str(uuid.uuid4()), kind='digest', body='', items=[ci, other], **{'from': 'csl-control'})
         deliver_hub(native, packet)
-        self.assertEqual(deliver_codex(native, self.thread, digest, 'digest-one'), self.turn)
+        self.assertEqual(self.deliver_codex(native, self.thread, digest, 'digest-one'), self.turn)
         grouped_text = native.invoke.call_args.kwargs['native_text']
         self.assertNotIn(ci['body'], grouped_text)
         self.assertIn(other['body'], grouped_text)
         already_delivered_digest = dict(digest, id=str(uuid.uuid4()), items=[ci])
-        self.assertEqual(deliver_codex(native, self.thread, already_delivered_digest, 'already'), self.turn)
+        self.assertEqual(self.deliver_codex(native, self.thread, already_delivered_digest, 'already'), self.turn)
         self.assertEqual(native.invoke.call_count, 2)
 
         second = dict(ci, id=str(uuid.uuid4()), body='second CI test')
         second_digest = dict(digest, id=str(uuid.uuid4()), items=[second])
-        self.assertEqual(deliver_codex(native, self.thread, second_digest, 'digest-two'), self.turn)
+        self.assertEqual(self.deliver_codex(native, self.thread, second_digest, 'digest-two'), self.turn)
         self.assertIn(second['body'], native.invoke.call_args.kwargs['native_text'])
         second_packet = dict(packet, id=second['id'], text=second['body'])
         receipt = deliver_hub(native, second_packet)
         self.assertEqual((receipt['request_id'], receipt['turn_id']), (second['id'], self.turn))
-        self.assertEqual(deliver_codex(native, self.thread, second, 'standalone'), self.turn)
+        self.assertEqual(self.deliver_codex(native, self.thread, second, 'standalone'), self.turn)
         with self.assertRaisesRegex(BridgeError, 'CI completion does not match'):
             deliver_hub(native, dict(second_packet, text='mismatch'))
-        self.assertEqual(deliver_codex(native, self.thread, second_digest, 'digest-two'), self.turn)
+        self.assertEqual(self.deliver_codex(native, self.thread, second_digest, 'digest-two'), self.turn)
         self.assertEqual(native.invoke.call_count, 3)
 
     def test_hub_waits_for_pending_digest_member(self):
@@ -364,11 +419,11 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         complete = native.invoke.side_effect
         native.invoke.side_effect = None
         native.invoke.return_value = {'state': 'pending'}
-        self.assertIsNone(deliver_codex(native, self.thread, digest, 'digest'))
+        self.assertIsNone(self.deliver_codex(native, self.thread, digest, 'digest'))
         self.assertEqual(deliver_hub(native, packet), {'state': 'queued'})
         native.invoke.assert_called_once()
         native.invoke.side_effect = complete
-        self.assertEqual(deliver_codex(native, self.thread, digest, 'digest'), self.turn)
+        self.assertEqual(self.deliver_codex(native, self.thread, digest, 'digest'), self.turn)
         self.assertEqual(deliver_hub(native, packet)['turn_id'], self.turn)
         self.assertEqual(native.invoke.call_count, 2)
 
