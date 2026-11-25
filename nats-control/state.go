@@ -14,7 +14,8 @@ func readState[T any](ctx context.Context, kv jetstream.KeyValue, key string) (T
 	if err != nil {
 		return value, 0, err
 	}
-	return value, entry.Revision(), json.Unmarshal(entry.Value(), &value)
+	err = json.Unmarshal(entry.Value(), &value)
+	return value, entry.Revision(), err
 }
 
 func writeState[T any](ctx context.Context, kv jetstream.KeyValue, key string, value T, revision uint64) error {

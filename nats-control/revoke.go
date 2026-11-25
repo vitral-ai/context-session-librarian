@@ -26,6 +26,15 @@ func (s *Service) activeAgent(ctx context.Context, name string) error {
 	return nil
 }
 
+func (s *Service) deliveryAgent(ctx context.Context, name string) (bool, error) {
+	var failure *apiError
+	err := s.activeAgent(ctx, name)
+	if errors.As(err, &failure) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 func (s *Service) revoke(ctx context.Context, name string) (any, error) {
 	if s.config.RevokeUsers == nil {
 		return nil, forbidden("account revocation is not configured")

@@ -47,9 +47,11 @@ type fileResult struct {
 }
 
 type uploadRecord struct {
-	File    fileInfo `json:"file"`
-	Offsets []int64  `json:"offsets"`
-	Next    int64    `json:"next"`
+	File    fileInfo  `json:"file"`
+	Lease   string    `json:"lease"`
+	Expires time.Time `json:"expires"`
+	Offsets []int64   `json:"offsets"`
+	Next    int64     `json:"next"`
 }
 
 func (s *Service) file(ctx context.Context, caller, verb string, body []byte) (any, error) {
@@ -159,26 +161,39 @@ func (s *Service) putChunk(ctx context.Context, caller string, request fileReque
 	}
 	key := "upload." + caller + "." + request.ID
 	record, revision, err := readState[uploadRecord](ctx, s.state, key)
-	if errors.Is(err, jetstream.ErrKeyNotFound) && request.Offset == 0 {
-		record = uploadRecord{File: fileInfo{request.Name, request.Size, caller, allowed, s.clock().UTC()}}
-	} else if errors.Is(err, jetstream.ErrKeyNotFound) {
-		return fileResult{}, invalid("upload must start from offset zero")
-	} else if err != nil {
+	now := s.clock().UTC()
+	absent := errors.Is(err, jetstream.ErrKeyNotFound)
+	if err != nil && !absent {
 		return fileResult{}, err
+	}
+	if absent || !record.Expires.After(now) {
+		if request.Offset != 0 {
+			return fileResult{}, invalid("upload must start from offset zero")
+		}
+		record = uploadRecord{
+			File:  fileInfo{request.Name, request.Size, caller, allowed, now},
+			Lease: randomID(), Expires: now.Add(uploadTTL),
+		}
 	}
 	if record.File.Name != request.Name || record.File.Size != request.Size || !slices.Equal(record.File.Allowed, allowed) {
 		return fileResult{}, invalid("upload metadata changed")
 	}
+	remaining := record.Expires.Sub(s.clock())
+	if remaining <= 0 || !messageID.MatchString(record.Lease) {
+		return fileResult{}, invalid("upload expired; restart from offset zero")
+	}
+	remaining = max(time.Second, remaining)
 	if request.Offset > record.Next {
 		return fileResult{}, invalid("upload offset is out of order")
 	}
-	chunkKey := key + "." + strconv.FormatInt(request.Offset, 10)
+	chunkRoot := key + "." + record.Lease + "."
+	chunkKey := chunkRoot + strconv.FormatInt(request.Offset, 10)
 	chunk, err := s.state.Get(ctx, chunkKey)
 	switch {
 	case err == nil && !bytes.Equal(chunk.Value(), request.Data):
 		return fileResult{}, invalid("replayed chunk differs")
 	case errors.Is(err, jetstream.ErrKeyNotFound) && request.Offset == record.Next:
-		if _, err := s.state.Create(ctx, chunkKey, request.Data, jetstream.KeyTTL(uploadTTL)); err != nil {
+		if _, err := s.state.Create(ctx, chunkKey, request.Data, jetstream.KeyTTL(remaining)); err != nil {
 			return fileResult{}, err
 		}
 	case err != nil:
@@ -187,7 +202,7 @@ func (s *Service) putChunk(ctx context.Context, caller string, request fileReque
 	if request.Offset == record.Next && (request.Size != 0 || len(record.Offsets) == 0) {
 		record.Next += int64(len(request.Data))
 		record.Offsets = append(record.Offsets, request.Offset)
-		if _, err := s.writeExpiring(ctx, key, record, revision, uploadTTL); err != nil {
+		if _, err := s.writeExpiring(ctx, key, record, revision, remaining); err != nil {
 			return fileResult{}, err
 		}
 	}
@@ -198,7 +213,7 @@ func (s *Service) putChunk(ctx context.Context, caller string, request fileReque
 	var file bytes.Buffer
 	file.Grow(int(record.File.Size))
 	for _, offset := range record.Offsets {
-		entry, err := s.state.Get(ctx, key+"."+strconv.FormatInt(offset, 10))
+		entry, err := s.state.Get(ctx, chunkRoot+strconv.FormatInt(offset, 10))
 		if err != nil {
 			return fileResult{}, err
 		}

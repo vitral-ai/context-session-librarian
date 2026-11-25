@@ -5,6 +5,8 @@ import (
 	"errors"
 	"flag"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -28,7 +30,7 @@ func main() {
 func run() (string, error) {
 	tenant := flag.String("tenant", "vi", "tenant ID")
 	account := flag.String("account", "", "public NATS account key")
-	url := flag.String("nats", "", "active primary NATS URL")
+	broker := flag.String("nats", "", "active primary NATS URL")
 	creds := flag.String("credentials", "", "path to csl-control credentials")
 	ca := flag.String("ca", "", "trusted DEV CA file")
 	signerFile := flag.String("signer-file", "", "path to the tenant user-signing seed")
@@ -36,8 +38,11 @@ func run() (string, error) {
 	upgrade := flag.String("upgrade-command", "", "command operators provide to upgrade CSL")
 	revoke := flag.String("revoke-helper", "", "tenant-scoped account JWT updater")
 	flag.Parse()
-	if *url == "" || *creds == "" || *signerFile == "" {
+	if *broker == "" || *creds == "" || *signerFile == "" {
 		return *tenant, errors.New("nats, credentials and signer-file are required")
+	}
+	if err := validateBrokerURL(*broker); err != nil {
+		return *tenant, err
 	}
 	seed, err := os.ReadFile(*signerFile)
 	if err != nil {
@@ -49,11 +54,15 @@ func run() (string, error) {
 		return *tenant, errors.New("invalid account signing seed")
 	}
 	defer signer.Wipe()
-	options := []nats.Option{nats.Name("csl-control"), nats.UserCredentials(*creds), nats.Timeout(5 * time.Second)}
+	options := []nats.Option{nats.Name("csl-control"), nats.UserCredentials(*creds), nats.Timeout(5 * time.Second),
+		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
+			slog.Error("broker connection error", "tenant", *tenant, "error", err)
+		}),
+	}
 	if *ca != "" {
 		options = append(options, nats.RootCAs(*ca))
 	}
-	conn, err := nats.Connect(*url, options...)
+	conn, err := nats.Connect(*broker, options...)
 	if err != nil {
 		return *tenant, err
 	}
@@ -101,6 +110,23 @@ func run() (string, error) {
 		case <-ticker.C:
 		}
 	}
+}
+
+func validateBrokerURL(raw string) error {
+	broker, err := url.Parse(raw)
+	if err != nil || broker.Hostname() == "" || broker.User != nil || broker.RawQuery != "" {
+		return errors.New("invalid broker URL")
+	}
+	switch broker.Scheme {
+	case "tls", "wss":
+		return nil
+	case "nats":
+		ip := net.ParseIP(broker.Hostname())
+		if broker.Hostname() == "localhost" || (ip != nil && ip.IsLoopback()) {
+			return nil
+		}
+	}
+	return errors.New("broker TLS is required outside localhost")
 }
 
 func trim(seed []byte) []byte {

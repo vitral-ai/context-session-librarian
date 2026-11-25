@@ -12,6 +12,8 @@ type adminRequest struct {
 	From        string `json:"from,omitempty"`
 	To          string `json:"to,omitempty"`
 	Action      string `json:"action"`
+	Tenant      string `json:"tenant,omitempty"`
+	After       string `json:"after,omitempty"`
 	Name        string `json:"name,omitempty"`
 	Machine     string `json:"machine,omitempty"`
 	CLI         string `json:"cli,omitempty"`
@@ -33,11 +35,18 @@ func (s *Service) admin(ctx context.Context, body []byte) (response any, err err
 			"action", request.Action, "agent", request.Name, "success", err == nil, "at", s.clock().UTC())
 	}()
 	switch request.Action {
+	case "status":
+		return s.fleet(ctx, "status", []byte("{}"))
+	case "export":
+		return s.export(ctx, request.Tenant, request.After)
 	case "revoke":
 		return s.revoke(ctx, request.Name)
 	case "register":
 		return s.register(ctx, request)
 	case "versions":
+		if request.Minimum == "" && request.Recommended == "" {
+			return s.fleet(ctx, "versions", []byte("{}"))
+		}
 		policy := VersionPolicy{Minimum: request.Minimum, Recommended: request.Recommended}
 		if _, _, err := policy.check(request.Minimum); err != nil {
 			return nil, invalid(err.Error())

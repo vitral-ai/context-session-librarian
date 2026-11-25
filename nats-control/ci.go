@@ -28,15 +28,48 @@ func (s *Service) handleCI(msg *nats.Msg) {
 	defer cancel()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, _, err := readState[Agent](ctx, s.state, "agent."+recipient); err != nil {
+	agent, _, err := readState[Agent](ctx, s.state, "agent."+recipient)
+	if err != nil {
 		if !errors.Is(err, jetstream.ErrKeyNotFound) {
 			s.config.Logger.Error("CI recipient lookup failed", "tenant", s.config.Tenant, "error", err)
 		}
 		return
 	}
+	enabled, err := s.deliveryAgent(ctx, recipient)
+	if err != nil {
+		s.config.Logger.Error("CI eligibility lookup failed", "tenant", s.config.Tenant, "error", err)
+		return
+	}
+	if !enabled {
+		return
+	}
 	envelope := serviceEnvelope(notice.ID, recipient, "ci", notice.Body, s.clock())
 	envelope.From = "ci-notices"
-	if err := s.recordServiceMessage(ctx, envelope); err != nil {
+	if err := s.queueCI(ctx, envelope, agent); err != nil {
 		s.config.Logger.Error("CI notice routing failed", "tenant", s.config.Tenant, "error", err)
 	}
+}
+
+func (s *Service) queueCI(ctx context.Context, envelope Envelope, agent Agent) error {
+	interval, err := deliveryInterval(agent.Delivery)
+	if err != nil {
+		return err
+	}
+	if interval == 0 {
+		return s.recordServiceMessage(ctx, envelope)
+	}
+	key := "message." + envelope.ID
+	record, _, err := readState[messageRecord](ctx, s.state, key)
+	if err == nil {
+		return s.ensureMessageState(ctx, record)
+	}
+	if !errors.Is(err, jetstream.ErrKeyNotFound) {
+		return err
+	}
+	now := s.acceptanceTime()
+	record = messageRecord{Envelope: envelope, AcceptedAt: now, ReadyAt: now.Truncate(interval).Add(interval)}
+	if _, err := s.writeExpiring(ctx, key, record, 0, messageAge); err != nil {
+		return err
+	}
+	return s.ensureMessageState(ctx, record)
 }

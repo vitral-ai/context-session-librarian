@@ -52,9 +52,10 @@ type historyEntry struct {
 
 func (s *Service) history(ctx context.Context, caller string, body []byte) (any, error) {
 	var request struct {
-		With string `json:"with,omitempty"`
-		Last int    `json:"last,omitempty"`
-		ID   string `json:"id,omitempty"`
+		With   string `json:"with,omitempty"`
+		Last   int    `json:"last,omitempty"`
+		ID     string `json:"id,omitempty"`
+		Before string `json:"before,omitempty"`
 	}
 	if err := decode(body, &request); err != nil {
 		return nil, err
@@ -71,7 +72,7 @@ func (s *Service) history(ctx context.Context, caller string, body []byte) (any,
 		return nil, err
 	}
 	if request.ID != "" {
-		if request.With != "" || (!messageID.MatchString(request.ID) && !messagePrefix.MatchString(request.ID)) {
+		if request.With != "" || request.Before != "" || (!messageID.MatchString(request.ID) && !messagePrefix.MatchString(request.ID)) {
 			return nil, invalid("provide one message ID or pair name")
 		}
 		var matched string
@@ -106,11 +107,20 @@ func (s *Service) history(ctx context.Context, caller string, body []byte) (any,
 		}
 	}
 	matches = matches[max(0, len(matches)-retention):]
-	if request.ID == "" {
-		matches = matches[max(0, len(matches)-request.Last):]
+	if request.Before != "" {
+		index := slices.IndexFunc(matches, func(entry messageEntry) bool {
+			return entry.record.Envelope.ID == request.Before
+		})
+		if index < 0 {
+			return nil, missing("history cursor unavailable")
+		}
+		matches = matches[:index]
 	}
-	result := make([]historyEntry, 0, len(matches))
-	for _, entry := range matches {
+	requested := min(request.Last, len(matches))
+	result := make([]historyEntry, 0, requested)
+	encoded := 0
+	for i := len(matches) - 1; i >= 0 && len(result) < requested; i-- {
+		entry := matches[i]
 		if request.ID != "" && request.ID != entry.record.Envelope.ID {
 			continue
 		}
@@ -118,15 +128,30 @@ func (s *Service) history(ctx context.Context, caller string, body []byte) (any,
 		if err != nil {
 			return nil, err
 		}
-		result = append(result, historyEntry{entry.record.Envelope, state.State})
+		item := historyEntry{entry.record.Envelope, state.State}
+		raw, err := json.Marshal(item)
+		if err != nil {
+			return nil, err
+		}
+		if len(result) > 0 && encoded+len(raw)+1 >= maxDigest-1024 {
+			break
+		}
+		encoded += len(raw) + 1
+		result = append(result, item)
 	}
 	if request.ID != "" && len(result) == 0 {
 		return nil, missing("message unavailable")
 	}
+	slices.Reverse(result)
+	var next string
+	if request.ID == "" && len(result) < len(matches) && len(result) != 0 {
+		next = result[0].ID
+	}
 	return struct {
-		Messages  []historyEntry `json:"messages"`
-		Retention int            `json:"retention"`
-	}{result, retention}, nil
+		Messages   []historyEntry `json:"messages"`
+		Retention  int            `json:"retention"`
+		NextBefore string         `json:"next_before,omitempty"`
+	}{result, retention, next}, nil
 }
 
 func (s *Service) receipt(ctx context.Context, caller string, body []byte) (any, error) {
@@ -191,6 +216,9 @@ func (s *Service) markNewWork(ctx context.Context, env Envelope) error {
 		return err
 	}
 	for _, item := range items {
+		if item.Kind != "message" && item.Kind != "reply" {
+			continue
+		}
 		sender, _, err := readState[Agent](ctx, s.state, "agent."+item.From)
 		if err != nil {
 			return err
@@ -222,21 +250,30 @@ func (s *Service) recordServiceMessage(ctx context.Context, envelope Envelope) e
 	return s.publishRecord(ctx, record, revision)
 }
 
+// Reserve room for the outer envelope, its part marker, and item separators.
+const digestBudget = maxDigest - 1024
+
+func digestItemSize(item Envelope) (int, error) {
+	raw, err := json.Marshal(item)
+	if err != nil {
+		return 0, err
+	}
+	size := len(raw) + 1
+	if size > digestBudget {
+		return 0, invalid("message does not fit in a digest part")
+	}
+	return size, nil
+}
+
 func digestParts(items []Envelope) ([][]Envelope, error) {
-	// Reserve room for the outer envelope and its part marker.
-	const budget = maxDigest - 1024
 	var parts [][]Envelope
 	start, size := 0, 0
 	for i, item := range items {
-		raw, err := json.Marshal(item)
+		n, err := digestItemSize(item)
 		if err != nil {
 			return nil, err
 		}
-		n := len(raw) + 1
-		if n > budget {
-			return nil, invalid("message does not fit in a digest part")
-		}
-		if size+n > budget {
+		if size+n > digestBudget {
 			parts = append(parts, items[start:i])
 			start, size = i, 0
 		}
@@ -259,11 +296,63 @@ func (s *Service) Tick(ctx context.Context) error {
 		return err
 	}
 	now := s.clock().UTC()
+	// Digest records list the original message IDs. Recover their membership
+	// before regrouping originals after a crash between publish and bookkeeping.
+	batched := map[string]uint64{}
+	for _, entry := range entries {
+		env := entry.record.Envelope
+		if env.Kind != "digest" {
+			continue
+		}
+		if entry.record.Sequence == 0 {
+			state, _, err := readState[messageState](ctx, s.state, "msg."+env.ID)
+			if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
+				return err
+			}
+			if state.State == "dropped" {
+				continue
+			}
+			allowed, err := s.canDeliver(ctx, env)
+			if err != nil {
+				return err
+			}
+			if !allowed {
+				if err := s.ensureMessageState(ctx, entry.record); err != nil {
+					return err
+				}
+				if err := s.markDropped(ctx, env.ID, now); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := s.recordServiceMessage(ctx, env); err != nil {
+				return err
+			}
+			record, _, err := readState[messageRecord](ctx, s.state, "message."+env.ID)
+			if err != nil {
+				return err
+			}
+			entry.record.Sequence = record.Sequence
+		}
+		for _, item := range env.Items {
+			batched[item.ID] = entry.record.Sequence
+		}
+	}
 	groups := map[string][]messageEntry{}
 	var dueRecipients []string
 	for _, entry := range entries {
 		env := entry.record.Envelope
 		if entry.record.Sequence != 0 || entry.record.ReadyAt.After(now) {
+			continue
+		}
+		if sequence, exists := batched[env.ID]; exists {
+			entry.record.Sequence = sequence
+			if _, err := s.writeExpiring(ctx, "message."+env.ID, entry.record, entry.revision, messageAge); err != nil {
+				return err
+			}
+			continue
+		}
+		if env.Kind == "digest" {
 			continue
 		}
 		state, _, err := readState[messageState](ctx, s.state, "msg."+env.ID)
@@ -276,17 +365,17 @@ func (s *Service) Tick(ctx context.Context) error {
 		if err := s.ensureMessageState(ctx, entry.record); err != nil {
 			return err
 		}
-		if env.Kind == "message" || env.Kind == "reply" {
-			allowed, _, err := readState[bool](ctx, s.state, "pair."+env.From+"."+env.To)
-			if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
+		allowed, err := s.canDeliver(ctx, env)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			if err := s.markDropped(ctx, env.ID, now); err != nil {
 				return err
 			}
-			if !allowed {
-				if err := s.markDropped(ctx, env.ID, now); err != nil {
-					return err
-				}
-				continue
-			}
+			continue
+		}
+		if env.Kind == "message" || env.Kind == "reply" {
 			if err := s.mentionPair(ctx, entry.record); err != nil {
 				return err
 			}
@@ -308,6 +397,34 @@ func (s *Service) Tick(ctx context.Context) error {
 		}
 	}
 	return s.sendReminders(ctx, now)
+}
+
+func (s *Service) canDeliver(ctx context.Context, env Envelope) (bool, error) {
+	enabled, err := s.deliveryAgent(ctx, env.To)
+	if !enabled || err != nil {
+		return enabled, err
+	}
+	items := env.Items
+	if env.Kind == "message" || env.Kind == "reply" {
+		items = []Envelope{env}
+	}
+	for _, item := range items {
+		if item.Kind != "message" && item.Kind != "reply" {
+			continue
+		}
+		enabled, err := s.deliveryAgent(ctx, item.From)
+		if !enabled || err != nil {
+			return enabled, err
+		}
+		allowed, _, err := readState[bool](ctx, s.state, "pair."+item.From+"."+item.To)
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			return false, nil
+		}
+		if !allowed || err != nil {
+			return allowed, err
+		}
+	}
+	return true, nil
 }
 
 func (s *Service) markDropped(ctx context.Context, id string, now time.Time) error {
@@ -367,6 +484,7 @@ func (s *Service) sendReminders(ctx context.Context, now time.Time) error {
 		return err
 	}
 	open := map[string][]reminderSession{}
+	inactive := map[string]bool{}
 	for _, key := range keys {
 		session, _, err := readState[PairSession](ctx, s.state, key)
 		if err != nil {
@@ -377,6 +495,13 @@ func (s *Service) sendReminders(ctx context.Context, now time.Time) error {
 		}
 		names := strings.Split(key, ".")[1:]
 		for i, name := range names {
+			if _, checked := inactive[name]; !checked {
+				enabled, err := s.deliveryAgent(ctx, name)
+				if err != nil {
+					return err
+				}
+				inactive[name] = !enabled
+			}
 			peer := names[1-i]
 			last, _, err := readState[time.Time](ctx, s.state, "lastsent."+name+"."+peer)
 			if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
@@ -386,6 +511,12 @@ func (s *Service) sendReminders(ctx context.Context, now time.Time) error {
 		}
 	}
 	for name, sessions := range open {
+		if inactive[name] {
+			continue
+		}
+		sessions = slices.DeleteFunc(sessions, func(entry reminderSession) bool {
+			return inactive[entry.peer]
+		})
 		agent, _, err := readState[Agent](ctx, s.state, "agent."+name)
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
 			continue

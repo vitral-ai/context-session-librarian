@@ -39,7 +39,8 @@ type Service struct {
 
 	// Only the active primary runs control. Serialize its mutations across
 	// subscriptions, including administration and the scheduled delivery pass.
-	mu sync.Mutex
+	mu           sync.Mutex
+	lastAccepted time.Time
 }
 
 func Open(ctx context.Context, conn *nats.Conn, config Config) (*Service, error) {
@@ -81,6 +82,10 @@ func forbidden(message string) error { return &apiError{"forbidden", message} }
 func missing(message string) error   { return &apiError{"not_found", message} }
 
 func decode(body []byte, value any) error {
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 || body[0] != '{' {
+		return invalid("request must be a JSON object")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {
@@ -90,6 +95,15 @@ func decode(body []byte, value any) error {
 		return invalid("invalid request JSON")
 	}
 	return nil
+}
+
+func (s *Service) acceptanceTime() time.Time {
+	now := s.clock().UTC()
+	if !now.After(s.lastAccepted) {
+		now = s.lastAccepted.Add(time.Nanosecond)
+	}
+	s.lastAccepted = now
+	return now
 }
 
 func (s *Service) subject(tail string) string {

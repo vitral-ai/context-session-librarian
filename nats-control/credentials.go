@@ -26,7 +26,7 @@ func agentInboxPrefix(tenant, name string) string {
 }
 
 func isRegisteredName(name string) bool {
-	return agentName.MatchString(name) && name != "owner" && name != "csl-control" && name != "csl-ci"
+	return agentName.MatchString(name) && name != "owner" && name != "csl-control" && name != "csl-ci" && name != "ci-notices" && name != "hub-notifier"
 }
 
 func validAgent(agent Agent) bool {

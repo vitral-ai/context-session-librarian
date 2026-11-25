@@ -22,7 +22,8 @@ import (
 func TestOperatorMode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	url, account := localBroker(t)
+	broker := localBroker(t)
+	url, account := broker.url, broker.account
 	public, err := account.PublicKey()
 	if err != nil {
 		t.Fatal(err)
@@ -46,13 +47,15 @@ func TestOperatorMode(t *testing.T) {
 	if _, err := js.CreateObjectStore(ctx, jetstream.ObjectStoreConfig{Bucket: "CSL_FILES", TTL: messageAge}); err != nil {
 		t.Fatal(err)
 	}
-	var revoked []string
+	sys := fixtureConnect(t, url, "fixture-sys", fixtureCredentials(t, broker.system, "fixture-sys", nil, nil))
 	service, err := Open(ctx, control, Config{
 		Tenant: "vi", Account: public, Signer: account, Domains: []string{"fixture"},
 		Upgrade: "csl self-upgrade",
-		RevokeUsers: func(_ context.Context, keys []string, _ time.Time) error {
-			revoked = append(revoked, keys...)
-			return nil
+		RevokeUsers: func(ctx context.Context, keys []string, at time.Time) error {
+			for _, key := range keys {
+				broker.claims.RevokeAt(key, at)
+			}
+			return pushFixtureAccount(ctx, sys, broker.operator, broker.claims)
 		},
 	})
 	if err != nil {
@@ -82,7 +85,8 @@ func TestOperatorMode(t *testing.T) {
 		violations <- err
 	}))
 	peer := register("worker-a", "worker")
-	third := register("worker-b", "worker")
+	revoked := make(chan struct{})
+	third := register("worker-b", "worker", nats.NoReconnect(), nats.ClosedHandler(func(_ *nats.Conn) { close(revoked) }))
 	if err := sender.Publish("csl.vi.agent.worker-a.inbox", []byte("forbidden by account permissions")); err != nil {
 		t.Fatal(err)
 	}
@@ -187,6 +191,16 @@ func TestOperatorMode(t *testing.T) {
 	if err := packet.DoubleAck(ctx); err != nil {
 		t.Fatal(err)
 	}
+	// Loss of item bookkeeping after an accepted digest must not publish a
+	// differently grouped digest on the following scheduling pass.
+	partial, revision, err := readState[messageRecord](ctx, service.state, "message."+first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial.Sequence = 0
+	if _, err := service.writeExpiring(ctx, "message."+first.ID, partial, revision, messageAge); err != nil {
+		t.Fatal(err)
+	}
 
 	reminder, packet := receive("reminder")
 	if !strings.Contains(reminder.Body, "Open sessions: sender.") {
@@ -201,7 +215,12 @@ func TestOperatorMode(t *testing.T) {
 	if pending, err := consumer.Info(ctx); err != nil || pending.NumPending != 0 {
 		t.Fatalf("reminder repeated in one slot: %v", err)
 	}
+	recovered, _, err := readState[messageRecord](ctx, service.state, "message."+first.ID)
+	if err != nil || recovered.Sequence == 0 {
+		t.Fatal("digest item bookkeeping did not recover")
+	}
 
+	call(peer, "ctl.settings.worker-a", map[string]string{"delivery": "immediate"}, "")
 	ci := fixtureConnect(t, url, "csl-ci", fixtureCredentials(t, account, "csl-ci", []string{"csl.vi.ci.>"}, nil))
 	noticeID := randomID()
 	if err := ci.Publish("csl.vi.ci.worker-a", []byte(`{"id":"`+noticeID+`","body":"fixture CI passed"}`)); err != nil {
@@ -238,6 +257,26 @@ func TestOperatorMode(t *testing.T) {
 	if !bytes.Equal(content, received.Bytes()) {
 		t.Fatal("download failed SHA-256 witness")
 	}
+	exported := admin(map[string]any{"action": "export", "tenant": "vi"})
+	if !bytes.Contains(exported, []byte("file."+id)) || !bytes.Contains(exported, []byte("message."+message.ID)) {
+		t.Fatal("owner export did not contain message and file metadata")
+	}
+	assertResponseCode(t, fixtureRequest(t, ctx, owner, "csl.vi.ctl.admin.owner",
+		map[string]any{"action": "export", "tenant": "foreign"}), "forbidden")
+
+	expiring := []byte("resume after checkpoint expiration")
+	expireID := fmt.Sprintf("%x", sha256.Sum256(expiring))
+	upload := fileRequest{ID: expireID, Name: "resume.txt", Size: int64(len(expiring)), Data: expiring[:5]}
+	call(sender, "ctl.put.sender", upload, "")
+	service.mu.Lock()
+	future = future.Add(uploadTTL + time.Second)
+	service.mu.Unlock()
+	resumed := upload
+	resumed.Offset, resumed.Data = 5, expiring[5:]
+	call(sender, "ctl.put.sender", resumed, "invalid")
+	call(sender, "ctl.put.sender", upload, "")
+	call(sender, "ctl.put.sender", resumed, "")
+
 	call(peer, "ctl.complete.worker-a", map[string]string{"with": "sender"}, "")
 	status := call(sender, "ctl.status.sender", map[string]string{}, "")
 	var fleet struct {
@@ -247,16 +286,106 @@ func TestOperatorMode(t *testing.T) {
 		len(fleet.Agents[1].OpenSessions) != 0 {
 		t.Fatal("status did not show the completed pair")
 	}
+	call(peer, "ctl.settings.worker-a", map[string]string{"delivery": "grouped:15"}, "")
+	big := first
+	big.Body = strings.Repeat("\x01", maxBody)
+	for range 2 {
+		big.ID = randomID()
+		call(sender, "send.sender", big, "")
+	}
+	history := call(peer, "ctl.history.worker-a", map[string]any{"with": "sender", "last": 2}, "")
+	var page struct {
+		Messages []historyEntry `json:"messages"`
+		Next     string         `json:"next_before"`
+	}
+	if err := json.Unmarshal(history, &page); err != nil || len(page.Messages) != 1 ||
+		page.Messages[0].Body != big.Body || page.Next != big.ID || len(history) >= maxDigest {
+		t.Fatal("history page did not retain a complete near-limit body or cursor")
+	}
+	history = call(peer, "ctl.history.worker-a", map[string]any{"with": "sender", "last": 1, "before": page.Next}, "")
+	if err := json.Unmarshal(history, &page); err != nil || len(page.Messages) != 1 || page.Messages[0].Body != big.Body {
+		t.Fatal("history continuation lost a complete body")
+	}
+
+	admin(map[string]any{"action": "allow", "from": "sender", "to": "worker-b"})
+	call(third, "ctl.settings.worker-b", map[string]string{"delivery": "grouped:15"}, "")
+	pending := first
+	pending.ID, pending.To = randomID(), "worker-b"
+	call(sender, "send.sender", pending, "")
 	admin(map[string]any{"action": "revoke", "name": "worker-b"})
-	call(third, "ctl.hello.worker-b", map[string]string{"client_version": "1.3.0+abc"}, "forbidden")
+	select {
+	case <-revoked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("broker did not disconnect the revoked active credential")
+	}
 	service.mu.Lock()
-	defer service.mu.Unlock()
-	if len(revoked) != 1 || !nkeys.IsValidPublicUserKey(revoked[0]) {
-		t.Fatal("revocation did not request the signed user key")
+	future = future.Add(16 * time.Minute)
+	service.mu.Unlock()
+	if err := service.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	dropped, _, err := readState[messageState](ctx, service.state, "msg."+pending.ID)
+	if err != nil || dropped.State != "dropped" {
+		t.Fatalf("revoked recipient digest state=%q err=%v", dropped.State, err)
+	}
+	admin(map[string]any{"action": "register", "name": "worker-a", "role": "worker", "cli": "codex", "machine": "fixture"})
+
+	foreignAccount, err := nkeys.CreateAccount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer foreignAccount.Wipe()
+	foreignKey, _ := foreignAccount.PublicKey()
+	foreignClaims := jwt.NewAccountClaims(foreignKey)
+	foreignClaims.Limits.DiskStorage = 4 * 1024 * 1024
+	foreignClaims.Limits.Streams, foreignClaims.Limits.Consumer = -1, -1
+	if err := pushFixtureAccount(ctx, sys, broker.operator, foreignClaims); err != nil {
+		t.Fatal(err)
+	}
+	foreign := fixtureConnect(t, url, "foreign-owner", fixtureCredentials(t, foreignAccount, "foreign-owner", nil, nil))
+	foreignJS, err := jetstream.New(foreign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := foreignJS.Stream(ctx, "CSL_MSG"); err == nil {
+		t.Fatal("foreign tenant discovered the primary tenant stream")
+	}
+	if _, err := foreignJS.ObjectStore(ctx, "CSL_FILES"); err == nil {
+		t.Fatal("foreign tenant discovered the primary tenant files")
+	}
+	if _, err := foreign.Request("csl.vi.ctl.admin.owner", []byte(`{"action":"versions"}`), 500*time.Millisecond); err == nil {
+		t.Fatal("foreign tenant reached the primary control subjects")
 	}
 }
 
-func localBroker(t *testing.T) (string, nkeys.KeyPair) {
+type fixtureBroker struct {
+	url                       string
+	operator, account, system nkeys.KeyPair
+	claims                    *jwt.AccountClaims
+}
+
+func pushFixtureAccount(ctx context.Context, conn *nats.Conn, operator nkeys.KeyPair, claims *jwt.AccountClaims) error {
+	token, err := claims.Encode(operator)
+	if err != nil {
+		return err
+	}
+	msg, err := conn.RequestWithContext(ctx, "$SYS.REQ.CLAIMS.UPDATE", []byte(token))
+	if err != nil {
+		return err
+	}
+	var response struct {
+		Data struct {
+			Account string `json:"account"`
+		} `json:"data"`
+		Error json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(msg.Data, &response); err != nil || len(response.Error) != 0 || response.Data.Account != claims.Subject {
+		return fmt.Errorf("resolver rejected the signed fixture account")
+	}
+	return nil
+}
+
+func localBroker(t *testing.T) fixtureBroker {
 	t.Helper()
 	server := os.Getenv("CSL_TEST_NATS")
 	if server == "" {
@@ -286,7 +415,7 @@ func localBroker(t *testing.T) (string, nkeys.KeyPair) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer system.Wipe()
+	t.Cleanup(system.Wipe)
 	systemKey, _ := system.PublicKey()
 	systemToken, err := jwt.NewAccountClaims(systemKey).Encode(operator)
 	if err != nil {
@@ -300,8 +429,8 @@ func localBroker(t *testing.T) (string, nkeys.KeyPair) {
 	}
 	dir := t.TempDir()
 	cfg := fmt.Sprintf(
-		"host: 127.0.0.1\nport: -1\nports_file_dir: %q\noperator: %q\nsystem_account: %s\nresolver: MEMORY\nresolver_preload: { %s: %q, %s: %q }\njetstream: {store_dir: %q, domain: fixture}\n",
-		dir, operatorToken, systemKey, systemKey, systemToken, accountKey, accountToken, filepath.Join(dir, "data"))
+		"host: 127.0.0.1\nport: -1\nports_file_dir: %q\noperator: %q\nsystem_account: %s\nresolver: { type: full, dir: %q }\nresolver_preload: { %s: %q, %s: %q }\njetstream: {store_dir: %q, domain: fixture}\n",
+		dir, operatorToken, systemKey, filepath.Join(dir, "resolver"), systemKey, systemToken, accountKey, accountToken, filepath.Join(dir, "data"))
 	configPath := filepath.Join(dir, "server.conf")
 	if err := os.WriteFile(configPath, []byte(cfg), 0600); err != nil {
 		t.Fatal(err)
@@ -328,13 +457,13 @@ func localBroker(t *testing.T) (string, nkeys.KeyPair) {
 			Nats []string `json:"nats"`
 		}
 		if raw, err := os.ReadFile(portsPath); err == nil && json.Unmarshal(raw, &ports) == nil && len(ports.Nats) == 1 {
-			return ports.Nats[0], account
+			return fixtureBroker{ports.Nats[0], operator, account, system, claims}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	logs, _ := os.ReadFile(logPath)
 	t.Fatalf("local broker did not become ready: %s", logs)
-	return "", nil
+	return fixtureBroker{}
 }
 
 func fixtureCredentials(t *testing.T, account nkeys.KeyPair, name string, pub, sub []string) credentials {

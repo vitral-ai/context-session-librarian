@@ -132,9 +132,6 @@ func (s *Service) send(ctx context.Context, caller string, body []byte) (sendRes
 	if err != nil {
 		return sendResult{}, err
 	}
-	if len(raw)+1024 >= maxDigest {
-		return sendResult{}, invalid("message envelope is too large")
-	}
 	fingerprint := fmt.Sprintf("%x", sha256.Sum256(raw))
 	warn, err := s.checkVersion(ctx, envelope.ClientVersion)
 	if err != nil {
@@ -181,12 +178,7 @@ func (s *Service) send(ctx context.Context, caller string, body []byte) (sendRes
 			return sendResult{}, invalid("message ID was already used")
 		}
 	} else if errors.Is(err, jetstream.ErrKeyNotFound) {
-		now := s.clock().UTC()
-		if envelope.Urgency == "urgent" {
-			if err := s.admitUrgent(ctx, &envelope, now); err != nil {
-				return sendResult{}, err
-			}
-		}
+		now := s.acceptanceTime()
 		interval, err := deliveryInterval(recipient.Delivery)
 		if err != nil {
 			return sendResult{}, err
@@ -198,6 +190,14 @@ func (s *Service) send(ctx context.Context, caller string, body []byte) (sendRes
 		}
 		session = session.mention(caller, now)
 		envelope.SessionID = stableID(pair + "." + session.OpenedAt.Format(time.RFC3339Nano))
+		if _, err := digestItemSize(envelope); err != nil {
+			return sendResult{}, err
+		}
+		if envelope.Urgency == "urgent" {
+			if err := s.admitUrgent(ctx, &envelope, now); err != nil {
+				return sendResult{}, err
+			}
+		}
 		record = messageRecord{Envelope: envelope, Fingerprint: fingerprint, AcceptedAt: now, ReadyAt: now}
 		if envelope.Urgency == "normal" && interval != 0 {
 			record.ReadyAt = now.Truncate(interval).Add(interval)
@@ -216,7 +216,7 @@ func (s *Service) send(ctx context.Context, caller string, body []byte) (sendRes
 		if err := s.mentionPair(ctx, record); err != nil {
 			return sendResult{}, err
 		}
-		if !record.ReadyAt.After(s.clock()) && record.ReadyAt.Equal(record.AcceptedAt) {
+		if record.ReadyAt.Equal(record.AcceptedAt) {
 			if err := s.publishRecord(ctx, record, revision); err != nil {
 				return sendResult{}, err
 			}

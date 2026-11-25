@@ -109,3 +109,23 @@ func TestDigestPartsRespectEncodedBudgetAndKeepMessagesWhole(t *testing.T) {
 		}
 	}
 }
+
+func TestDigestAdmissionUsesFinalEnvelopeAtBoundary(t *testing.T) {
+	env := Envelope{V: 1, ID: randomID(), From: "sender", To: "worker-a", Kind: "message",
+		Urgency: "normal", SessionID: randomID(), CreatedAt: time.Now().UTC(), ClientVersion: "1.3.0+test"}
+	raw, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.Body = strings.Repeat("x", digestBudget-len(raw)-1)
+	if size, err := digestItemSize(env); err != nil || size != digestBudget {
+		t.Fatalf("boundary item: bytes=%d err=%v", size, err)
+	}
+	if _, err := digestParts([]Envelope{env}); err != nil {
+		t.Fatal(err)
+	}
+	env.Body += "x"
+	if _, err := digestItemSize(env); err == nil {
+		t.Fatal("oversized final envelope was accepted")
+	}
+}
