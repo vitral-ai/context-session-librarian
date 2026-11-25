@@ -40,7 +40,15 @@ The account revocation helper is called with the tenant ID, tenant public
 account key, UTC RFC3339 time and public user keys as positional arguments.
 It updates the broker's operator-signed JWT through that account's exact
 CLAIMS.LOOKUP and CLAIMS.UPDATE subjects. The helper can use a scoped SYS
-reply prefix via `--inbox-prefix`. The control service
+reply prefix via `--inbox-prefix`. On a primary/standby deployment, set
+`--revoke-peer` to the opposite broker's pinned TLS URL. The exact claim
+subjects must resolve locally on each broker. The helper uses the same
+node-local SYS credential, CA and inbox prefix for both connections.
+It reads both claims, requires matching account policy and signs one update
+with the highest cutoff per key. Both readbacks must confirm the merged
+revocations within the same 17-second deadline. A partial failure returns
+an error, and the next batch retry starts from both resolvers' current claims.
+The control service
 denies further calls as soon as the owner revocation is recorded.
 The owner response includes `pending: true` until broker revocation completes.
 The existing control scheduler calls the helper with batches of at most 100

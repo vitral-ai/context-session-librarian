@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"time"
 
 	"github.com/nats-io/jwt/v2"
@@ -118,27 +120,92 @@ func lookupAccount(ctx context.Context, system *nats.Conn, account string) (*jwt
 // RevokeAccountUsers preserves the active account configuration and pushes only
 // the added revocation claims. The caller keeps the operator seed and SYS creds.
 func RevokeAccountUsers(ctx context.Context, system *nats.Conn, operator nkeys.KeyPair, account string, keys []string, at time.Time) error {
-	claims, err := lookupAccount(ctx, system, account)
-	if err != nil {
-		return err
+	return revokeAccountUsers(ctx, []*nats.Conn{system}, operator, account, keys, at)
+}
+
+// RevokeAccountUsersOnPair reconciles the two isolated account resolvers before
+// declaring a batch complete. A retry starts from both current claims.
+func RevokeAccountUsersOnPair(ctx context.Context, local, peer *nats.Conn, operator nkeys.KeyPair, account string, keys []string, at time.Time) error {
+	localID, peerID := local.ConnectedServerId(), peer.ConnectedServerId()
+	if localID == "" || peerID == "" || localID == peerID {
+		return errors.New("revocation requires two distinct connected brokers")
 	}
-	if claims == nil {
-		return missing("tenant account is unavailable")
-	}
-	changed := false
+	return revokeAccountUsers(ctx, []*nats.Conn{local, peer}, operator, account, keys, at)
+}
+
+func revokeAccountUsers(ctx context.Context, resolvers []*nats.Conn, operator nkeys.KeyPair, account string, keys []string, at time.Time) error {
 	for _, key := range keys {
 		if !nkeys.IsValidPublicUserKey(key) {
 			return invalid("invalid user revocation key")
 		}
-		if !claims.Revocations.IsRevoked(key, at) {
-			claims.RevokeAt(key, at)
-			changed = true
+	}
+	var claims *jwt.AccountClaims
+	revocations := make(jwt.RevocationList)
+	previous := make([]jwt.RevocationList, 0, len(resolvers))
+	for i, resolver := range resolvers {
+		current, err := lookupAccount(ctx, resolver, account)
+		if err != nil {
+			return fmt.Errorf("resolver %d lookup: %w", i+1, err)
 		}
+		if current == nil {
+			return missing("tenant account is unavailable")
+		}
+		if claims == nil {
+			claims = current
+		} else if !sameAccountPolicy(claims, current) {
+			return errors.New("account policy differs across resolvers")
+		}
+		previous = append(previous, current.Revocations)
+		for key, cutoff := range current.Revocations {
+			revocations.Revoke(key, time.Unix(cutoff, 0))
+		}
+	}
+	for _, key := range keys {
+		if !revocations.IsRevoked(key, at) {
+			revocations.Revoke(key, at)
+		}
+	}
+	changed := false
+	for _, current := range previous {
+		changed = changed || !maps.Equal(current, revocations)
 	}
 	if !changed {
 		return nil
 	}
-	return pushAccount(ctx, system, operator, "$SYS.REQ.ACCOUNT."+account+".CLAIMS.UPDATE", claims)
+	claims.Revocations = revocations
+	token, err := claims.Encode(operator)
+	if err != nil {
+		return err
+	}
+	subject := "$SYS.REQ.ACCOUNT." + account + ".CLAIMS.UPDATE"
+	var updateError error
+	for i, resolver := range resolvers {
+		if err := pushAccountToken(ctx, resolver, subject, account, token); err != nil {
+			updateError = errors.Join(updateError, fmt.Errorf("resolver %d update: %w", i+1, err))
+		}
+	}
+	if updateError != nil {
+		return updateError
+	}
+	for i, resolver := range resolvers {
+		current, err := lookupAccount(ctx, resolver, account)
+		if err != nil {
+			return fmt.Errorf("resolver %d readback: %w", i+1, err)
+		}
+		if current == nil || !sameAccountPolicy(claims, current) || !maps.Equal(revocations, current.Revocations) {
+			return fmt.Errorf("resolver %d did not confirm the revocation claim", i+1)
+		}
+	}
+	return nil
+}
+
+func sameAccountPolicy(a, b *jwt.AccountClaims) bool {
+	left, right := *a, *b
+	left.Revocations, right.Revocations = nil, nil
+	left.ID, right.ID = "", ""
+	left.IssuedAt, right.IssuedAt = 0, 0
+	left.Issuer, right.Issuer = "", ""
+	return reflect.DeepEqual(left, right)
 }
 
 func pushAccount(ctx context.Context, system *nats.Conn, signer nkeys.KeyPair, subject string, account *jwt.AccountClaims) error {
@@ -146,6 +213,10 @@ func pushAccount(ctx context.Context, system *nats.Conn, signer nkeys.KeyPair, s
 	if err != nil {
 		return err
 	}
+	return pushAccountToken(ctx, system, subject, account.Subject, token)
+}
+
+func pushAccountToken(ctx context.Context, system *nats.Conn, subject, account, token string) error {
 	reply, err := system.RequestWithContext(ctx, subject, []byte(token))
 	if err != nil {
 		return err
@@ -157,7 +228,7 @@ func pushAccount(ctx context.Context, system *nats.Conn, signer nkeys.KeyPair, s
 		Error json.RawMessage `json:"error"`
 	}
 	if err := json.Unmarshal(reply.Data, &response); err != nil ||
-		(len(response.Error) != 0 && string(response.Error) != "null") || response.Data.Account != account.Subject {
+		(len(response.Error) != 0 && string(response.Error) != "null") || response.Data.Account != account {
 		return errors.New("resolver rejected the tenant account update")
 	}
 	return nil
