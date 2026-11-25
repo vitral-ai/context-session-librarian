@@ -260,7 +260,7 @@ func TestOperatorMode(t *testing.T) {
 		queued.ID = randomID()
 		call(third, "ctl.settings.worker-b", map[string]string{"delivery": "grouped:15"}, "")
 		call(peer, "send.worker-a", queued, "")
-		waiting, _, err := readState[messageRecord](ctx, service.state, "message."+queued.ID)
+		waiting, revision, err := readState[messageRecord](ctx, service.state, "message."+queued.ID)
 		if err != nil || waiting.Sequence != 0 {
 			t.Fatalf("fixture was not queued: %#v, %v", waiting, err)
 		}
@@ -297,13 +297,9 @@ func TestOperatorMode(t *testing.T) {
 			}
 		}
 		checkPage("", 1, tied.ID, tied.ID)
+		// Publish the queued digest without advancing the shared reminder clock.
 		service.mu.Lock()
-		clock := service.clock
-		service.clock = func() time.Time { return waiting.ReadyAt }
-		service.mu.Unlock()
-		err = service.deliveryTick(ctx)
-		service.mu.Lock()
-		service.clock = clock
+		err = service.flushGroup(ctx, queued.To, []messageEntry{{record: waiting, revision: revision}}, waiting.ReadyAt)
 		service.mu.Unlock()
 		if err != nil {
 			t.Fatal(err)
