@@ -4,6 +4,7 @@ import io
 import urllib.error
 from contextlib import redirect_stdout
 from unittest.mock import patch
+from types import SimpleNamespace
 import json
 from pathlib import Path
 import tempfile
@@ -12,7 +13,7 @@ import uuid
 
 from csl_agent_hub import Hub
 from csl_bridge_store import BridgeError
-from csl_ci_notice import notice_request, workflow_notice, main
+from csl_ci_notice import notice_request, workflow_notice, post_nats, main
 
 
 class CompletionNoticeTests(unittest.TestCase):
@@ -192,6 +193,74 @@ class CompletionNoticeTests(unittest.TestCase):
         self.assertIn('IncompleteRead', output.getvalue())
         self.assertNotIn('github-read-token', output.getvalue())
         self.assertNotIn('hub-notice-token', output.getvalue())
+
+    def nats_environment(self):
+        _, env = self.run_environment()
+        return dict(env, CSL_GITHUB_TOKEN='github-read-token',
+                    CSL_HUB_NOTICE_TOKEN='hub-token', CSL_NATS_CI_CREDS='ci-creds',
+                    CSL_NATS_CI_CA_PEM='test-ca', CSL_NATS_CI_URL='tls://nats.example:4222',
+                    CSL_NATS_CI_PUBLISHER='/trusted/csl-ci-notice')
+
+    def test_nats_copy_reuses_the_hub_id_body_and_route(self):
+        env = self.nats_environment()
+        env['CSL_NATS_CI_ROUTES'] = '{"feat/existing":"client"}'
+        for conclusion in ('success', 'failure'):
+            with self.subTest(conclusion=conclusion):
+                notice = dict(self.notice, branch='feat/existing', results={'completion': conclusion})
+                expected = notice_request(self.policy, notice)
+                with patch('subprocess.run', return_value=SimpleNamespace(returncode=0)) as publish:
+                    post_nats(notice, env)
+                self.assertEqual(publish.call_args.args[0], [
+                    '/trusted/csl-ci-notice', '--nats', 'tls://nats.example:4222',
+                    '--tenant', 'vi', '--agent', 'client'])
+                kwargs = publish.call_args.kwargs
+                self.assertEqual(json.loads(kwargs['input']), {'id': expected['id'], 'body': expected['text']})
+                self.assertEqual(kwargs['env'], {'CSL_NATS_CI_CREDS': 'ci-creds', 'CSL_NATS_CI_CA_PEM': 'test-ca'})
+                self.assertTrue(kwargs['capture_output'])
+
+    def test_nats_quiet_skips_unmapped_branches_and_other_conclusions(self):
+        env = self.nats_environment()
+        for updates in ({'branch': 'feat/no-mapping'}, {'branch': 'codex/bad.agent/topic'},
+                        {'results': {'completion': 'cancelled'}}, {'results': {'completion': 'skipped'}}):
+            with self.subTest(updates=updates), patch('subprocess.run') as publish:
+                post_nats(dict(dict(self.notice, results={'completion': 'success'}), **updates), env)
+                publish.assert_not_called()
+
+    def test_matching_head_posts_both_and_superseded_posts_neither(self):
+        env = self.nats_environment()
+        with patch.dict('os.environ', env, clear=True), patch('csl_ci_notice.post_hub') as hub, patch(
+                'csl_ci_notice.post_nats') as nats:
+            for sha, sent in [('b' * 40, False), ('a' * 40, True)]:
+                with self.subTest(sha=sha), patch('urllib.request.urlopen', return_value=io.StringIO(
+                        json.dumps({'head': {'sha': sha}}))):
+                    main()
+                    self.assertEqual(hub.called, sent)
+                    self.assertEqual(nats.called, sent)
+
+    def test_head_lookup_failure_posts_exact_run_to_both(self):
+        env = self.nats_environment()
+        with patch.dict('os.environ', env, clear=True), patch('csl_ci_notice.post_hub') as hub, patch(
+                'csl_ci_notice.post_nats') as nats, patch('urllib.request.urlopen', side_effect=TimeoutError):
+            main()
+            hub.assert_called_once()
+            nats.assert_called_once()
+            self.assertEqual(hub.call_args.args[0]['sha'], 'a' * 40)
+            self.assertEqual(nats.call_args.args[0]['sha'], 'a' * 40)
+
+    def test_one_delivery_failure_does_not_suppress_the_other(self):
+        env = self.nats_environment()
+        for failed in ('hub', 'nats'):
+            with self.subTest(failed=failed):
+                output = io.StringIO()
+                with patch.dict('os.environ', env, clear=True), redirect_stdout(output), patch(
+                        'csl_ci_notice.current_head_allows_notice', return_value=True), patch(
+                        'csl_ci_notice.post_hub') as hub, patch('csl_ci_notice.post_nats') as nats:
+                    (hub if failed == 'hub' else nats).side_effect = OSError('sensitive failure detail')
+                    with self.assertRaisesRegex(BridgeError, 'Completion notice failed on:'):
+                        main()
+                    hub.assert_called_once()
+                    nats.assert_called_once()
+                self.assertNotIn('sensitive failure detail', output.getvalue())
 
 
 if __name__ == '__main__':
