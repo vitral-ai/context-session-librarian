@@ -11,9 +11,11 @@ class NoticeWorkflowTests(unittest.TestCase):
         self.assertNotIn('pull_request.head.sha', workflow)
         self.assertIn('persist-credentials: false', workflow)
         self.assertIn('runs-on: ubuntu-latest', workflow)
-        self.assertEqual(re.findall(r'run: (.*)', workflow), [
-            'go build -mod=readonly -trimpath -o "$RUNNER_TEMP/csl-ci-notice" ./cmd/csl-ci-notice',
+        self.assertEqual(re.findall(r'^        run: (.*)$', workflow, re.M), [
             'python3 csl_ci_notice.py',
+            'timeout --signal=KILL 90s go version',
+            'timeout --signal=KILL 90s go build -mod=readonly -trimpath -o "$RUNNER_TEMP/csl-ci-notice" ./cmd/csl-ci-notice',
+            '|',
         ])
         self.assertIn('environment: csl-ci-notices', workflow)
         self.assertIn('pull-requests: read', workflow)
@@ -25,25 +27,25 @@ class NoticeWorkflowTests(unittest.TestCase):
         self.assertNotIn('inputs:', workflow)
         self.assertNotIn('download-artifact', workflow)
 
-    def test_nats_build_has_no_credentials_and_uses_pinned_tools(self):
+    def test_hub_post_precedes_the_optional_nats_steps(self):
         workflow = Path('.github/workflows/pr-completion-notice.yml').read_text()
         self.assertIn('CSL_NATS_CI_CREDS:\n        required: false', workflow)
-        self.assertRegex(workflow, r'actions/setup-go@[0-9a-f]{40}')
-        self.assertIn('CSL_NATS_CI_PUBLISHER: ${{ runner.temp }}/csl-ci-notice', workflow)
-        self.assertEqual(workflow.count("if: ${{ vars.CSL_NATS_CI_URL != '' }}"), 2)
-        build, publish = workflow.split('      - name: Post completion once per configured transport')
+        _, hub = workflow.split('      - name: Post Hub completion', 1)
+        hub, optional = hub.split('      - name: Set up the pinned Go toolchain', 1)
+        build, publish = optional.split('      - name: Post NATS completion', 1)
+        self.assertIn('python3 csl_ci_notice.py', hub)
+        self.assertIn('CSL_HUB_NOTICE_TOKEN: ${{ secrets.CSL_HUB_NOTICE_TOKEN }}', hub)
+        self.assertNotIn('CSL_NATS_CI_CREDS', hub + build)
+        self.assertNotIn('CSL_HUB_NOTICE_TOKEN', optional)
         self.assertIn('working-directory: nats-control', build)
-        self.assertNotIn('secrets.CSL_NATS_CI_CREDS', build)
-        self.assertNotIn('github.event', publish.split('        run:')[1])
-        self.assertIn("!cancelled() && steps.trusted-checkout.outcome == 'success'", publish)
+        self.assertEqual(build.count('GOTOOLCHAIN: go1.27.4'), 2)
+        self.assertEqual(optional.count('continue-on-error: true'), 3)
         self.assertIn('CSL_NATS_CI_CREDS: ${{ secrets.CSL_NATS_CI_CREDS }}', publish)
-
-    def test_stalled_optional_setup_leaves_time_for_hub(self):
-        workflow = Path('.github/workflows/pr-completion-notice.yml').read_text()
-        job_timeout = int(re.search(r'^    timeout-minutes: (\d+)$', workflow, re.M).group(1))
-        step_timeouts = [int(value) for value in re.findall(r'^        timeout-minutes: (\d+)$', workflow, re.M)]
-        self.assertEqual(step_timeouts, [2, 1, 1, 2])
-        self.assertGreater(job_timeout, sum(step_timeouts))
+        self.assertIn('CSL_NATS_CI_PUBLISHER: ${{ runner.temp }}/csl-ci-notice', publish)
+        self.assertIn('timeout --signal=KILL 30s python3', publish)
+        self.assertIn('if current_head_allows_notice(notice, os.environ):', publish)
+        self.assertIn('post_nats(notice, os.environ)', publish)
+        self.assertNotIn('github.event', publish.split('        run:')[1])
 
     def test_unprivileged_producers_have_no_notice_credentials(self):
         for filename in ('test.yml', 'workload-image.yml'):
