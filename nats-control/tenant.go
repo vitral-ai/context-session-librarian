@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -93,8 +94,8 @@ func (s *Service) eraseTenant(ctx context.Context, tenant, confirm string) (any,
 			active = append(active, key[strings.LastIndexByte(key, '.')+1:])
 		}
 	}
-	if len(active) != 0 {
-		if err := s.config.RevokeUsers(ctx, active, now); err != nil {
+	for batch := range slices.Chunk(active, revokeBatchLimit) {
+		if err := s.revokeBatch(ctx, batch, now); err != nil {
 			return nil, err
 		}
 	}

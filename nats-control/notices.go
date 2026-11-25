@@ -42,23 +42,29 @@ func (s *Service) notice(ctx context.Context, reason, caller, target string) {
 }
 
 func (s *Service) deliverNotice(ctx context.Context, reason, caller, target string) error {
-	recipient, _, err := readState[string](ctx, s.state, noticeRecipientKey)
-	if errors.Is(err, jetstream.ErrKeyNotFound) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	enabled, err := s.deliveryAgent(ctx, recipient)
-	if err != nil || !enabled {
-		return err
-	}
+
 	now := s.clock().UTC()
 	pair := caller
 	if target != "" {
 		pair += " to " + target
 	}
 	slot := now.Truncate(10 * time.Minute).Format(time.RFC3339)
-	id := stableID("notice." + recipient + "." + reason + "." + pair + "." + slot)
-	return s.recordServiceMessage(ctx, serviceEnvelope(id, recipient, "system", reason+" ("+pair+").", now))
+	id := "notice." + reason + "." + pair + "." + slot
+	_, err := s.sendOwnerNotice(ctx, id, reason+" ("+pair+").", now)
+	return err
+}
+
+func (s *Service) sendOwnerNotice(ctx context.Context, key, body string, now time.Time) (bool, error) {
+	recipient, _, err := readState[string](ctx, s.state, noticeRecipientKey)
+	if errors.Is(err, jetstream.ErrKeyNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	enabled, err := s.deliveryAgent(ctx, recipient)
+	if err != nil || !enabled {
+		return false, err
+	}
+	return true, s.recordServiceMessage(ctx, serviceEnvelope(stableID(key+"."+recipient), recipient, "system", body, now))
 }

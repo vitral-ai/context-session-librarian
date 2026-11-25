@@ -28,6 +28,7 @@ type Config struct {
 	RevokeUsers  func(context.Context, []string, time.Time) error
 	CreateTenant func(context.Context, TenantRequest) (TenantInfo, error)
 	EraseTenant  string
+	MirrorProbe  func(context.Context) (map[string]uint64, error)
 }
 
 type Service struct {
@@ -41,8 +42,10 @@ type Service struct {
 
 	// Only the active primary runs control. Serialize its mutations across
 	// subscriptions, including administration and the scheduled delivery pass.
-	mu           sync.Mutex
-	lastAccepted time.Time
+	mu                 sync.Mutex
+	lastAccepted       time.Time
+	revocationWake     chan struct{}
+	revocationHelperMu sync.Mutex
 }
 
 func Open(ctx context.Context, conn *nats.Conn, config Config) (*Service, error) {
@@ -69,7 +72,7 @@ func Open(ctx context.Context, conn *nats.Conn, config Config) (*Service, error)
 	if err != nil {
 		return nil, fmt.Errorf("open CSL_FILES: %w", err)
 	}
-	return &Service{config: config, conn: conn, js: js, state: kv, stream: stream, files: files, clock: time.Now}, nil
+	return &Service{config: config, conn: conn, js: js, state: kv, stream: stream, files: files, clock: time.Now, revocationWake: make(chan struct{}, 1)}, nil
 }
 
 type apiError struct {
@@ -144,7 +147,16 @@ func (s *Service) handleControl(msg *nats.Msg) {
 		!strings.HasPrefix(msg.Reply, agentInboxPrefix(s.config.Tenant, caller)+".") {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	timeout := 10 * time.Second
+	if caller == "owner" && verb == "admin" && s.config.EraseTenant == s.config.Tenant {
+		var request struct {
+			Action string `json:"action"`
+		}
+		if json.Unmarshal(msg.Data, &request) == nil && request.Action == "erase-tenant" {
+			timeout = 2 * time.Minute
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	s.mu.Lock()
 	response, err := s.control(ctx, caller, verb, msg.Data)

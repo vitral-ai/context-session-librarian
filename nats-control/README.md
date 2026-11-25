@@ -41,10 +41,28 @@ account key, UTC RFC3339 time and public user keys as positional arguments.
 It updates the broker's operator-signed JWT through that account's exact
 CLAIMS.LOOKUP and CLAIMS.UPDATE subjects. The helper can use a scoped SYS
 reply prefix via `--inbox-prefix`. The control service
-denies further calls from a revoked agent even while the broker is updating.
+denies further calls as soon as the owner revocation is recorded.
+The owner response includes `pending: true` until broker revocation completes.
+The existing control scheduler calls the helper with batches of at most 100
+keys, a fixed cutoff and a 30-second caller deadline. Batch retries survive
+restarts. An exhausted retry sequence notifies the configured owner and
+leaves the batch queued for a later control pass.
 Only start control beside the active primary. During planned promotion, stop
 the old control instance before starting the same build and tenant
 configuration against the promoted writable streams.
+
+## Standby mirror alerts
+
+On the active primary, give the control process a separate read-only SYS
+credential for the standby and the verified `--mirror-nats`,
+`--mirror-credentials`, `--mirror-inbox-prefix` and `--mirror-server` flags.
+Both broker connections use the configured CA. The existing one-minute
+control pass reads JSZ. Positive backlog observed for more than 60 seconds
+alerts the configured owner, repeats at most every 15 minutes, and sends a
+recovery notice after all three mirrors report zero backlog. A probe failure
+lasting more than five minutes sends an unavailable notice. Probe failure
+does not clear an active lag alert. Omit the flags on the promoted standby
+until a separate mirror endpoint is available.
 
 ## Tenant administration
 

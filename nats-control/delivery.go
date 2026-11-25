@@ -324,6 +324,10 @@ func digestParts(items []Envelope) ([][]Envelope, error) {
 // Tick recovers accepted sends, flushes due grouped messages, and sends one
 // reminder per worker per 20-minute interval.
 func (s *Service) Tick(ctx context.Context) error {
+	return errors.Join(s.monitorMirrors(ctx), s.deliveryTick(ctx), s.ApplyRevocations(ctx))
+}
+
+func (s *Service) deliveryTick(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

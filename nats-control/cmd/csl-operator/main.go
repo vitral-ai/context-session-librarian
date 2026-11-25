@@ -75,11 +75,11 @@ func run() error {
 		return errors.New("unable to connect as the operator system user")
 	}
 	defer sys.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 17*time.Second)
 	defer cancel()
 	args := flag.Args()[1:]
 	if operation == "revoke" {
-		if len(args) < 4 || args[0] != *allowedTenant || args[1] != *allowedAccount {
+		if len(args) < 4 || len(args) > 103 || args[0] != *allowedTenant || args[1] != *allowedAccount {
 			return errors.New("account or tenant is outside the configured revocation scope")
 		}
 		at, err := time.Parse(time.RFC3339, args[2])
