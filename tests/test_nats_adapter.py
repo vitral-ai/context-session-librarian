@@ -706,6 +706,34 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         inactive.connection.close.assert_awaited_once()
         active.connection.close.assert_not_awaited()
 
+    async def test_pull_restores_only_missing_durable_before_binding(self):
+        try:
+            from nats.js.errors import NotFoundError, ServiceUnavailableError
+        except ImportError:
+            self.skipTest('nats-py is not installed')
+        js = SimpleNamespace(consumer_info=AsyncMock(), pull_subscribe_bind=AsyncMock())
+        self.connection.jetstream = lambda: js
+        with patch.object(self.client, 'request', new=AsyncMock()) as request:
+            await self.client.pull()
+            request.assert_not_awaited()
+            js.consumer_info.side_effect = ServiceUnavailableError
+            with self.assertRaises(ServiceUnavailableError):
+                await self.client.pull()
+            request.assert_not_awaited()
+            js.pull_subscribe_bind.assert_awaited_once()
+
+            js.consumer_info.side_effect = NotFoundError
+
+            async def bind(**kwargs):
+                request.assert_awaited_once_with('ctl.ensure_consumer', {})
+                self.assertEqual(kwargs, {'stream': 'CSL_MSG', 'consumer': 'agent-alice',
+                                          'inbox_prefix': b'_INBOX.csl.vi.alice.'})
+                return 'bound'
+
+            js.pull_subscribe_bind.side_effect = bind
+            self.assertEqual(await self.client.pull(), 'bound')
+            js.consumer_info.assert_awaited_with('CSL_MSG', 'agent-alice')
+
     def test_byte_limit(self):
         self.assertEqual(body_text('é' * 24576), 'é' * 24576)
         with self.assertRaises(BridgeError):

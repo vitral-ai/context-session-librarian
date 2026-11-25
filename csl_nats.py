@@ -332,7 +332,15 @@ class Client:
         return result
 
     async def pull(self):
-        return await self.connection.jetstream().pull_subscribe_bind(
+        from nats.js.errors import NotFoundError
+
+        jetstream = self.connection.jetstream()
+        try:
+            await jetstream.consumer_info(STREAM, self.consumer)
+        except NotFoundError:
+            # The control service derives the durable and filter from our authenticated subject.
+            await self.request('ctl.ensure_consumer', {})
+        return await jetstream.pull_subscribe_bind(
             consumer=self.consumer, stream=STREAM, inbox_prefix=(self.inbox + '.').encode(),
         )
 
