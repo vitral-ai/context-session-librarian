@@ -118,3 +118,64 @@ class OwnerTests(unittest.TestCase):
         with self.assertRaises(BridgeError):
             self.send('ci-notices', 'client')
         self.assertEqual(self.notices(), [])
+
+    def seed_legacy_refusal(self, mid, recipient='claude', state='queued'):
+        """Persist the pre-ownership Hub's exact UUID and packet contract."""
+        import uuid
+        from csl_agent_hub import NOTICE_SOURCE
+        from csl_bridge_store import encode
+        target = self.do('laptop', action='show', name=recipient)
+        target.pop('owner')
+        reason = 'Unapproved pair: client -> builder'
+        legacy_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
+            encode(['remote', 'client', 'builder', mid, reason])))
+        packet = {'id': legacy_id, 'source': NOTICE_SOURCE, 'target': target,
+                  'text': f'refused: client -> builder, {reason}, 2026-11-24T00:00:00Z, message id {mid}',
+                  'in_reply_to': None, 'created_at': '2026-11-24T00:00:00Z'}
+        with self.hub.connect() as db:
+            db.execute('INSERT INTO envelopes VALUES(?,?,?,?,?,?,NULL,?)',
+                       (legacy_id, NOTICE_SOURCE['name'], recipient, target['machine'],
+                        encode(packet), state, 0))
+            db.execute('INSERT INTO hub_notices VALUES(?)', (legacy_id,))
+            self.hub.remember(db, packet, state)
+        return legacy_id, encode(packet)
+
+    def test_upgrade_reuses_queued_and_delivered_legacy_coordinator_notice(self):
+        import uuid
+        from csl_agent_hub import Hub
+        for state in ('queued', 'delivered'):
+            with self.subTest(state=state):
+                mid = str(uuid.uuid4())
+                legacy_id, packet = self.seed_legacy_refusal(mid, state=state)
+                self.hub = Hub(self.path, self.machines)
+                self.set_owner('client', 'claude')
+                for _ in range(2):
+                    with self.assertRaisesRegex(BridgeError, 'Notified.*client, claude'):
+                        self.send('client', 'builder', 'remote', id=mid)
+                with self.hub.connect() as db:
+                    notices = db.execute('SELECT id,target,packet,state FROM envelopes '
+                                         'WHERE source="hub-notifier" AND packet LIKE ?',
+                                         ('%' + mid + '%',)).fetchall()
+                self.assertEqual(sorted(r['target'] for r in notices), ['claude', 'client'])
+                legacy = next(r for r in notices if r['id'] == legacy_id)
+                self.assertEqual((legacy['packet'], legacy['state']), (packet, state))
+
+    def test_legacy_notice_for_other_or_rebound_owner_does_not_suppress_current_notice(self):
+        import uuid
+        for rebound in (False, True):
+            with self.subTest(rebound=rebound):
+                mid = str(uuid.uuid4())
+                legacy_id, packet = self.seed_legacy_refusal(mid)
+                if rebound:
+                    self.do('laptop', action='register', name='claude', cli='claude',
+                            machine='laptop', session=str(uuid.uuid4()))
+                    self.set_owner('client', 'claude')
+                else:
+                    self.set_owner('client', 'other')
+                with self.assertRaises(BridgeError):
+                    self.send('client', 'builder', 'remote', id=mid)
+                with self.hub.connect() as db:
+                    rows = db.execute('SELECT id,packet FROM envelopes WHERE source="hub-notifier" '
+                                      'AND packet LIKE ?', ('%' + mid + '%',)).fetchall()
+                self.assertEqual(len(rows), 3)  # old coordinator plus current sender and owner
+                self.assertEqual(next(r['packet'] for r in rows if r['id'] == legacy_id), packet)
