@@ -241,6 +241,31 @@ class Store:
     def peers(self):
         return {r['name']: decode(r['config']) for r in self.rows('SELECT * FROM peers')}
 
+    def native_operation(self, request_id, thread):
+        rows = self.rows('''SELECT operations.*, native.thread AS pinned_thread
+            FROM operations LEFT JOIN event_native_ids AS native
+            ON native.id=operations.id AND native.purpose='operation' AND native.binding=operations.hash
+            WHERE operations.id=?''', (request_id,))
+        if not rows:
+            return None
+        row = rows[0]
+        if row['pinned_thread'] != thread:
+            raise BridgeError('Native operation ID collision; original thread differs or is unpinned')
+        row['request'] = decode(row['request'])
+        row['result'] = decode(row['result']) if row['result'] else None
+        return row
+
+    @staticmethod
+    def native_delivery(operation, request_id, thread):
+        result = operation['result'] or {}
+        if operation['state'] == 'delivered':
+            if (result.get('state'), result.get('request_id'), result.get('thread_id')) != (
+                    'delivered', request_id, thread):
+                raise BridgeError('Native delivery receipt does not match the request and thread')
+            identifier(result.get('turn_id'))
+            return result
+        return None
+
     def reserve(self, peer, request, *, transaction=None):
         fingerprint = hashlib.sha256(encode(request).encode()).hexdigest()
         def reserve_in(db):

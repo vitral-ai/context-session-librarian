@@ -174,7 +174,9 @@ The first NATS slice supports sending and individual Codex delivery. Install
 
 Set `CSL_NATS_CONFIG` to that file in the existing Codex connector's environment
 to enable receiving. The local name and native thread must already be
-registered. Send with `csl send --nats-config PATH --from alice --to bob --text
+registered. For a NATS-only name, use
+`csl bridge --home HOME agent --nats NAME --thread UUID`.
+Send with `csl send --nats-config PATH --from alice --to bob --text
 "Hello"`. Add `--urgent --reason blocked` for an urgent message. If the send
 outcome is unknown, retry with the printed `--id` and the same text and target.
 
@@ -182,3 +184,5 @@ The local `nats_delivered` table in the connector's private `bridge.sqlite`
 records the pinned native thread, turn, and acknowledgment state. This draft
 handles individual text envelopes. Batch digests, attachments and Claude
 delivery require the subsequent adapter slices.
+During dual delivery, matching CI completion notices reuse the confirmed
+native turn for the same message ID, recipient thread and body.

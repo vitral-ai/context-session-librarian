@@ -16,13 +16,22 @@ from urllib.parse import urlsplit
 import uuid
 
 from csl_bridge_rpc import RuntimeRejected, RuntimeUnavailable
-from csl_bridge_store import BridgeError, Store, contains_findings, encode, frame_message, identifier, name
+from csl_bridge_store import BridgeError, Store, contains_findings, encode, frame_message, identifier
 from csl_version import build_version
 
 NATIVE_PEER = '_nats'  # Outside the public bridge peer namespace.
+CI_SOURCE = 'ci-notices'
+RESERVED_AGENTS = {'owner', 'csl-control', 'csl-ci', CI_SOURCE, 'hub-notifier'}
 MAX_BODY = 48 * 1024
 STREAM = 'CSL_MSG'
 LOG = logging.getLogger(__name__)
+
+
+def agent_name(value, *, registration=False):
+    if (not isinstance(value, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{1,62}', value)
+            or registration and value in RESERVED_AGENTS):
+        raise BridgeError('Invalid NATS agent name')
+    return value
 
 
 def private_file(path):
@@ -38,7 +47,9 @@ def config(path):
         settings = json.loads(private_file(path).read_text(encoding='utf-8'))
         if set(settings) != {'tenant', 'servers', 'cafile', 'connector_home', 'agents'}:
             raise ValueError
-        tenant = name(settings['tenant'])
+        tenant = settings['tenant']
+        if not isinstance(tenant, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,62}', tenant):
+            raise ValueError
         if not isinstance(settings['servers'], list) or not settings['servers']:
             raise ValueError
         for server in settings['servers']:
@@ -48,8 +59,8 @@ def config(path):
                 raise ValueError
         settings['connector_home'] = Path(settings['connector_home']).expanduser().absolute()
         for agent, endpoint in settings['agents'].items():
-            name(agent)
-            if agent == 'owner' or set(endpoint) != {'credentials', 'session'}:
+            agent_name(agent, registration=True)
+            if set(endpoint) != {'credentials', 'session'}:
                 raise ValueError
             identifier(endpoint['session'])
             endpoint['credentials'] = private_file(endpoint['credentials'])
@@ -159,6 +170,25 @@ class Ledger:
             ORDER BY delivered_at LIMIT 32''', (*self.key, self.thread))
 
 
+def ci_completion_fingerprint(source, target, body):
+    if source == CI_SOURCE:
+        return hashlib.sha256(encode([source, target, body]).encode('utf-8')).hexdigest()
+    return None
+
+
+def same_ci_completion(operation, expected):
+    request = operation['request']
+    if operation['peer'] == NATIVE_PEER:
+        actual = request.get('ci_completion')
+    elif operation['peer'] == 'agent-hub' and request.get('op') == 'followup':
+        actual = ci_completion_fingerprint(request['source'], request['target'], request['text'])
+    else:
+        actual = None
+    # Only CI has a shared sender identity and a canonical ID/body across transports.
+    if expected is None or actual != expected:
+        raise BridgeError('Native operation ID collision; CI completion does not match')
+
+
 def deliver_codex(connector, thread, envelope, fingerprint):
     target = envelope['to']
     if connector.stop.is_set() or connector.client_only or connector.agents.get(target) != thread:
@@ -170,15 +200,32 @@ def deliver_codex(connector, thread, envelope, fingerprint):
             'version': 1, 'op': 'followup', 'id': envelope['id'], 'source': envelope['from'],
             'target': target, 'text': '', 'nats_fingerprint': fingerprint,
         }
-        old = connector.store.reserve(NATIVE_PEER, request)
-        if old and old['state'] != 'pending':
-            result = old['result'] or {}
+        completion = None
+        if envelope.get('kind') == 'ci' and not envelope.get('reply_to'):
+            completion = ci_completion_fingerprint(envelope['from'], target, envelope['body'])
+        if completion:
+            request['ci_completion'] = completion
+        old = connector.store.native_operation(envelope['id'], thread)
+        if old:
+            if old['peer'] != NATIVE_PEER:
+                same_ci_completion(old, completion)
+            else:
+                # Reuse the exact persisted request, including pre-upgrade rows.
+                original = old['request']
+                if 'ci_completion' not in original:
+                    request.pop('ci_completion', None)
+                if request != original:
+                    raise BridgeError('NATS operation ID collision; envelope differs')
+                request = original
+            if old['peer'] != NATIVE_PEER or old['state'] != 'pending':
+                receipt = Store.native_delivery(old, envelope['id'], thread)
+                return receipt['turn_id'] if receipt else None
         else:
-            text = frame_message(envelope['from'], envelope['id'], None, envelope['body'])
-            result = connector.invoke(NATIVE_PEER, request, native_text=text)
-        if result.get('state') == 'delivered' and result.get('thread_id') == thread:
-            return result['turn_id']
-        return None
+            connector.store.reserve(NATIVE_PEER, request)
+        text = frame_message(envelope['from'], envelope['id'], None, envelope['body'])
+        result = connector.invoke(NATIVE_PEER, request, native_text=text)
+        receipt = Store.native_delivery({'state': result['state'], 'result': result}, envelope['id'], thread)
+        return receipt['turn_id'] if receipt else None
 
 
 def validate_ack_subject(subject, consumer):
@@ -215,7 +262,7 @@ async def receive_one(client, ledger, message, deliver):
             envelope.get('items') or envelope.get('attachments')):
         raise BridgeError('Envelope is unsupported by the first NATS adapter slice')
     message_id = identifier(envelope.get('id'))
-    name(envelope.get('from'))
+    agent_name(envelope.get('from'))
     body_text(envelope.get('body'))
     fingerprint = hashlib.sha256(encode(envelope).encode('utf-8')).hexdigest()
     row = ledger.get(message_id, fingerprint)
@@ -308,8 +355,8 @@ def remember_send(store, tenant, envelope):
 
 def send_command(args):
     settings = config(args.nats_config)
-    source = name(args.source or os.environ.get('CSL_AGENT'))
-    target = name(args.to)
+    source = agent_name(args.source or os.environ.get('CSL_AGENT'), registration=True)
+    target = agent_name(args.to, registration=True)
     if source == target or source not in settings['agents']:
         raise BridgeError('NATS sender must be locally configured and different from the target')
     text = args.text

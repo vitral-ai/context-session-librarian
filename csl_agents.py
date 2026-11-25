@@ -109,17 +109,29 @@ def deliver(connector, packet):
         return result
     if target['cli'] != 'codex' or connector.client_only:
         raise BridgeError('No native Codex runtime on this delivery home')
-    with connector.locks[target['name']]:
-        old = connector.store.rows('SELECT state,result FROM operations WHERE id=?', (packet['id'],))
-        if old and old[0]['state'] in ('delivered', 'uncertain', 'invoking'):
-            return decode(old[0]['result']) if old[0]['result'] else {'state': old[0]['state']}
-        state = connector.current(target['name'])
+    agent, thread = target['name'], target['session']
+    with connector.locks[agent]:
+        if connector.store.agents().get(agent) != thread:
+            raise BridgeError('Local endpoint differs from registered hub session')
+        request = {'version': 1, 'op': 'followup', 'id': packet['id'], 'source': source['name'],
+                   'session': source['session'], 'target': agent, 'text': packet['text']}
+        old = connector.store.native_operation(packet['id'], thread)
+        if old:
+            if old['peer'] != peer:
+                from csl_nats import NATIVE_PEER, ci_completion_fingerprint, same_ci_completion
+                if old['peer'] != NATIVE_PEER or packet.get('in_reply_to') is not None:
+                    raise BridgeError('Request ID collision; peer differs')
+                same_ci_completion(old, ci_completion_fingerprint(source['name'], agent, packet['text']))
+                return connector.store.native_delivery(old, packet['id'], thread) or {'state': 'queued'}
+            if old['request'] != request:
+                raise BridgeError('Request ID collision; content differs')
+            if old['state'] != 'pending':
+                return old['result'] or {'state': old['state']}
+        state = connector.current(agent)
         # Active Codex turns accept turn/steer at their next input boundary.
         # Waiting for idle starves recipients that keep working in one turn.
         if state['status'] not in ('idle', 'active'):
             return {'state': 'queued', 'reason': state['status']}
-        request = {'version': 1, 'op': 'followup', 'id': packet['id'], 'source': source['name'],
-                   'session': source['session'], 'target': target['name'], 'text': packet['text']}
         if old:
             return connector.invoke(peer, request)
         return connector.incoming(peer, request)

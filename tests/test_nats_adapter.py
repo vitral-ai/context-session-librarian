@@ -1,14 +1,18 @@
 import json
 from pathlib import Path
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 from threading import Event, RLock
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 import uuid
 
+from csl_agents import deliver as deliver_hub
 from csl_bridge_store import BridgeError, Store
-from csl_nats import Client, Ledger, body_text, deliver_codex, receive_one, recover_acks, remember_send
+from csl_ci_notice import notice_request
+from csl_nats import Client, Ledger, agent_name, body_text, deliver_codex, receive_one, recover_acks, remember_send
 
 
 class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
@@ -117,7 +121,8 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         def invoke(_peer, request, *, native_text):
             self.assertTrue(native_text.endswith('\nend'))
             self.assertGreater(len(native_text), 12000)
-            result = {'state': 'delivered', 'thread_id': self.thread, 'turn_id': self.turn}
+            result = {'state': 'delivered', 'request_id': request['id'],
+                      'thread_id': self.thread, 'turn_id': self.turn}
             self.store.operation(request['id'], 'delivered', result)
             return result
 
@@ -130,6 +135,96 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         native.invoke.assert_called_once()
         with self.assertRaises(BridgeError):
             deliver_codex(native, self.thread, env, 'different')
+
+    def dual_transport(self):
+        with self.store.transaction() as db:
+            db.execute("INSERT INTO agents VALUES ('alice', ?)", (self.thread,))
+        notice = notice_request({'repository': 'example/project', 'source': 'ci-notices'}, {
+            'action': 'notice', 'repository': 'example/project', 'number': 100,
+            'branch': 'codex/alice/test', 'workflow': 'Tests', 'run_id': 10,
+            'attempt': 1, 'sha': 'a' * 40, 'results': {'completion': 'success'},
+        })
+        self.id = notice['id']
+        packet = {
+            'id': self.id, 'text': notice['text'], 'in_reply_to': None,
+            'source': {'name': notice['source'], 'session': str(uuid.uuid4()), 'machine': 'ci'},
+            'target': {'name': 'alice', 'session': self.thread, 'machine': 'local', 'cli': 'codex'},
+        }
+        envelope = {'v': 1, 'id': self.id, 'from': notice['source'], 'to': 'alice',
+                    'kind': 'ci', 'body': notice['text']}
+        self.message.data = json.dumps(envelope).encode()
+        config = patch('csl_agents.config', return_value={'machine': 'local'})
+        config.start()
+        self.addCleanup(config.stop)
+
+        def invoke(_peer, request, **_):
+            result = {'state': 'delivered', 'request_id': request['id'],
+                      'thread_id': self.thread, 'turn_id': self.turn}
+            self.store.operation(request['id'], 'delivered', result)
+            return result
+
+        native = SimpleNamespace(
+            stop=Event(), client_only=False, agents={'alice': self.thread}, peers={},
+            locks={'alice': RLock()}, store=self.store, current=lambda _: {'status': 'idle'},
+            invoke=Mock(side_effect=invoke),
+        )
+
+        def incoming(peer, request):
+            self.store.reserve(peer, request)
+            return native.invoke(peer, request)
+
+        native.incoming = incoming
+        return native, packet
+
+    async def test_hub_first_acks_the_native_turn_from_nats(self):
+        native, packet = self.dual_transport()
+        receipt = deliver_hub(native, packet)
+        adapter = lambda envelope, fingerprint: deliver_codex(native, self.thread, envelope, fingerprint)
+        self.assertTrue(await receive_one(self.client, self.ledger, self.message, adapter))
+        self.assertEqual(self.rows()[0]['turn'], receipt['turn_id'])
+        self.assertEqual(self.rows()[0]['ack_state'], 'acked')
+        native.invoke.assert_called_once()
+
+    async def test_nats_first_reuses_turn_and_refuses_collisions_from_hub(self):
+        native, packet = self.dual_transport()
+        adapter = lambda envelope, fingerprint: deliver_codex(native, self.thread, envelope, fingerprint)
+        await receive_one(self.client, self.ledger, self.message, adapter)
+        self.assertEqual(deliver_hub(native, packet)['turn_id'], self.turn)
+        for update in ({'text': 'different'}, {'in_reply_to': str(uuid.uuid4())},
+                       {'source': {**packet['source'], 'name': 'someone-else'}}):
+            with self.assertRaises(BridgeError):
+                deliver_hub(native, {**packet, **update})
+        replacement = str(uuid.uuid4())
+        native.agents['alice'] = replacement
+        with self.store.transaction() as db:
+            db.execute("UPDATE agents SET thread=? WHERE name='alice'", (replacement,))
+        with self.assertRaisesRegex(BridgeError, 'original thread differs'):
+            deliver_hub(native, {**packet, 'target': {**packet['target'], 'session': replacement}})
+        native.invoke.assert_called_once()
+
+    async def test_other_transport_cannot_take_over_a_pending_handoff(self):
+        native, packet = self.dual_transport()
+        native.invoke.side_effect = None
+        native.invoke.return_value = {'state': 'pending'}
+        deliver_hub(native, packet)
+        adapter = lambda envelope, fingerprint: deliver_codex(native, self.thread, envelope, fingerprint)
+        self.assertFalse(await receive_one(self.client, self.ledger, self.message, adapter))
+        self.message.ack_sync.assert_not_awaited()
+        native.invoke.assert_called_once()
+
+    def test_extended_names_can_be_registered_and_legacy_rules_still_apply(self):
+        longest = '2' + 'a' * 62
+        for valid in ('01', longest):
+            self.assertEqual(agent_name(valid, registration=True), valid)
+        for invalid in ('a', longest + 'a', 'a.b', 'ci-notices'):
+            with self.assertRaises(BridgeError):
+                agent_name(invalid, registration=True)
+        cli = Path(__file__).resolve().parents[1] / 'csl'
+        command = [sys.executable, str(cli), 'bridge', '--home', str(self.home),
+                   'agent', longest, '--thread', self.thread]
+        self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
+        subprocess.run([*command, '--nats'], check=True, capture_output=True)
+        self.assertEqual(self.store.agents()[longest], self.thread)
 
     def test_unsure_send_keeps_creation_and_build_identity(self):
         env = {'id': self.id, 'from': 'alice', 'to': 'bob', 'client_version': 'before', 'created_at': 'before'}
