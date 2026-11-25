@@ -54,6 +54,24 @@ func (s *Service) archiveMessage(ctx context.Context, archive jetstream.Stream, 
 	return archive.GetMsg(ctx, 1, jetstream.WithGetMsgSubject(s.subject("archive."+id+".*.*")))
 }
 
+func (s *Service) checkArchiveID(ctx context.Context, id string) error {
+	archive, err := s.archiveStream(ctx)
+	if errors.Is(err, jetstream.ErrStreamNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, err = s.archiveMessage(ctx, archive, id)
+	if errors.Is(err, jetstream.ErrMsgNotFound) {
+		return nil
+	}
+	if err == nil {
+		return invalid("message ID was already used")
+	}
+	return err
+}
+
 func (s *Service) importHubHistory(ctx context.Context, row *hubHistoryRow, preview bool) (any, error) {
 	if !row.valid() || row.CreatedAt.After(s.clock().Add(time.Minute)) {
 		return nil, invalid("invalid settled Hub history row")

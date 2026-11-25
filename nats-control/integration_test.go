@@ -212,6 +212,59 @@ func TestOperatorMode(t *testing.T) {
 		if err != nil || live.State.Msgs != 0 {
 			t.Fatalf("import wrote to the live stream: %v, %v", live, err)
 		}
+		admin(map[string]any{"action": "allow", "from": "worker-a", "to": "worker-b"})
+		duplicate := Envelope{V: 1, ID: row.ID, To: "worker-b", Kind: "message",
+			Urgency: "normal", CreatedAt: stamp, Body: row.Body, ClientVersion: "1.3.0+abc"}
+		call(peer, "send.worker-a", duplicate, "invalid")
+		duplicate.ID, duplicate.Kind, duplicate.ReplyTo = randomID(), "reply", &row.ID
+		call(peer, "send.worker-a", duplicate, "not_found")
+
+		reply := Envelope{V: 1, ID: randomID(), To: "worker-a", Kind: "reply",
+			Urgency: "normal", CreatedAt: time.Now().UTC(), Body: "reply to imported Hub message",
+			ReplyTo: &row.ID, ClientVersion: "1.3.0+abc"}
+		call(third, "send.worker-b", reply, "forbidden")
+		admin(map[string]any{"action": "allow", "from": "worker-b", "to": "worker-a"})
+		worker, revision, err := readState[Agent](ctx, service.state, "agent.worker-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		rebound := worker
+		rebound.Machine = "replacement"
+		if err := writeState(ctx, service.state, "agent.worker-a", rebound, revision); err != nil {
+			t.Fatal(err)
+		}
+		call(third, "send.worker-b", reply, "not_found")
+		_, revision, err = readState[Agent](ctx, service.state, "agent.worker-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := writeState(ctx, service.state, "agent.worker-a", worker, revision); err != nil {
+			t.Fatal(err)
+		}
+		refused := row
+		refused.ID, refused.State = randomID(), "refused"
+		admin(map[string]any{"action": "import-hub-history", "history": &refused})
+		reply.ReplyTo = &refused.ID
+		call(third, "send.worker-b", reply, "not_found")
+		reply.ReplyTo = &row.ID
+		call(third, "send.worker-b", reply, "")
+		saved, _, err := readState[messageRecord](ctx, service.state, "message."+reply.ID)
+		if err != nil || saved.Envelope.ReplyTo == nil || *saved.Envelope.ReplyTo != row.ID || saved.Sequence == 0 {
+			t.Fatalf("reply to archive did not reach the live stream: %#v, %v", saved, err)
+		}
+		call(peer, "ctl.receipt.worker-a", sendResult{reply.ID, "acked"}, "")
+		call(peer, "ctl.complete.worker-a", map[string]string{"with": "worker-b"}, "")
+		call(third, "ctl.complete.worker-b", map[string]string{"with": "worker-a"}, "")
+		if err := service.stream.DeleteMsg(ctx, saved.Sequence); err != nil {
+			t.Fatal(err)
+		}
+		refusedMessage, err := service.archiveMessage(ctx, archiveStream, refused.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := archiveStream.DeleteMsg(ctx, refusedMessage.Sequence); err != nil {
+			t.Fatal(err)
+		}
 		if err := archiveStream.DeleteMsg(ctx, archive.Sequence); err != nil {
 			t.Fatal(err)
 		}

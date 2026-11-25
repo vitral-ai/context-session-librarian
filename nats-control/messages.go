@@ -163,12 +163,19 @@ func (s *Service) send(ctx context.Context, caller string, body []byte) (sendRes
 	}
 	if envelope.ReplyTo != nil {
 		parent, _, err := readState[messageRecord](ctx, s.state, "message."+*envelope.ReplyTo)
-		if errors.Is(err, jetstream.ErrKeyNotFound) ||
-			(err == nil && (parent.Envelope.To != caller || parent.Envelope.From != envelope.To)) {
-			return sendResult{}, missing("reply target does not belong to this pair")
-		}
-		if err != nil {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			matches, err := s.historyRecords(ctx, caller, envelope.To, *envelope.ReplyTo)
+			if err != nil {
+				return sendResult{}, err
+			}
+			if len(matches) == 1 && matches[0].State == "delivered" {
+				parent.Envelope = matches[0].Envelope
+			}
+		} else if err != nil {
 			return sendResult{}, err
+		}
+		if parent.Envelope.To != caller || parent.Envelope.From != envelope.To {
+			return sendResult{}, missing("reply target does not belong to this pair")
 		}
 	}
 	if err := s.authorizeAttachments(ctx, envelope); err != nil {
@@ -181,6 +188,9 @@ func (s *Service) send(ctx context.Context, caller string, body []byte) (sendRes
 			return sendResult{}, invalid("message ID was already used")
 		}
 	} else if errors.Is(err, jetstream.ErrKeyNotFound) {
+		if err := s.checkArchiveID(ctx, envelope.ID); err != nil {
+			return sendResult{}, err
+		}
 		now := s.acceptanceTime()
 		interval, err := deliveryInterval(recipient.Delivery)
 		if err != nil {
