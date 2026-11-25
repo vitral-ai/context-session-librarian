@@ -48,8 +48,15 @@ func TestOperatorMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	sys := fixtureConnect(t, url, "fixture-sys", fixtureCredentials(t, broker.system, "fixture-sys", nil, nil))
+	provisioner := Provisioner{
+		Operator: broker.operator, System: sys, Directory: t.TempDir(),
+		ConnectTenant: func(path string) (*nats.Conn, error) {
+			return nats.Connect(url, nats.UserCredentials(path))
+		},
+	}
 	service, err := Open(ctx, control, Config{
-		Tenant: "vi", Account: public, Signer: account, Domains: []string{"fixture"},
+		CreateTenant: provisioner.Create,
+		Tenant:       "vi", Account: public, Signer: account, Domains: []string{"fixture"},
 		Upgrade: "csl self-upgrade",
 		RevokeUsers: func(ctx context.Context, keys []string, at time.Time) error {
 			for _, key := range keys {
@@ -220,6 +227,37 @@ func TestOperatorMode(t *testing.T) {
 		t.Fatal("digest item bookkeeping did not recover")
 	}
 
+	// Simulate JetStream acceptance followed by a crash before saving the
+	// publish sequence. A later permission change cannot undo the accepted write.
+	saved, revision, err := readState[messageRecord](ctx, service.state, "message."+digest.ID)
+	if err != nil || saved.PublishFrom == 0 || saved.Sequence == 0 {
+		t.Fatal("digest lacked publication intent and sequence")
+	}
+	expectedSequence := saved.Sequence
+	saved.Sequence = 0
+	if _, err := service.writeExpiring(ctx, "message."+digest.ID, saved, revision, messageAge); err != nil {
+		t.Fatal(err)
+	}
+	recovered.Sequence = 0
+	_, revision, err = readState[messageRecord](ctx, service.state, "message."+first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.writeExpiring(ctx, "message."+first.ID, recovered, revision, messageAge); err != nil {
+		t.Fatal(err)
+	}
+	admin(map[string]any{"action": "deny", "from": "sender", "to": "worker-a"})
+	if err := service.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{digest.ID, first.ID} {
+		got, _, err := readState[messageRecord](ctx, service.state, "message."+id)
+		if err != nil || got.Sequence != expectedSequence {
+			t.Fatalf("accepted digest recovery for %s: sequence=%d err=%v", id, got.Sequence, err)
+		}
+	}
+	admin(map[string]any{"action": "allow", "from": "sender", "to": "worker-a"})
+
 	call(peer, "ctl.settings.worker-a", map[string]string{"delivery": "immediate"}, "")
 	ci := fixtureConnect(t, url, "csl-ci", fixtureCredentials(t, account, "csl-ci", []string{"csl.vi.ci.>"}, nil))
 	noticeID := randomID()
@@ -263,6 +301,12 @@ func TestOperatorMode(t *testing.T) {
 	}
 	assertResponseCode(t, fixtureRequest(t, ctx, owner, "csl.vi.ctl.admin.owner",
 		map[string]any{"action": "export", "tenant": "foreign"}), "forbidden")
+
+	testTenantLifecycle(t, ctx, url, owner, js, provisioner)
+
+	if contents := admin(map[string]any{"action": "export", "tenant": "vi"}); !bytes.Contains(contents, []byte("file."+id)) {
+		t.Fatal("erasing the disposable tenant changed vi data")
+	}
 
 	expiring := []byte("resume after checkpoint expiration")
 	expireID := fmt.Sprintf("%x", sha256.Sum256(expiring))
@@ -355,6 +399,59 @@ func TestOperatorMode(t *testing.T) {
 	}
 	if _, err := foreign.Request("csl.vi.ctl.admin.owner", []byte(`{"action":"versions"}`), 500*time.Millisecond); err == nil {
 		t.Fatal("foreign tenant reached the primary control subjects")
+	}
+	assertResponseCode(t, fixtureRequest(t, ctx, owner, "csl.vi.ctl.admin.owner",
+		map[string]any{"action": "settings", "notices_to": "unregistered"}), "not_found")
+	admin(map[string]any{"action": "settings", "notices_to": "sender"})
+	noticeRequest := first
+	noticeRequest.ID, noticeRequest.Body, noticeRequest.To = randomID(), "private text", "unregistered"
+	for range 2 {
+		call(sender, "send.sender", noticeRequest, "not_found")
+	}
+	admin(map[string]any{"action": "deny", "from": "sender", "to": "worker-a"})
+	noticeRequest.To = "worker-a"
+	for range 2 {
+		call(sender, "send.sender", noticeRequest, "forbidden")
+		call(sender, "ctl.hello.sender", map[string]string{"client_version": "1.1.0+abc"}, "outdated_client")
+	}
+	admin(map[string]any{"action": "allow", "from": "sender", "to": "worker-a"})
+	noticeRequest.Urgency, noticeRequest.Reason = "urgent", "blocked"
+	for range 3 {
+		noticeRequest.ID = randomID()
+		call(sender, "send.sender", noticeRequest, "")
+	}
+	ciUnknown := []byte(`{"id":"` + randomID() + `","body":"quiet CI drop"}`)
+	if err := ci.Publish("csl.vi.ci.unregistered", ciUnknown); err != nil {
+		t.Fatal(err)
+	}
+	if err := ci.FlushWithContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := service.messages(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNotices := map[string]bool{
+		"Unknown target (sender to unregistered).": false,
+		"Unapproved pair (sender to worker-a).":    false,
+		"Outdated client (sender).":                false,
+		"Urgent cap reached (sender to worker-a).": false,
+	}
+	for _, entry := range entries {
+		env := entry.record.Envelope
+		if env.To != "sender" || env.Kind != "system" {
+			continue
+		}
+		seen, expected := wantNotices[env.Body]
+		if seen || !expected || entry.record.Sequence == 0 {
+			t.Fatalf("unexpected or repeated sanitized system notice: %q", env.Body)
+		}
+		wantNotices[env.Body] = true
+	}
+	for body, seen := range wantNotices {
+		if !seen {
+			t.Fatalf("missing system notice: %q", body)
+		}
 	}
 }
 

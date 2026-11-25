@@ -57,6 +57,7 @@ type messageRecord struct {
 	AcceptedAt  time.Time `json:"accepted_at"`
 	ReadyAt     time.Time `json:"ready_at"`
 	Sequence    uint64    `json:"sequence,omitempty"`
+	PublishFrom uint64    `json:"publish_from,omitempty"`
 }
 
 type messageState struct {
@@ -112,9 +113,6 @@ func (s *Service) send(ctx context.Context, caller string, body []byte) (sendRes
 	if err := s.activeAgent(ctx, caller); err != nil {
 		return sendResult{}, err
 	}
-	if err := s.activeAgent(ctx, envelope.To); err != nil {
-		return sendResult{}, err
-	}
 	if envelope.From != "" && envelope.From != caller {
 		return sendResult{}, forbidden("sender does not match the authenticated subject")
 	}
@@ -133,7 +131,7 @@ func (s *Service) send(ctx context.Context, caller string, body []byte) (sendRes
 		return sendResult{}, err
 	}
 	fingerprint := fmt.Sprintf("%x", sha256.Sum256(raw))
-	warn, err := s.checkVersion(ctx, envelope.ClientVersion)
+	warn, err := s.checkVersion(ctx, caller, envelope.To, envelope.ClientVersion)
 	if err != nil {
 		return sendResult{}, err
 	}
@@ -144,16 +142,21 @@ func (s *Service) send(ctx context.Context, caller string, body []byte) (sendRes
 	if err != nil {
 		return sendResult{}, err
 	}
-	allowed, _, err := readState[bool](ctx, s.state, "pair."+caller+"."+envelope.To)
-	if errors.Is(err, jetstream.ErrKeyNotFound) || (err == nil && !allowed) {
-		return sendResult{}, forbidden("pair permission is required")
-	}
-	if err != nil {
+	if err := s.activeAgent(ctx, envelope.To); err != nil {
 		return sendResult{}, err
 	}
 	recipient, _, err := readState[Agent](ctx, s.state, "agent."+envelope.To)
 	if errors.Is(err, jetstream.ErrKeyNotFound) {
+		s.notice(ctx, "Unknown target", caller, envelope.To)
 		return sendResult{}, missing("unknown recipient")
+	}
+	if err != nil {
+		return sendResult{}, err
+	}
+	allowed, _, err := readState[bool](ctx, s.state, "pair."+caller+"."+envelope.To)
+	if errors.Is(err, jetstream.ErrKeyNotFound) || (err == nil && !allowed) {
+		s.notice(ctx, "Unapproved pair", caller, envelope.To)
+		return sendResult{}, forbidden("pair permission is required")
 	}
 	if err != nil {
 		return sendResult{}, err
@@ -197,6 +200,9 @@ func (s *Service) send(ctx context.Context, caller string, body []byte) (sendRes
 			if err := s.admitUrgent(ctx, &envelope, now); err != nil {
 				return sendResult{}, err
 			}
+		}
+		if err := s.admitRate(ctx, now); err != nil {
+			return sendResult{}, err
 		}
 		record = messageRecord{Envelope: envelope, Fingerprint: fingerprint, AcceptedAt: now, ReadyAt: now}
 		if envelope.Urgency == "normal" && interval != 0 {
@@ -276,6 +282,23 @@ func validateSend(caller string, envelope Envelope) error {
 	return nil
 }
 
+func (s *Service) admitRate(ctx context.Context, now time.Time) error {
+	policy, err := s.deliveryPolicy(ctx)
+	if err != nil {
+		return err
+	}
+	key := "rate." + now.Truncate(time.Minute).Format("200601021504")
+	count, revision, err := readState[int](ctx, s.state, key)
+	if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
+		return err
+	}
+	if count >= policy.RatePerMinute {
+		return forbidden("tenant message rate limit reached")
+	}
+	_, err = s.writeExpiring(ctx, key, count+1, revision, time.Minute)
+	return err
+}
+
 type urgentUse struct {
 	ID string    `json:"id"`
 	At time.Time `json:"at"`
@@ -301,6 +324,7 @@ func (s *Service) admitUrgent(ctx context.Context, envelope *Envelope, now time.
 		envelope.Urgency, envelope.Reason = "normal", ""
 		s.config.Logger.Warn("urgent message downgraded", "tenant", s.config.Tenant,
 			"agent", envelope.From, "message_id", envelope.ID)
+		s.notice(ctx, "Urgent cap reached", envelope.From, envelope.To)
 		return nil
 	}
 	_, err = s.writeExpiring(ctx, key, append(uses, urgentUse{envelope.ID, now}), revision, time.Hour)
@@ -378,10 +402,25 @@ func (s *Service) publish(ctx context.Context, envelope Envelope) (uint64, error
 }
 
 func (s *Service) publishRecord(ctx context.Context, record messageRecord, revision uint64) error {
+	if record.Envelope.Kind == "digest" && record.PublishFrom == 0 {
+		info, err := s.stream.Info(ctx)
+		if err != nil {
+			return err
+		}
+		record.PublishFrom = info.State.LastSeq + 1
+		revision, err = s.writeExpiring(ctx, "message."+record.Envelope.ID, record, revision, messageAge)
+		if err != nil {
+			return err
+		}
+	}
 	sequence, err := s.publish(ctx, record.Envelope)
 	if err != nil {
 		return err
 	}
+	return s.finishPublication(ctx, record, revision, sequence)
+}
+
+func (s *Service) finishPublication(ctx context.Context, record messageRecord, revision, sequence uint64) error {
 	if err := s.markNewWork(ctx, record.Envelope); err != nil {
 		return err
 	}

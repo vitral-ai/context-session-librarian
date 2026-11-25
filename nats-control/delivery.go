@@ -186,14 +186,22 @@ func (s *Service) receipt(ctx context.Context, caller string, body []byte) (any,
 }
 
 type tenantPolicy struct {
-	Retention int `json:"retention"`
-	UrgentCap int `json:"urgent_cap"`
+	Retention     int   `json:"retention"`
+	UrgentCap     int   `json:"urgent_cap"`
+	FileBytes     int64 `json:"file_bytes,omitempty"`
+	RatePerMinute int   `json:"rate_per_minute,omitempty"`
 }
 
 func (s *Service) deliveryPolicy(ctx context.Context) (tenantPolicy, error) {
 	policy, _, err := readState[tenantPolicy](ctx, s.state, "policy.delivery")
 	if errors.Is(err, jetstream.ErrKeyNotFound) {
-		return tenantPolicy{defaultRetain, 10}, nil
+		return tenantPolicy{Retention: defaultRetain, UrgentCap: 10, FileBytes: maxFile, RatePerMinute: 600}, nil
+	}
+	if policy.FileBytes == 0 {
+		policy.FileBytes = maxFile
+	}
+	if policy.RatePerMinute == 0 {
+		policy.RatePerMinute = 600
 	}
 	return policy, err
 }
@@ -305,6 +313,13 @@ func (s *Service) Tick(ctx context.Context) error {
 			continue
 		}
 		if entry.record.Sequence == 0 {
+			sequence, err := s.acceptedDigest(ctx, entry)
+			if err != nil {
+				return err
+			}
+			entry.record.Sequence = sequence
+		}
+		if entry.record.Sequence == 0 {
 			state, _, err := readState[messageState](ctx, s.state, "msg."+env.ID)
 			if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
 				return err
@@ -397,6 +412,30 @@ func (s *Service) Tick(ctx context.Context) error {
 		}
 	}
 	return s.sendReminders(ctx, now)
+}
+
+// The publish intent records the earliest possible stream sequence. A
+// confirmed broker write remains authoritative even after pair policy changes.
+func (s *Service) acceptedDigest(ctx context.Context, entry messageEntry) (uint64, error) {
+	env := entry.record.Envelope
+	next := entry.record.PublishFrom
+	if next == 0 {
+		return 0, nil
+	}
+	subject := s.subject("agent." + env.To + ".inbox")
+	for {
+		msg, err := s.stream.GetMsg(ctx, next, jetstream.WithGetMsgSubject(subject))
+		if errors.Is(err, jetstream.ErrMsgNotFound) {
+			return 0, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+		if msg.Header.Get("Nats-Msg-Id") == env.ID {
+			return msg.Sequence, s.finishPublication(ctx, entry.record, entry.revision, msg.Sequence)
+		}
+		next = msg.Sequence + 1
+	}
 }
 
 func (s *Service) canDeliver(ctx context.Context, env Envelope) (bool, error) {

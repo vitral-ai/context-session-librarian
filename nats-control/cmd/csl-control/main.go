@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -37,6 +39,8 @@ func run() (string, error) {
 	domains := flag.String("domains", "", "comma-separated authorized JetStream domains")
 	upgrade := flag.String("upgrade-command", "", "command operators provide to upgrade CSL")
 	revoke := flag.String("revoke-helper", "", "tenant-scoped account JWT updater")
+	create := flag.String("create-tenant-helper", "", "delegated operator tenant provisioner")
+	erase := flag.String("allow-erase-tenant", "", "exact disposable tenant ID authorized for erasure")
 	flag.Parse()
 	if *broker == "" || *creds == "" || *signerFile == "" {
 		return *tenant, errors.New("nats, credentials and signer-file are required")
@@ -67,7 +71,7 @@ func run() (string, error) {
 		return *tenant, err
 	}
 	defer conn.Close()
-	config := control.Config{Tenant: *tenant, Account: *account, Signer: signer, Upgrade: *upgrade}
+	config := control.Config{Tenant: *tenant, Account: *account, Signer: signer, Upgrade: *upgrade, EraseTenant: *erase}
 	if *domains != "" {
 		config.Domains = strings.Split(*domains, ",")
 	}
@@ -78,6 +82,22 @@ func run() (string, error) {
 				return errors.New("tenant account JWT update failed")
 			}
 			return nil
+		}
+	}
+	if *create != "" {
+		config.CreateTenant = func(ctx context.Context, request control.TenantRequest) (control.TenantInfo, error) {
+			out, err := exec.CommandContext(ctx, *create, request.Tenant,
+				strconv.FormatInt(request.StorageBytes, 10), strconv.FormatInt(request.FileBytes, 10),
+				strconv.Itoa(request.RatePerMinute)).Output()
+			if err != nil {
+				return control.TenantInfo{}, errors.New("tenant provisioning failed")
+			}
+			var info control.TenantInfo
+			if json.Unmarshal(out, &info) != nil || info.Tenant != request.Tenant ||
+				!nkeys.IsValidPublicAccountKey(info.Account) {
+				return control.TenantInfo{}, errors.New("tenant provisioner returned an invalid public identity")
+			}
+			return info, nil
 		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

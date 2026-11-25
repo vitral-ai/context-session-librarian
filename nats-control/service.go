@@ -19,13 +19,15 @@ import (
 )
 
 type Config struct {
-	Tenant      string
-	Account     string
-	Signer      nkeys.KeyPair
-	Upgrade     string
-	Logger      *slog.Logger
-	Domains     []string
-	RevokeUsers func(context.Context, []string, time.Time) error
+	Tenant       string
+	Account      string
+	Signer       nkeys.KeyPair
+	Upgrade      string
+	Logger       *slog.Logger
+	Domains      []string
+	RevokeUsers  func(context.Context, []string, time.Time) error
+	CreateTenant func(context.Context, TenantRequest) (TenantInfo, error)
+	EraseTenant  string
 }
 
 type Service struct {
@@ -280,7 +282,7 @@ func (s *Service) clientVersion(ctx context.Context, name, verb string, body []b
 	if request.Status != "" && request.Status != "idle" && request.Status != "working" {
 		return nil, invalid("status must be idle or working")
 	}
-	warn, err := s.checkVersion(ctx, request.ClientVersion)
+	warn, err := s.checkVersion(ctx, name, "", request.ClientVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +305,7 @@ func (s *Service) clientVersion(ctx context.Context, name, verb string, body []b
 	return request, nil
 }
 
-func (s *Service) checkVersion(ctx context.Context, client string) (bool, error) {
+func (s *Service) checkVersion(ctx context.Context, caller, target, client string) (bool, error) {
 	policy, _, err := readState[VersionPolicy](ctx, s.state, "policy.versions")
 	if err != nil {
 		return false, err
@@ -316,6 +318,7 @@ func (s *Service) checkVersion(ctx context.Context, client string) (bool, error)
 		return false, invalid(err.Error())
 	}
 	if outdated {
+		s.notice(ctx, "Outdated client", caller, target)
 		return false, &apiError{"outdated_client", "Upgrade with: " + s.config.Upgrade}
 	}
 	return warn, nil

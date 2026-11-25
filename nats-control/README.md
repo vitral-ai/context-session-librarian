@@ -43,3 +43,29 @@ denies further calls from a revoked agent even while the broker is updating.
 Only start control beside the active primary. During planned promotion, stop
 the old control instance before starting the same build and tenant
 configuration against the promoted writable streams.
+
+## Tenant administration
+
+The authenticated owner can set `{"action":"settings","notices_to":"agent-name"}`
+to route sanitized system notices to a registered agent. Notices contain the
+reason and agent identities, and repeats of the same reason and pair are
+coalesced in a ten-minute window. CI notices to unknown agents remain quiet.
+
+Build `./cmd/csl-operator` for the host that already holds the operator seed
+and the SYS credential. This keeps operator privileges out of the tenant
+control process. Configure `--create-tenant-helper` with a delegated wrapper
+that passes its four positional arguments (tenant ID, storage bytes, maximum
+file bytes, messages per minute) to `csl-operator … create-tenant`. The helper
+returns only the public tenant identity, and keeps generated credential files
+in its private material directory. The owner submits
+`{"action":"create-tenant","tenant":"zt-test"}`. Optional quota fields are
+`storage_bytes`, `file_bytes` and `rate_per_minute`. Retrying the same request
+restores any missing stores without replacing the tenant account.
+
+For a disposable DEV tenant, run a separate control instance pointed to that
+account and set `--allow-erase-tenant` to the exact tenant ID. The owner's
+`{"action":"erase-tenant","tenant":"zt-test"}` request returns a confirmation
+token valid for ten minutes. Submit the same request with `confirm` set to
+that token to revoke current agent credentials and purge its message, file
+and state stores. The operation is disabled for `vi`. Export and erasure are
+audited without logging payloads or the token.

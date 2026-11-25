@@ -9,20 +9,25 @@ import (
 )
 
 type adminRequest struct {
-	From        string `json:"from,omitempty"`
-	To          string `json:"to,omitempty"`
-	Action      string `json:"action"`
-	Tenant      string `json:"tenant,omitempty"`
-	After       string `json:"after,omitempty"`
-	Name        string `json:"name,omitempty"`
-	Machine     string `json:"machine,omitempty"`
-	CLI         string `json:"cli,omitempty"`
-	Role        string `json:"role,omitempty"`
-	Delivery    string `json:"delivery,omitempty"`
-	Minimum     string `json:"minimum,omitempty"`
-	Recommended string `json:"recommended,omitempty"`
-	Retention   int    `json:"retention,omitempty"`
-	UrgentCap   int    `json:"urgent_cap,omitempty"`
+	From          string `json:"from,omitempty"`
+	To            string `json:"to,omitempty"`
+	Action        string `json:"action"`
+	Tenant        string `json:"tenant,omitempty"`
+	After         string `json:"after,omitempty"`
+	NoticesTo     string `json:"notices_to,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Machine       string `json:"machine,omitempty"`
+	CLI           string `json:"cli,omitempty"`
+	Role          string `json:"role,omitempty"`
+	Delivery      string `json:"delivery,omitempty"`
+	Minimum       string `json:"minimum,omitempty"`
+	Recommended   string `json:"recommended,omitempty"`
+	Retention     int    `json:"retention,omitempty"`
+	UrgentCap     int    `json:"urgent_cap,omitempty"`
+	StorageBytes  int64  `json:"storage_bytes,omitempty"`
+	FileBytes     int64  `json:"file_bytes,omitempty"`
+	RatePerMinute int    `json:"rate_per_minute,omitempty"`
+	Confirm       string `json:"confirm,omitempty"`
 }
 
 func (s *Service) admin(ctx context.Context, body []byte) (response any, err error) {
@@ -32,13 +37,24 @@ func (s *Service) admin(ctx context.Context, body []byte) (response any, err err
 	}
 	defer func() {
 		s.config.Logger.Info("control admin action", "tenant", s.config.Tenant, "actor", "owner",
-			"action", request.Action, "agent", request.Name, "success", err == nil, "at", s.clock().UTC())
+			"action", request.Action, "agent", request.Name, "target_tenant", request.Tenant, "notices_to", request.NoticesTo, "success", err == nil, "at", s.clock().UTC())
 	}()
 	switch request.Action {
 	case "status":
 		return s.fleet(ctx, "status", []byte("{}"))
 	case "export":
 		return s.export(ctx, request.Tenant, request.After)
+	case "create-tenant":
+		if s.config.CreateTenant == nil {
+			return nil, forbidden("tenant provisioning is unavailable")
+		}
+		config, err := normalizedTenant(TenantRequest{request.Tenant, request.StorageBytes, request.FileBytes, request.RatePerMinute})
+		if err != nil {
+			return nil, err
+		}
+		return s.config.CreateTenant(ctx, config)
+	case "erase-tenant":
+		return s.eraseTenant(ctx, request.Tenant, request.Confirm)
 	case "revoke":
 		return s.revoke(ctx, request.Name)
 	case "register":
@@ -79,13 +95,28 @@ func (s *Service) admin(ctx context.Context, body []byte) (response any, err err
 		if request.Retention < 1 || request.Retention > 10000 || request.UrgentCap < 1 {
 			return nil, invalid("positive retention and urgent cap are required")
 		}
-		policy := tenantPolicy{request.Retention, request.UrgentCap}
-		_, revision, err := readState[tenantPolicy](ctx, s.state, "policy.delivery")
+		policy, revision, err := readState[tenantPolicy](ctx, s.state, "policy.delivery")
 		if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
 			return nil, err
 		}
+		if request.FileBytes < 0 || request.FileBytes > maxFile || request.RatePerMinute < 0 {
+			return nil, invalid("invalid file or message quota")
+		}
+		policy.Retention, policy.UrgentCap = request.Retention, request.UrgentCap
+		if request.FileBytes > 0 {
+			policy.FileBytes = request.FileBytes
+		}
+		if request.RatePerMinute > 0 {
+			policy.RatePerMinute = request.RatePerMinute
+		}
 		return policy, writeState(ctx, s.state, "policy.delivery", policy, revision)
 	case "settings":
+		if request.NoticesTo != "" {
+			if request.Name != "" || request.Role != "" || request.Delivery != "" {
+				return nil, invalid("notice configuration is a tenant setting")
+			}
+			return s.setNoticeRecipient(ctx, request.NoticesTo)
+		}
 		return s.adminSettings(ctx, request)
 	default:
 		return nil, missing("unknown administrator operation")

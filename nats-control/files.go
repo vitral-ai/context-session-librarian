@@ -140,9 +140,13 @@ func (s *Service) validateACL(ctx context.Context, names []string) ([]string, er
 }
 
 func (s *Service) putChunk(ctx context.Context, caller string, request fileRequest, existing *fileInfo) (fileResult, error) {
+	policy, err := s.deliveryPolicy(ctx)
+	if err != nil {
+		return fileResult{}, err
+	}
 	if request.Name == "" || len(request.Name) > 255 || path.Base(request.Name) != request.Name ||
 		strings.ContainsAny(request.Name, "\\\x00\r\n") || request.Name == "." || request.Name == ".." ||
-		request.Size < 0 || request.Size > maxFile || len(request.Data) > maxChunk ||
+		request.Size < 0 || request.Size > policy.FileBytes || len(request.Data) > maxChunk ||
 		request.Offset > request.Size || int64(len(request.Data)) > request.Size-request.Offset ||
 		(len(request.Data) == 0 && request.Size != 0) {
 		return fileResult{}, invalid("invalid upload metadata or chunk size")
