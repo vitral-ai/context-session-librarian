@@ -199,6 +199,8 @@ Send with `csl send --nats-config PATH --from alice --to bob --text
 "Hello"`. Add `--urgent --reason blocked` for an urgent message. If the send
 outcome is unknown, retry with `--id` set to the printed `message_id`, the
 printed `retry_pin` option, and the same sender, target, text and reply parent.
+For a NATS reply, use the printed `retry_reply` arguments in place of the
+original parent and target arguments.
 
 To opt in an individual sender, add its name and absolute NATS config path
 to `senders` in the owner-managed `~/.config/csl/sender-routes.json`. Set

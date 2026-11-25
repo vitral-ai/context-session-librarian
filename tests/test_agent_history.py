@@ -3,8 +3,9 @@ import uuid
 import argparse
 import contextlib
 import io
+import shlex
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 import csl_agents
 from csl_nats import ControlRejected, send_command as nats_send_command
 import test_agent_hub
@@ -285,6 +286,35 @@ class SenderRoutingTests(unittest.TestCase):
         self.execute('send', '--to', 'legacy', '--hub-config', str(csl_agents.DEFAULT_CONFIG), '--id', message_id)
         self.assertEqual(self.hub.call_args.args[1]['id'], message_id)
         self.nats_send.assert_not_called()
+
+    def test_printed_retry_options_resend_inferred_nats_reply(self):
+        message_id = str(uuid.uuid4())
+        self.nats_history.return_value = {'messages': [{'id': self.parent, 'from': 'worker', 'to': 'client'}]}
+        self.nats_send.side_effect = nats_send_command
+        parsed = self.parse('reply', self.parent[:8], '--from', 'client', '--text', 'test body')
+        settings = {'tenant': 'vi', 'connector_home': Path('/private/bridge'),
+                    'agents': {'client': {'session': self.parent}}}
+        client = MagicMock()
+        client.connection.close = AsyncMock()
+        with patch('csl_nats.config', return_value=settings), patch('csl_nats.Store'), \
+                patch('csl_nats.uuid.uuid4', return_value=uuid.UUID(message_id)), \
+                patch('csl_nats.remember_send', side_effect=lambda store, tenant, envelope, thread: envelope), \
+                patch('csl_nats.Client.connect_active', new=AsyncMock(return_value=client)), \
+                patch('csl_nats.post_saved', side_effect=[TimeoutError, {'id': message_id, 'state': 'queued'}]) as post:
+            with contextlib.redirect_stderr(io.StringIO()) as stderr, \
+                    self.assertRaisesRegex(BridgeError, 'NATS send unconfirmed'):
+                csl_agents._execute(parsed)
+            options = dict(line.split('=', 1) for line in stderr.getvalue().splitlines())
+            self.routes['nats_recipients'] = []
+            self.execute('reply', *shlex.split(options['retry_reply']), *shlex.split(options['retry_pin']),
+                         '--id', options['message_id'])
+        self.hub.assert_called_once()
+        self.nats_history.assert_called_once()
+        self.assertEqual(post.await_count, 2)
+        for attempt in post.await_args_list:
+            envelope = attempt.args[4]
+            self.assertEqual((envelope['id'], envelope['to'], envelope['reply_to']),
+                             (message_id, 'worker', self.parent))
 
     def test_full_id_hub_only_reply_does_not_depend_on_nats(self):
         self.hub.side_effect = [{'messages': [{'id': self.parent, 'source': 'legacy', 'target': 'client'}]},
