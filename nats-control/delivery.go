@@ -182,9 +182,21 @@ func (s *Service) history(ctx context.Context, caller string, body []byte) (any,
 }
 
 func (s *Service) historyRecords(ctx context.Context, caller, peer, id string) ([]historyRecord, error) {
-	live, err := s.messages(ctx)
-	if err != nil {
-		return nil, err
+	var live []messageEntry
+	if messageID.MatchString(id) {
+		record, revision, err := readState[messageRecord](ctx, s.state, "message."+id)
+		switch {
+		case err == nil:
+			live = []messageEntry{{record, revision}}
+		case !errors.Is(err, jetstream.ErrKeyNotFound):
+			return nil, err
+		}
+	} else {
+		var err error
+		live, err = s.messages(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 	matches := make([]historyRecord, 0)
 	liveIDs := make(map[string]bool, len(live))
@@ -315,11 +327,21 @@ func (s *Service) receipt(ctx context.Context, caller string, body []byte) (any,
 		return nil, invalid("invalid receipt")
 	}
 	entry, _, err := readState[messageRecord](ctx, s.state, "message."+request.ID)
-	if errors.Is(err, jetstream.ErrKeyNotFound) || (err == nil && entry.Envelope.To != caller) {
+	if errors.Is(err, jetstream.ErrKeyNotFound) {
+		matches, err := s.historyRecords(ctx, caller, "", request.ID)
+		if err != nil {
+			return nil, err
+		}
+		if len(matches) == 1 && matches[0].To == caller {
+			return nil, forbidden("message has not reached the inbox")
+		}
 		return nil, missing("message unavailable")
 	}
 	if err != nil {
 		return nil, err
+	}
+	if entry.Envelope.To != caller {
+		return nil, missing("message unavailable")
 	}
 	if entry.Sequence == 0 {
 		return nil, forbidden("message has not reached the inbox")
