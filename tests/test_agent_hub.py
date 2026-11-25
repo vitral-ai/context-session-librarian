@@ -122,7 +122,9 @@ class NativeDeliveryTests(unittest.TestCase):
         target={'name':'client','session':str(uuid.uuid4()),'cli':'codex','machine':'remote'}
         connector=SimpleNamespace(agents={'client':target['session']},peers={},
             locks={'client':threading.RLock()},client_only=False,
-            store=SimpleNamespace(rows=Mock(return_value=[])),current=Mock(return_value={'status':state}),
+            store=SimpleNamespace(agents=lambda: {'client': target['session']},
+                                  native_operation=Mock(return_value=None)),
+            current=Mock(return_value={'status':state}),
             incoming=Mock(return_value={'state':'delivered','turn_id':'actual'}))
         return connector, {'id':str(uuid.uuid4()),'source':source,'target':target,'text':'hello'}
 
@@ -144,7 +146,9 @@ class NativeDeliveryTests(unittest.TestCase):
             self.assertEqual(result['turn_id'],'actual')
             request=connector.incoming.call_args.args[1]
             self.assertEqual(request['session'],packet['source']['session'])
-            connector.store.rows.return_value=[{'state':'delivered','result':encode(result)}]
+            connector.store.native_operation.return_value = {
+                'peer': 'agent-hub', 'request': request, 'state': 'delivered', 'result': result,
+            }
             self.assertEqual(deliver(connector,packet),result)
             self.assertEqual(connector.incoming.call_count,1)
 

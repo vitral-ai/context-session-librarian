@@ -162,6 +162,11 @@ class Connector:
             from pathlib import Path
             if Path(settings['connector_home']).expanduser() == self.store.home:
                 self.spawn(loop, self)
+        import os
+        nats_config = os.environ.get('CSL_NATS_CONFIG')
+        if nats_config:
+            from csl_nats import start as start_nats
+            start_nats(self, nats_config)
         for peer in list(self.peers):
             ops = self.peers[peer].get('allow_ops', [])
             mail_only = 'mail' in ops and 'watch' not in ops
@@ -335,7 +340,7 @@ class Connector:
             return compact_message(request['source'], request['id'], request['text'], target=request['target'])
         return frame_message(request['source'], request['id'], session, request['text'])
 
-    def invoke(self, peer, request):
+    def invoke(self, peer, request, *, native_text=None):
         agent, request_id = request['target'], request['id']
         state = self.current(agent)
         if state['status'] == 'agent_not_loaded':
@@ -351,7 +356,7 @@ class Connector:
             EventState.reserve_id(db, request_id, 'operation', hashlib.sha256(encode(request).encode()).hexdigest(), self.agents[agent])
             db.execute("UPDATE operations SET state='invoking',result=? WHERE id=?", (encode({'state': 'uncertain', 'request_id': request_id}), request_id))
         params = {'threadId': self.agents[agent], 'clientUserMessageId': request_id,
-                  'input': [{'type': 'text', 'text': self.frame(peer, request)}]}
+                  'input': [{'type': 'text', 'text': self.frame(peer, request) if native_text is None else native_text}]}
         try:
             if state['status'] == 'active':
                 result = self.ready().call('turn/steer', {**params, 'expectedTurnId': state['turn_id']})
@@ -479,7 +484,7 @@ class Connector:
     def flush(self, agent):
         if self.waiters[agent]:
             return
-        rows = self.store.rows("SELECT peer,request FROM operations WHERE state='pending'")
+        rows = self.store.rows("SELECT peer,request FROM operations WHERE state='pending' AND peer!='_nats'")
         for row in rows:
             request = decode(row['request'])
             if request.get('target') == agent and request['op'] in ('followup', 'send_message') and not row['peer'].startswith('outbound:'):

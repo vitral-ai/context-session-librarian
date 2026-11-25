@@ -81,7 +81,12 @@ def configure(args):
                 db.executemany('INSERT INTO config VALUES(?,?)',
                                [('identity', encode(identity)), ('runtime_socket', encode(str(path) if path else None))])
             elif args.action == 'agent':
-                agent, thread = name(args.agent), identifier(args.thread)
+                if args.nats:
+                    from csl_nats import agent_name
+                    agent = agent_name(args.agent, registration=True)
+                else:
+                    agent = name(args.agent)
+                thread = identifier(args.thread)
                 db.execute('INSERT INTO agents VALUES(?,?)', (agent, thread))
             elif args.action == 'peer':
                 peer = name(args.peer)
@@ -255,6 +260,7 @@ def add_commands(subparsers, csl):
     agent = sub.add_parser('agent', help='Register an existing conversation as an agent, offline.')
     agent.add_argument('agent')
     agent.add_argument('--thread', required=True)
+    agent.add_argument('--nats', action='store_true', help='Use the NATS registration name rules.')
     peer = sub.add_parser('peer', help='Configure a peer and its explicit incoming permissions, offline.')
     peer.add_argument('peer')
     transport = peer.add_mutually_exclusive_group()

@@ -167,3 +167,39 @@ Completion notices read the current PR head once before posting. A different hea
 Direct bridge tasks retain their full bodies because they have no hub-history fallback. Hub Codex messages use previews; Claude durable mail retains its legacy full-body fingerprint across upgrades. An unavailable native wake does not unset durable mailbox delivery; the hook remains eligible.
 
 Hub native messages include a one-line `Reply via hub: csl reply FULL_ID --from YOUR_NAME --text ...` footer. Replace `...` with quoted reply text (or use `--text-file FILE`). Inline native final answers are not mailed automatically. `csl reply ID_OR_PREFIX --from YOUR_NAME --text "reply"` resolves the sender from retained incoming history. History `--id` and reply `--in-reply-to` also accept unique UUID prefixes of at least 8 characters; ambiguous prefixes ask for more characters. Explicit `--to` plus `--in-reply-to` works beyond history retention using the durable delivery ledger.
+
+## Experimental NATS adapter
+
+The first NATS slice supports sending and individual Codex delivery. Install
+`nats-py[nkeys]` in the Python environment used by CSL. Use a private JSON file
+(mode 0600) with owner-issued credentials and an existing private bridge home:
+
+```json
+{
+  "tenant": "vi",
+  "servers": ["tls://broker.example.net:4222"],
+  "cafile": "/private/config/broker-ca.pem",
+  "connector_home": "/private/bridge/codex",
+  "agents": {
+    "alice": {
+      "session": "22cb43cf-8044-4ac2-82e9-e0bec9fd7188",
+      "credentials": "/private/config/alice.creds"
+    }
+  }
+}
+```
+
+Set `CSL_NATS_CONFIG` to that file in the existing Codex connector's environment
+to enable receiving. The local name and native thread must already be
+registered. For a NATS-only name, use
+`csl bridge --home HOME agent --nats NAME --thread UUID`.
+Send with `csl send --nats-config PATH --from alice --to bob --text
+"Hello"`. Add `--urgent --reason blocked` for an urgent message. If the send
+outcome is unknown, retry with the printed `--id` and the same text and target.
+
+The local `nats_delivered` table in the connector's private `bridge.sqlite`
+records the pinned native thread, turn, and acknowledgment state. This draft
+handles individual text envelopes. Batch digests, attachments and Claude
+delivery require the subsequent adapter slices.
+During dual delivery, matching CI completion notices reuse the confirmed
+native turn for the same message ID, recipient thread and body.
