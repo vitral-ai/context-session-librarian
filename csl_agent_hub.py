@@ -101,6 +101,15 @@ class Hub:
             recipient = registered(key) if key else None
             if not recipient:
                 continue
+            # Pre-ownership Hubs used a recipient-free UUID for coordinator notices.
+            # Reuse that delivery only for the exact originally pinned endpoint.
+            legacy_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                encode([machine, source, target, mid, reason])))
+            legacy = db.execute('SELECT packet FROM envelopes JOIN hub_notices USING(id) '
+                                'WHERE id=? AND source=?', (legacy_id, NOTICE_SOURCE['name'])).fetchone()
+            if legacy and decode(legacy['packet'])['target'] == recipient:
+                notified.append(key)
+                continue
             # Deduplicate per recipient, including when the sender owns itself.
             notice_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
                 encode([machine, source, target, mid, reason, key])))
