@@ -1,0 +1,106 @@
+package control
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestDecodeMirrorLag(t *testing.T) {
+	body := `{"server":{"name":"standby"},"data":{"account_details":[
+		{"id":"foreign","stream_detail":[{"mirror":{"name":"CSL_MSG","lag":99}}]},
+		{"id":"tenant","stream_detail":[{"mirror":{"name":"CSL_MSG","lag":5}},
+		{"mirror":{"name":"KV_CSL_STATE","lag":0}},{"mirror":{"name":"OBJ_CSL_FILES","lag":1}}]}
+	]}}`
+	got, err := mirrorLag([]byte(body), "standby", "tenant")
+	if err != nil || got["CSL_MSG"] != 5 || got["KV_CSL_STATE"] != 0 || got["OBJ_CSL_FILES"] != 1 {
+		t.Fatalf("tenant mirror response was not decoded: %v", err)
+	}
+	for _, invalid := range []string{
+		strings.Replace(body, "standby", "unexpected", 1),
+		strings.Replace(body, "OBJ_CSL_FILES", "irrelevant", 1),
+		strings.Replace(body, `"lag":5`, `"lag":5,"error":{"description":"inactive"}`, 1),
+	} {
+		if _, err := mirrorLag([]byte(invalid), "standby", "tenant"); err == nil {
+			t.Fatal("invalid or unavailable mirror response was treated as healthy")
+		}
+	}
+}
+
+func verifyMirrorNotices(t *testing.T, ctx context.Context, service *Service) {
+	t.Helper()
+	now := time.Now().UTC()
+	var lag uint64
+	var failure error
+	service.mu.Lock()
+	originalClock := service.clock
+	service.clock = func() time.Time { return now }
+	service.config.MirrorProbe = func(ctx context.Context) (map[string]uint64, error) {
+		return map[string]uint64{"CSL_MSG": lag, "KV_CSL_STATE": 0, "OBJ_CSL_FILES": 0}, failure
+	}
+	service.mu.Unlock()
+	tick := func(delay time.Duration) {
+		t.Helper()
+		service.mu.Lock()
+		now = now.Add(delay)
+		service.mu.Unlock()
+		if err := service.monitorMirrors(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer func() {
+		service.mu.Lock()
+		service.clock = originalClock
+		service.config.MirrorProbe = nil
+		service.mu.Unlock()
+	}()
+	assertNotices := func(stalled, unavailable, recovered int) {
+		t.Helper()
+		entries, err := service.messages(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var lagNotices, errors, recovery int
+		for _, entry := range entries {
+			env := entry.record.Envelope
+			switch env.Body {
+			case "Mirror replication has lagged more than 60 seconds: CSL_MSG.":
+				lagNotices++
+			case "Mirror monitoring unavailable.":
+				errors++
+			case "Mirror replication recovered.":
+				recovery++
+			default:
+				continue
+			}
+			if env.Kind != "system" || env.To != "sender" || entry.record.Sequence == 0 {
+				t.Fatal("monitor notice did not reach the configured owner")
+			}
+		}
+		if lagNotices != stalled || errors != unavailable || recovery != recovered {
+			t.Fatalf("notice counts: lag=%d unavailable=%d recovered=%d", lagNotices, errors, recovery)
+		}
+	}
+	lag = 1
+	tick(0)
+	tick(time.Minute)
+	assertNotices(0, 0, 0)
+	tick(time.Second)
+	tick(time.Minute)
+	assertNotices(1, 0, 0)
+	tick(14 * time.Minute)
+	assertNotices(2, 0, 0)
+	failure = errors.New("unavailable fixture")
+	tick(time.Minute)
+	tick(5 * time.Minute)
+	assertNotices(2, 0, 0)
+	tick(time.Second)
+	tick(15 * time.Minute)
+	assertNotices(2, 1, 0)
+	failure, lag = nil, 0
+	tick(time.Minute)
+	tick(time.Minute)
+	assertNotices(2, 1, 1)
+}

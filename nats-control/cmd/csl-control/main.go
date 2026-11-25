@@ -42,6 +42,10 @@ func run() (string, error) {
 	revoke := flag.String("revoke-helper", "", "tenant-scoped account JWT updater")
 	create := flag.String("create-tenant-helper", "", "delegated operator tenant provisioner")
 	erase := flag.String("allow-erase-tenant", "", "exact disposable tenant ID authorized for erasure")
+	mirrorBroker := flag.String("mirror-nats", "", "private standby NATS URL")
+	mirrorCreds := flag.String("mirror-credentials", "", "read-only standby SYS credentials file")
+	mirrorInbox := flag.String("mirror-inbox-prefix", "", "scoped standby SYS reply prefix")
+	mirrorServer := flag.String("mirror-server", "", "expected standby server name")
 	flag.Parse()
 	if *broker == "" || *creds == "" || *signerFile == "" {
 		return *tenant, errors.New("nats, credentials and signer-file are required")
@@ -76,6 +80,26 @@ func run() (string, error) {
 	}
 	defer conn.Close()
 	config := control.Config{Tenant: *tenant, Account: *account, Signer: signer, Upgrade: *upgrade, EraseTenant: *erase}
+	if *mirrorBroker != "" || *mirrorCreds != "" || *mirrorInbox != "" || *mirrorServer != "" {
+		if *mirrorBroker == "" || *mirrorCreds == "" || *mirrorInbox == "" || *mirrorServer == "" {
+			return *tenant, errors.New("all mirror monitoring flags are required")
+		}
+		if err := validateBrokerURL(*mirrorBroker); err != nil {
+			return *tenant, err
+		}
+		mirrorOpts := []nats.Option{nats.Name("csl-control-mirror-monitor"), nats.UserCredentials(*mirrorCreds),
+			nats.CustomInboxPrefix(*mirrorInbox), nats.Timeout(3 * time.Second), nats.RetryOnFailedConnect(true)}
+		if *ca != "" {
+			mirrorOpts = append(mirrorOpts, nats.RootCAs(*ca))
+		}
+		monitor, err := nats.Connect(*mirrorBroker, mirrorOpts...)
+		if err != nil {
+			return *tenant, errors.New("unable to configure the standby monitor")
+		}
+		defer monitor.Close()
+		config.MirrorProbe = control.MirrorProbe(monitor, *mirrorServer, *account)
+	}
+
 	if *domains != "" {
 		config.Domains = strings.Split(*domains, ",")
 	}
@@ -122,16 +146,22 @@ func run() (string, error) {
 	slog.Info("control ready", "tenant", *tenant)
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
-	for {
+	runWork := func(work func(context.Context) error) {
 		tick, cancel := context.WithTimeout(ctx, 45*time.Second)
-		if err := service.Tick(tick); err != nil && ctx.Err() == nil {
+		defer cancel()
+		if err := work(tick); err != nil && ctx.Err() == nil {
 			slog.Error("control scheduling pass failed", "tenant", *tenant, "error", err)
 		}
-		cancel()
+	}
+	runWork(service.Tick)
+	for {
 		select {
 		case <-ctx.Done():
 			return *tenant, nil
 		case <-ticker.C:
+			runWork(service.Tick)
+		case <-service.RevocationsReady():
+			runWork(service.ApplyRevocations)
 		}
 	}
 }

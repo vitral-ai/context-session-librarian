@@ -125,11 +125,18 @@ func RevokeAccountUsers(ctx context.Context, system *nats.Conn, operator nkeys.K
 	if claims == nil {
 		return missing("tenant account is unavailable")
 	}
+	changed := false
 	for _, key := range keys {
 		if !nkeys.IsValidPublicUserKey(key) {
 			return invalid("invalid user revocation key")
 		}
-		claims.RevokeAt(key, at)
+		if !claims.Revocations.IsRevoked(key, at) {
+			claims.RevokeAt(key, at)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
 	}
 	return pushAccount(ctx, system, operator, "$SYS.REQ.ACCOUNT."+account+".CLAIMS.UPDATE", claims)
 }

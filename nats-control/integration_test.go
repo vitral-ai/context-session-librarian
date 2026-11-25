@@ -385,6 +385,9 @@ func TestOperatorMode(t *testing.T) {
 	pending.ID, pending.To = randomID(), "worker-b"
 	call(sender, "send.sender", pending, "")
 	admin(map[string]any{"action": "revoke", "name": "worker-b"})
+	if err := service.ApplyRevocations(ctx); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-revoked:
 	case <-time.After(2 * time.Second):
@@ -504,6 +507,9 @@ func TestOperatorMode(t *testing.T) {
 	}
 	call(peer, "ctl.fetch.worker-a", fileRequest{ID: id}, "not_found")
 	call(sender, "ctl.fetch.sender", fileRequest{ID: unattachedID}, "")
+
+	verifyMirrorNotices(t, ctx, service)
+	verifyQueuedRevocations(t, ctx, service, owner)
 
 }
 
