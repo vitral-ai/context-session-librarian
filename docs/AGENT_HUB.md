@@ -238,8 +238,10 @@ notices delivered inside a digest.
 
 ### NATS history and files
 
-Set `CSL_NATS_CONFIG` to the private adapter configuration for these commands,
-or pass `--nats-config PATH`. Use `--from NAME` or set `CSL_AGENT`.
+These commands use the agent's local enrollment in
+`~/.config/csl/sender-routes.json`. Use `--from NAME` or set `CSL_AGENT`
+on a shared machine. Pass `--nats-config PATH` to select a specific NATS
+configuration, or `--hub-config PATH` to read Hub history.
 
 ```sh
 csl history --with coordinator --last 10 --from alice
@@ -272,6 +274,7 @@ Register coordinators with themselves as owner. Services `ci-notices` and
 list and status accept `--owner COORDINATOR`. Ownership is routing metadata,
 not a grant: updates preserve session bindings, queued packets and pair approvals.
 An omitted owner preserves the existing value (the API accepts null to clear it).
+Tell each new worker who its coordinator is through a channel the worker already trusts.
 
 Refusals notify the sender and its coordinator once each, or only once when
 both are the same agent. Service refusals notify only a known target's owner;

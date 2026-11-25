@@ -3,6 +3,7 @@ import uuid
 import argparse
 import contextlib
 import io
+import os
 import shlex
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -221,6 +222,31 @@ class SenderRoutingTests(unittest.TestCase):
         self.assertIn('transport=nats', self.execute('send', '--to', 'worker'))
         self.assertEqual(self.nats_send.call_args.args[0].nats_config, Path('/private/vi.json'))
         self.hub.assert_not_called()
+
+    def test_nats_tools_use_the_same_local_enrollment_as_send(self):
+        commands = [('history', '--with', 'worker'), ('agents', 'history', '--with', 'worker'),
+                    ('agents', 'status'), ('put', 'report.txt'), ('fetch', 'a' * 64)]
+        with patch.dict(os.environ, {'CSL_AGENT': 'client'}, clear=True), patch('csl_nats_tools.command') as tool:
+            for argv in commands:
+                with self.subTest(argv=argv):
+                    csl_agents._execute(self.parse(*argv))
+                    args = tool.call_args.args[0]
+                    self.assertEqual((args.source, args.nats_config), ('client', Path('/private/vi.json')))
+        self.hub.assert_not_called()
+
+    def test_history_transport_pin_bypasses_local_enrollment(self):
+        with patch.dict(os.environ, {'CSL_NATS_CONFIG': '/private/env.json'}, clear=True), \
+                patch('csl_nats_tools.command') as tool, contextlib.redirect_stdout(io.StringIO()):
+            csl_agents._execute(self.parse('history', '--with', 'worker', '--from', 'client',
+                                           '--nats-config', '/private/explicit.json'))
+            self.assertEqual(tool.call_args.args[0].nats_config, Path('/private/explicit.json'))
+            for argv in [('history', '--hub-config', '/private/hub.json'),
+                         ('agents', '--hub-config', '/private/hub.json', 'history'),
+                         ('agents', 'history', '--hub-config', '/private/hub.json')]:
+                csl_agents._execute(self.parse(*argv, '--with', 'worker', '--from', 'client'))
+                self.config.assert_called_with(Path('/private/hub.json'))
+            tool.assert_called_once()
+        self.read_routes.assert_not_called()
 
     def test_hub_only_and_unopted_source_still_use_hub(self):
         self.assertIn('transport=hub', self.execute('send', '--to', 'legacy'))
