@@ -18,7 +18,7 @@ from csl_bridge_hooks import surface_nats
 from csl_bridge_store import BridgeError, Store, encode, neutralize_headers
 from csl_ci_notice import notice_request
 from codex_sessions import main
-from csl_nats import (MAX_DIGEST, ClaudeInbox, Client, ControlRejected, Ledger, agent_name, body_text, deliver_codex,
+from csl_nats import (MAX_DIGEST, NATIVE_PEER, ClaudeInbox, Client, ControlRejected, Ledger, agent_name, body_text, deliver_codex,
                       delivery_fingerprint, delivery_parts, post_saved, raw_fingerprint, receive_one, recover_acks, remember_send,
                       replay_outbox)
 
@@ -91,7 +91,14 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.deliver.assert_called_once()
         self.assertEqual(self.rows()[0]['ack_broker'], 'secondary')
 
-    async def test_legacy_digest_member_is_never_submitted_again_after_regrouping(self):
+    async def test_legacy_codex_digest_member_is_never_rendered_twice(self):
+        await self.check_legacy_digest_replay('codex')
+
+    async def test_legacy_claude_digest_member_is_never_rendered_twice(self):
+        await self.check_legacy_digest_replay('claude')
+
+    async def check_legacy_digest_replay(self, cli):
+        native, _ = self.dual_transport()
         old = dict(json.loads(self.message.data), id=str(uuid.uuid4()), body='seen before upgrade')
         digest = dict(old, id=str(uuid.uuid4()), kind='digest', body='', items=[old],
                       **{'from': 'csl-control'})
@@ -104,20 +111,51 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
                                                  raw_fingerprint(digest), self.turn))
             db.execute('INSERT INTO nats_digest_members VALUES (?,?,?,?)', ('vi', 'alice', digest['id'], old['id']))
 
+        output = Mock()
+        if cli == 'claude':
+            inbox = ClaudeInbox(self.store, 'vi', 'alice', self.thread)
+            with self.store.transaction() as db:
+                db.execute("""INSERT INTO nats_claude_inbox
+                    (tenant,agent,session,id,fingerprint,body,surfaced) VALUES (?,?,?,?,?,?,1)""",
+                    ('vi', 'alice', self.thread, digest['id'], raw_fingerprint(digest),
+                     encode(delivery_parts(digest, self.config_path))))
+            deliver = partial(inbox.stage, config_path=self.config_path)
+            payload = {'session_id': self.thread, 'hook_event_name': 'PostToolUse'}
+            surface = partial(surface_nats, self.home, 'vi', 'alice', 'PostToolUse', payload, 10, output)
+        else:
+            self.store.reserve(NATIVE_PEER, {
+                'version': 1, 'op': 'followup', 'id': digest['id'], 'source': digest['from'],
+                'target': 'alice', 'text': '', 'nats_fingerprint': raw_fingerprint(digest),
+                'digest_items': [old['id']],
+            })
+            self.store.operation(digest['id'], 'delivered', {'state': 'delivered',
+                                 'request_id': digest['id'], 'thread_id': self.thread, 'turn_id': self.turn})
+            deliver = partial(self.deliver_codex, native, self.thread)
+
         self.client.broker = 'secondary'
         self.client.receipt = AsyncMock()
         self.message.ack_sync.side_effect = None
         self.message.data = encode(dict(digest, created_at='2026-11-25T09:00:00Z')).encode()
-        await receive_one(self.client, self.ledger, self.message, self.deliver)
+        self.assertTrue(await receive_one(self.client, self.ledger, self.message, deliver))
         self.message.data = encode(old).encode()
-        await receive_one(self.client, self.ledger, self.message, self.deliver)
-        self.deliver.assert_not_called()
+        self.assertTrue(await receive_one(self.client, self.ledger, self.message, deliver))
+        native.invoke.assert_not_called()
 
         fresh = dict(old, id=str(uuid.uuid4()), body='new after upgrade')
         regrouped = dict(digest, id=str(uuid.uuid4()), items=[old, fresh])
         self.message.data = encode(regrouped).encode()
-        await receive_one(self.client, self.ledger, self.message, self.deliver)
-        self.deliver.assert_called_once_with(dict(regrouped, items=[fresh]), delivery_fingerprint(regrouped))
+        if cli == 'claude':
+            self.assertFalse(await receive_one(self.client, self.ledger, self.message, deliver))
+            surface()
+            surface()
+            output.assert_called_once()
+            rendered = output.call_args.args[0]
+        self.assertTrue(await receive_one(self.client, self.ledger, self.message, deliver))
+        if cli == 'codex':
+            native.invoke.assert_called_once()
+            rendered = native.invoke.call_args.kwargs['native_text']
+        self.assertIn(fresh['body'], rendered)
+        self.assertNotIn(old['body'], rendered)
         self.client.receipt.assert_any_await(old['id'], 'acked')
         self.client.receipt.assert_any_await(fresh['id'], 'acked')
 

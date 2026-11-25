@@ -62,7 +62,9 @@ registry. Update implementation, tests and this document in the same change.
 | `cut` | supported | not-integrated | not-integrated |
 | `doctor` | supported | supported | not-integrated |
 | `export` | supported | supported | experimental |
+| `fetch` | experimental | experimental | not-integrated |
 | `find-work` | supported | not-integrated | not-integrated |
+| `history` | experimental | experimental | not-integrated |
 | `import` | supported | supported | experimental |
 | `inbox` | supported | supported | not-integrated |
 | `index` | supported | not-integrated | not-integrated |
@@ -74,6 +76,7 @@ registry. Update implementation, tests and this document in the same change.
 | `patches` | supported | not-integrated | not-integrated |
 | `pinpoint` | supported | not-integrated | not-integrated |
 | `providers` | experimental | experimental | experimental |
+| `put` | experimental | experimental | not-integrated |
 | `queue` | supported | not-integrated | not-integrated |
 | `recall` | supported | not-integrated | not-integrated |
 | `receive` | supported | supported | not-integrated |
@@ -92,6 +95,8 @@ registry. Update implementation, tests and this document in the same change.
 | `timeline` | supported | not-integrated | not-integrated |
 | `verify-live` | experimental | experimental | not-integrated |
 | `why` | supported | not-integrated | not-integrated |
+
+`fetch`, `history` and `put` use the opt-in NATS transport.
 
 `convert` is an experimental, fail-closed adapter rather than a universal format
 translator. `doctor` reports structural/static/native evidence separately and

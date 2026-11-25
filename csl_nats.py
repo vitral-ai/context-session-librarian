@@ -107,8 +107,10 @@ def validate_envelope(envelope, agent):
     identifier(envelope.get('id'))
     agent_name(envelope.get('from'))
     body_text(envelope.get('body'))
-    if envelope.get('kind') not in MESSAGE_KINDS or envelope.get('items') or envelope.get('attachments'):
+    if envelope.get('kind') not in MESSAGE_KINDS or envelope.get('items'):
         raise BridgeError('Unsupported NATS inbox envelope')
+    from csl_nats_tools import attachments
+    attachments(envelope.get('attachments', []))
 
 
 def delivery_members(envelope, agent, size):
@@ -132,8 +134,17 @@ def delivery_members(envelope, agent, size):
     return members
 
 
-def digest_entry(item, config_path):
+def message_text(item, config_path):
     text = frame_message(item['from'], item['id'], None, item['body'])
+    for file in item.get('attachments', []):
+        command = shlex.join(['csl', 'fetch', file['id'], '--from', item['to'],
+                              '--nats-config', str(config_path)])
+        text += f"\nFile ({file['size']} bytes): {file['name']!r} — {command}"
+    return text
+
+
+def digest_entry(item, config_path):
+    text = message_text(item, config_path)
     if item['from'] in RESERVED_AGENTS or item['from'] == item['to']:
         return text
     command = shlex.join(['csl', 'reply', item['id'], '--from', item['to'], '--to', item['from'],
@@ -144,7 +155,7 @@ def digest_entry(item, config_path):
 def delivery_parts(envelope, config_path):
     if envelope.get('kind') == 'digest':
         return [digest_entry(item, config_path) for item in envelope['items']]
-    return [frame_message(envelope['from'], envelope['id'], None, envelope['body'])]
+    return [message_text(envelope, config_path)]
 
 
 def raw_fingerprint(envelope):
@@ -824,17 +835,41 @@ def send_command(args):
                 'client_version': build_version(), 'attachments': [], 'items': []}
     if reason:
         envelope['reason'] = reason
+    from csl_nats_tools import attachment, file_id
+    file_ids = list(dict.fromkeys(file_id(value) for value in getattr(args, 'attach', [])))
+    print('message_id=' + message_id, file=sys.stderr)
     thread = settings['agents'][source]['session']
     store = Store(settings['connector_home'])
-    print('message_id=' + message_id, file=sys.stderr)
 
     async def send():
+        # Save messages without attachments even when no broker is reachable.
+        remembered = None if file_ids else remember_send(store, settings['tenant'], envelope, thread)
         client = await Client.connect_active(settings, source)
         try:
-            return await post_saved(client, store, (settings['tenant'], source), thread, envelope)
+            for value in file_ids:
+                metadata = await client.request('ctl.fetch', {'id': value, 'offset': 0})
+                info = attachment({key: metadata.get(key) for key in ('id', 'name', 'size')})
+                if info['id'] != value:
+                    raise BridgeError('NATS file metadata changed')
+                envelope['attachments'].append(info)
+            if remembered is None:
+                remembered = remember_send(store, settings['tenant'], envelope, thread)
+            return await post_saved(client, store, (settings['tenant'], source), thread, remembered)
         finally:
             await client.connection.close()
 
+    try:
+        result = run_cli(send())
+    except BridgeError:
+        raise
+    except Exception as error:
+        raise BridgeError(f'NATS send unconfirmed ({type(error).__name__}); retry with --id {message_id}') from None
+    finally:
+        store.close()
+    print(encode(result))
+
+
+def run_cli(operation):
     def keep_tls_log(record):
         return (record.levelno != logging.WARNING or
                 record.getMessage() != 'returning true from eof_received() has no effect when using ssl')
@@ -843,14 +878,6 @@ def send_command(args):
     asyncio_log = logging.getLogger('asyncio')
     asyncio_log.addFilter(keep_tls_log)
     try:
-        envelope = remember_send(store, settings['tenant'], envelope, thread)
-        result = asyncio.run(send())
-    except BridgeError:
-        raise
-    except Exception as error:
-        # The same persisted envelope is safe to retry with the printed UUID.
-        raise BridgeError(f'NATS send unconfirmed ({type(error).__name__}); retry with --id {message_id}') from None
+        return asyncio.run(operation)
     finally:
         asyncio_log.removeFilter(keep_tls_log)
-        store.close()
-    print(encode(result))

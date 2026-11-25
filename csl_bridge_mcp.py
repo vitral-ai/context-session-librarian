@@ -1,13 +1,17 @@
 """Optional stdio MCP tools for an explicitly bound local bridge agent.
 
 This trusted integration runs separately from sandboxed shell commands. It only
-exposes existing bridge operations, never shell, filesystem, auth or runtime APIs.
+exposes bridge operations and optional NATS file transfer from a private staging
+directory. It has no shell, auth, or runtime tools.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import json
+import os
 import re
 from pathlib import Path
+import stat
 import sys
 import threading
 import uuid
@@ -20,6 +24,10 @@ NAME = {'type': 'string', 'pattern': '[a-z][a-z0-9-]{0,31}'}
 UUID = {'type': 'string', 'format': 'uuid'}
 GRANT_ADMIN = {'grant_create', 'grant_revoke'}
 MAIL_TOOLS = {'send', 'receive', 'ack', 'reply', 'inbox_status', 'grant_list', 'grant_show'} | GRANT_ADMIN
+NATS_READ = {'agents_status', 'versions'}
+NATS_FILES = {'put_file', 'fetch_file'}
+NATS_TOOLS = NATS_READ | NATS_FILES | {'close', 'complete'}
+NATS_NAME = {'type': 'string', 'pattern': '^[a-z0-9][a-z0-9-]{1,62}$'}
 
 
 class ToolFieldsError(BridgeError):
@@ -74,6 +82,15 @@ TOOLS = {
                         {'peer': NAME, 'target': NAME, 'turn_id': UUID, 'id': UUID}, ['peer', 'target', 'turn_id']),
     'operation_receipt': ('Reconcile an uncertain operation before any retry; never starts replacement work.',
                           {'peer': NAME, 'operation_id': UUID}, ['peer', 'operation_id']),
+    'agents_status': ('Read NATS fleet status. The broker requires an orchestrator.',
+                      {}, []),
+    'versions': ('Read NATS client versions and version policy.', {}, []),
+    'close': ('Close your NATS pair session.', {'with': NATS_NAME}, ['with']),
+    'complete': ('Mark your work complete on NATS.', {'with': NATS_NAME, 'task': TEXT}, []),
+    'put_file': ('Upload a named file from the configured CSL transfer directory.',
+                 {'name': TEXT, 'to': NATS_NAME}, ['name']),
+    'fetch_file': ('Save a verified file to the configured CSL transfer directory.',
+                   {'id': {'type': 'string', 'pattern': '^[0-9a-f]{64}$'}, 'name': TEXT}, ['id']),
 }
 
 
@@ -99,27 +116,89 @@ def configuration(home, agent, approve_tools=(), *, grant_admin=False):
 
 
 class Adapter:
-    def __init__(self, home, agent, *, grant_admin=False):
-        self.home, self.agent = Path(home), name(agent)
+    def __init__(self, home, agent, *, grant_admin=False, nats_config=None, transfer_dir=None):
+        self.home, self.agent = Path(home), name(agent) if nats_config is None else agent
         self.grant_admin = bool(grant_admin)
+        self.nats_config = nats_config
+        self.transfer_dir = None
         store = Store(self.home)
         try:
-            if self.agent not in store.agents():
+            thread = store.agents().get(self.agent)
+            if thread is None:
                 raise BridgeError('Bind MCP to an explicitly registered local agent')
         finally:
             store.close()
+        if nats_config is not None:
+            from csl_nats import agent_name, config
+            agent_name(agent, registration=True)
+            settings = config(nats_config)
+            self.nats_identity = (settings['tenant'], thread, self.home.resolve())
+            self.require_nats_binding(settings)
+        if transfer_dir is not None:
+            if nats_config is None:
+                raise BridgeError('The transfer directory requires NATS')
+            self.transfer_dir = Path(transfer_dir).resolve(strict=True)
+            self.transfer_identity = None
+            with self.open_transfer_dir() as directory:
+                info = os.fstat(directory)
+                self.transfer_identity = (info.st_dev, info.st_ino)
+
+    def require_nats_binding(self, settings):
+        endpoint = settings['agents'].get(self.agent)
+        if endpoint is None:
+            raise BridgeError('NATS configuration does not match the bound MCP agent')
+        home = endpoint.get('mailbox_home', settings['connector_home'])
+        if (settings['tenant'], endpoint['session'], home) != self.nats_identity:
+            raise BridgeError('NATS configuration does not match the bound MCP home and session')
+        store = Store(self.home)
+        try:
+            if store.agents().get(self.agent) != endpoint['session']:
+                raise BridgeError('The bound MCP agent registration changed')
+        finally:
+            store.close()
+
+    @contextmanager
+    def open_transfer_dir(self):
+        try:
+            directory = os.open(self.transfer_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as error:
+            raise BridgeError('The MCP transfer directory is unavailable') from error
+        try:
+            info = os.fstat(directory)
+            if (info.st_uid != os.getuid() or info.st_mode & 0o077 or
+                    self.transfer_identity not in (None, (info.st_dev, info.st_ino))):
+                raise BridgeError('The private MCP transfer directory changed')
+            yield directory
+        finally:
+            os.close(directory)
+
+    def tool_spec(self, tool):
+        if tool in NATS_TOOLS and (not self.nats_config or tool in NATS_FILES and self.transfer_dir is None):
+            raise BridgeError('NATS tool is unavailable for this MCP binding')
+        description, fields, required = TOOLS[tool]
+        if tool == 'history' and self.nats_config:
+            return 'Read retained NATS pair history without acknowledging or waking anyone.', {**fields, 'with': NATS_NAME}, required
+        return description, fields, required
 
     def catalog(self):
-        return [{'name': tool, 'description': description, 'inputSchema': {'type': 'object',
+        catalog = []
+        for tool in TOOLS:
+            if tool in GRANT_ADMIN and not self.grant_admin:
+                continue
+            try:
+                description, fields, required = self.tool_spec(tool)
+            except BridgeError:
+                continue
+            catalog.append({'name': tool, 'description': description, 'inputSchema': {'type': 'object',
             'properties': fields, 'required': required, 'additionalProperties': False},
-            'annotations': {'readOnlyHint': tool in {'wait_agent', 'list_agents', 'agent_status', 'operation_receipt', 'receive', 'inbox_status', 'grant_list', 'grant_show', 'history'},
-                            'destructiveHint': False}}
-            for tool, (description, fields, required) in TOOLS.items() if tool not in GRANT_ADMIN or self.grant_admin]
+            'annotations': {'readOnlyHint': tool in NATS_READ | {'wait_agent', 'list_agents', 'agent_status', 'operation_receipt', 'receive', 'inbox_status', 'grant_list', 'grant_show', 'history'},
+                            'destructiveHint': False}})
+        return catalog
 
     def call(self, tool, arguments):
         if tool not in TOOLS or not isinstance(arguments, dict):
             raise BridgeError('Unknown bridge tool or arguments')
-        _, fields, required = TOOLS[tool]
+        _, fields, required = self.tool_spec(tool)
         if not set(required) <= set(arguments) or not set(arguments) <= set(fields):
             raise ToolFieldsError(missing=set(required)-set(arguments), unexpected=set(arguments)-set(fields))
         for key, value in arguments.items():
@@ -149,12 +228,17 @@ class Adapter:
                     name(value)
                 except BridgeError:
                     raise ToolFieldsError(invalid=[key]) from None
+            elif 'pattern' in schema:
+                if not isinstance(value, str) or not re.fullmatch(schema['pattern'], value):
+                    raise ToolFieldsError(invalid=[key])
             elif not isinstance(value, str) or not value.strip() or len(value) > 12000:
                 raise ToolFieldsError(invalid=[key])
             if 'enum' in schema and value not in schema['enum']:
                 raise ToolFieldsError(invalid=[key])
         if any(contains_findings(arguments[key]) for key in ('message', 'body') if key in arguments):
             raise BridgeError('Possible secrets detected; select redacted text before sending')
+        if tool in NATS_TOOLS or tool == 'history' and self.nats_config:
+            return {'bound_agent': self.agent, 'data': self.nats_call(tool, arguments)}
         if tool == 'history':
             if bool(arguments.get('with')) == bool(arguments.get('id')):
                 raise BridgeError('History requires exactly one of with or id')
@@ -199,6 +283,39 @@ class Adapter:
         if tool == 'inbox_status' and data.get('state') == 'rejected' and data.get('reason') == 'invalid_mail_fields':
             data = {'state': 'rejected', 'reason': 'connector_does_not_accept_inbox_status', 'observed_reason': 'invalid_mail_fields'}
         return {'notice': NOTICE, 'bound_agent': self.agent, 'data': data}
+
+    def nats_call(self, tool, arguments):
+        from csl_nats_tools import call, fetch, file_name, history, put
+
+        async def operation(client):
+            if tool == 'history':
+                return await history(client, partner=arguments.get('with'), message_id=arguments.get('id'),
+                                     last=arguments.get('last'))
+            if tool in NATS_FILES:
+                with self.open_transfer_dir() as directory:
+                    if tool == 'fetch_file':
+                        out = self.transfer_dir / file_name(arguments['name']) if 'name' in arguments else None
+                        return await fetch(client, arguments['id'], out, directory=self.transfer_dir,
+                                           directory_fd=directory)
+                    filename = file_name(arguments['name'])
+                    fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+                    with os.fdopen(fd, 'rb') as source:
+                        file = os.fstat(source.fileno())
+                        if not stat.S_ISREG(file.st_mode) or file.st_uid != os.getuid() or file.st_nlink != 1:
+                            raise BridgeError('Upload requires an owned regular file in the transfer directory')
+                        return await put(client, source, filename, [arguments['to']] if 'to' in arguments else [])
+            verb = 'status' if tool == 'agents_status' else tool
+            return await client.request('ctl.' + verb, arguments)
+
+        result = call(self.nats_config, self.agent, operation, validate_settings=self.require_nats_binding)
+        if tool == 'fetch_file':
+            try:
+                with self.open_transfer_dir():
+                    pass
+            except BridgeError:
+                return {'state': 'saved_in_original_directory',
+                        'message': 'The transfer directory changed during download. The file was saved in the original directory.'}
+        return result
 
     def grant_call(self, tool, arguments):
         from csl_bridge_mailbox import grant, inspect_grants, schema, MailRejected
@@ -302,9 +419,12 @@ def main():
     parser.add_argument('--home', type=Path, required=True)
     parser.add_argument('--agent', required=True)
     parser.add_argument('--grant-admin', action='store_true', help='Explicit owner-configured local grant-admin capability for this fixed recipient only; never inferred from a message.')
+    parser.add_argument('--nats-config', type=Path, help='Use a pinned NATS configuration for history and agent controls.')
+    parser.add_argument('--transfer-dir', type=Path, help='Enable NATS file tools in this private staging directory.')
     args = parser.parse_args()
     try:
-        serve(Adapter(args.home, args.agent, grant_admin=args.grant_admin))
+        serve(Adapter(args.home, args.agent, grant_admin=args.grant_admin, nats_config=args.nats_config,
+                      transfer_dir=args.transfer_dir))
     except (BridgeError, OSError, ValueError):
         print('Bridge MCP startup failed; check explicit local configuration.', file=sys.stderr)
         return 1
