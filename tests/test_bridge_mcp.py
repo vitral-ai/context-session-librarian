@@ -117,8 +117,41 @@ class MCPTests(unittest.TestCase):
 
         client = SimpleNamespace(request=request, connection=SimpleNamespace(close=AsyncMock()))
         with patch('csl_nats_tools.config', return_value=settings), patch('csl_nats_tools.Client.connect', return_value=client):
-            with self.assertRaisesRegex(BridgeError, 'directory changed during download'):
-                adapter.call('fetch_file', {'id': digest})
+            result = adapter.call('fetch_file', {'id': digest})['data']
+        self.assertEqual(result['state'], 'saved_in_original_directory')
+        self.assertNotIn('path', result)
+        self.assertEqual(list(directory.iterdir()), [])
+        self.assertEqual((original / 'report.txt').read_bytes(), b'a')
+
+    def test_stdio_nats_fetch_reports_publication_when_path_moves_on_close(self):
+        directory = Path(self.temp.name) / 'transfer'
+        directory.mkdir(mode=0o700)
+        adapter, settings = self.nats_adapter(directory)
+        original = directory.with_name('original')
+        digest = hashlib.sha256(b'a').hexdigest()
+
+        async def close():
+            directory.rename(original)
+            directory.mkdir(mode=0o700)
+
+        request = AsyncMock(side_effect=[{}, {'id': digest, 'name': 'report.txt', 'size': 1,
+                                              'data': 'YQ==', 'next_offset': None}])
+        client = SimpleNamespace(request=request, connection=SimpleNamespace(close=close))
+        messages = [{'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
+                     'params': {'protocolVersion': '2024-11-05'}},
+                    {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call',
+                     'params': {'name': 'fetch_file', 'arguments': {'id': digest}}}]
+        stdin = io.BytesIO(('\n'.join(encode(message) for message in messages) + '\n').encode())
+        stdout = io.StringIO()
+        with patch('csl_nats_tools.config', return_value=settings), patch('csl_nats_tools.Client.connect', return_value=client):
+            serve(adapter, stdin, stdout)
+        responses = {response['id']: response for response in map(json.loads, stdout.getvalue().splitlines())}
+        result = responses[2]['result']
+        self.assertFalse(result['isError'])
+        self.assertEqual(json.loads(result['content'][0]['text'])['data'], {
+            'state': 'saved_in_original_directory',
+            'message': 'The transfer directory changed during download. The file was saved in the original directory.',
+        })
         self.assertEqual(list(directory.iterdir()), [])
         self.assertEqual((original / 'report.txt').read_bytes(), b'a')
 

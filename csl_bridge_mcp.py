@@ -312,9 +312,9 @@ class Adapter:
             try:
                 with self.open_transfer_dir():
                     pass
-            except BridgeError as error:
-                raise BridgeError('The MCP transfer directory changed during download. '
-                                  'The file was saved in the original directory.') from error
+            except BridgeError:
+                return {'state': 'saved_in_original_directory',
+                        'message': 'The transfer directory changed during download. The file was saved in the original directory.'}
         return result
 
     def grant_call(self, tool, arguments):
