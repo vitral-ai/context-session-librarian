@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -30,7 +31,30 @@ func (row *hubHistoryRow) valid() bool {
 		(row.ReplyTo == nil || (*row.ReplyTo != row.ID && messageID.MatchString(*row.ReplyTo)))
 }
 
-func (s *Service) importHubHistory(ctx context.Context, row *hubHistoryRow) (any, error) {
+const hubArchiveName = "CSL_ARCHIVE"
+
+type archiveEntry struct {
+	historyEntry
+	FromMachine string `json:"from_machine"`
+	ToMachine   string `json:"to_machine"`
+}
+
+type hubHistoryPlan struct {
+	ID           string `json:"id"`
+	PayloadBytes int64  `json:"payload_bytes"`
+	ReserveBytes int64  `json:"reserve_bytes"`
+	Available    int64  `json:"available_bytes"`
+}
+
+func (s *Service) archiveStream(ctx context.Context) (jetstream.Stream, error) {
+	return s.js.Stream(ctx, hubArchiveName)
+}
+
+func (s *Service) archiveMessage(ctx context.Context, archive jetstream.Stream, id string) (*jetstream.RawStreamMsg, error) {
+	return archive.GetMsg(ctx, 1, jetstream.WithGetMsgSubject(s.subject("archive."+id+".*.*")))
+}
+
+func (s *Service) importHubHistory(ctx context.Context, row *hubHistoryRow, preview bool) (any, error) {
 	if !row.valid() || row.CreatedAt.After(s.clock().Add(time.Minute)) {
 		return nil, invalid("invalid settled Hub history row")
 	}
@@ -56,17 +80,32 @@ func (s *Service) importHubHistory(ctx context.Context, row *hubHistoryRow) (any
 		CreatedAt: row.CreatedAt.UTC(), Body: row.Body, ReplyTo: row.ReplyTo,
 		Attachments: []attachment{}, Items: []Envelope{},
 	}
-	key := "message." + row.ID
-	existing, _, err := readState[messageRecord](ctx, s.state, key)
+	archive, err := s.archiveStream(ctx)
+	if err != nil {
+		return nil, err
+	}
+	info, err := archive.Info(ctx)
+	if err != nil {
+		return nil, err
+	}
+	config := info.Config
+	if !slices.Equal(config.Subjects, []string{s.subject("archive.>")}) ||
+		config.Discard != jetstream.DiscardNew || config.Storage != jetstream.FileStorage ||
+		config.MaxAge != 0 || config.MaxBytes <= 0 || config.Mirror != nil {
+		return nil, invalid("archive must be a writable isolated discard-new file stream")
+	}
+	available := max(0, config.MaxBytes-int64(info.State.Bytes))
+	plan := hubHistoryPlan{ID: row.ID, Available: available}
+
+	existing, _, err := readState[messageRecord](ctx, s.state, "message."+row.ID)
 	if err == nil {
 		prior := existing.Envelope
-		if prior.From != row.From || prior.To != row.To || prior.Body != row.Body {
+		if prior.From != row.From || prior.To != row.To || prior.Body != row.Body ||
+			!sameHistoryParent(prior.ReplyTo, row.ReplyTo) {
 			return nil, invalid("message ID was already used for different content")
 		}
-		if existing.HubHistoryState != "" &&
-			(existing.HubHistoryState != row.State || !prior.CreatedAt.Equal(row.CreatedAt) ||
-				!sameHistoryParent(prior.ReplyTo, row.ReplyTo)) {
-			return nil, invalid("message ID was already used for different Hub history")
+		if preview {
+			return plan, nil
 		}
 		return sendResult{row.ID, "existing"}, nil
 	}
@@ -74,37 +113,39 @@ func (s *Service) importHubHistory(ctx context.Context, row *hubHistoryRow) (any
 		return nil, err
 	}
 
-	// Registered names cannot contain an underscore. No agent durable can
-	// receive this subject. Its per-ID address also makes retry safe after a
-	// stream publish succeeds and the history index write does not.
-	subject := s.subject("agent._history-" + row.ID + ".inbox")
-	raw, err := json.Marshal(historyEntry{envelope, row.State})
+	names := []string{row.From, row.To}
+	slices.Sort(names)
+	subject := s.subject("archive." + row.ID + "." + names[0] + "." + names[1])
+	raw, err := json.Marshal(archiveEntry{historyEntry{envelope, row.State}, row.FromMachine, row.ToMachine})
 	if err != nil {
 		return nil, err
 	}
-	var sequence uint64
-	archived, err := s.stream.GetLastMsgForSubject(ctx, subject)
-	switch {
-	case err == nil:
-		if !bytes.Equal(archived.Data, raw) {
+	archived, err := s.archiveMessage(ctx, archive, row.ID)
+	if err == nil {
+		if archived.Subject != subject || !bytes.Equal(archived.Data, raw) {
 			return nil, invalid("message ID was already used for different Hub history")
 		}
-		sequence = archived.Sequence
-	case errors.Is(err, jetstream.ErrMsgNotFound):
-		ack, err := s.js.Publish(ctx, subject, raw, jetstream.WithExpectStream("CSL_MSG"),
-			jetstream.WithExpectLastSequencePerSubject(0))
-		if err != nil {
-			return nil, err
+		if preview {
+			return plan, nil
 		}
-		sequence = ack.Sequence
-	default:
+		return sendResult{row.ID, "existing"}, nil
+	}
+	if !errors.Is(err, jetstream.ErrMsgNotFound) {
 		return nil, err
 	}
 
-	record := messageRecord{
-		Envelope: envelope, HubHistoryState: row.State, AcceptedAt: envelope.CreatedAt, Sequence: sequence,
+	plan.PayloadBytes = int64(len(raw))
+	// Reserve space for the subject and stream record overhead. The broker
+	// also enforces its exact byte limit atomically with every publish.
+	plan.ReserveBytes = plan.PayloadBytes + int64(len(subject)) + 1024
+	if preview {
+		return plan, nil
 	}
-	if _, err := s.writeExpiring(ctx, key, record, 0, messageAge); err != nil {
+	if plan.ReserveBytes > available {
+		return nil, invalid("archive has insufficient space for this history row")
+	}
+	if _, err := s.js.Publish(ctx, subject, raw, jetstream.WithExpectStream(hubArchiveName),
+		jetstream.WithExpectLastSequencePerSubject(0)); err != nil {
 		return nil, err
 	}
 	return sendResult{row.ID, "imported"}, nil

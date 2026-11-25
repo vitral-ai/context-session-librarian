@@ -121,7 +121,10 @@ on different hosts, pipe the source tool's `--write-selected` output over SSH
 into the owner tool's `--read-selected --apply` input. The stream contains private
 message bodies. Keep it out of logs and use the owner credential in place.
 
-Imports preserve settled state and never publish to an agent inbox. Native
-NATS records take precedence for overlapping IDs with matching endpoints and
-bodies. Reapplying the same settled snapshot is safe. NATS history limits and
-its normal 30-day storage window apply.
+Before writing, the owner tool reports payload bytes, reserved archive bytes
+and available space. A batch that exceeds available space is refused before
+any row is written. Each append is also subject to the broker's byte limit.
+
+Imports preserve settled state in the separate `CSL_ARCHIVE` stream. History
+reads both streams. Native NATS records take precedence for matching IDs.
+Reapplying the same settled snapshot is safe.

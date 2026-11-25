@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -37,6 +38,13 @@ func TestOperatorMode(t *testing.T) {
 		Name: "CSL_MSG", Subjects: []string{"csl.vi.agent.*.inbox"}, Storage: jetstream.FileStorage,
 		MaxAge: messageAge, Duplicates: 2 * time.Minute, MaxMsgSize: 1024 * 1024,
 	}); err != nil {
+		t.Fatal(err)
+	}
+	archiveStream, err := js.CreateStream(ctx, jetstream.StreamConfig{
+		Name: hubArchiveName, Subjects: []string{"csl.vi.archive.>"}, Storage: jetstream.FileStorage,
+		Discard: jetstream.DiscardNew, MaxBytes: 2048, MaxMsgSize: 1024 * 1024,
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
@@ -131,6 +139,23 @@ func TestOperatorMode(t *testing.T) {
 		row.State = "queued"
 		call(owner, "ctl.admin.owner", req, "invalid")
 		row.State = "delivered"
+		var plan hubHistoryPlan
+		if err := json.Unmarshal(admin(map[string]any{"action": "plan-hub-history", "history": &row}), &plan); err != nil ||
+			plan.ID != row.ID || plan.PayloadBytes <= 0 || plan.ReserveBytes <= plan.PayloadBytes || plan.Available != 2048 {
+			t.Fatalf("archive plan: %#v, %v", plan, err)
+		}
+		info, err := archiveStream.Info(ctx)
+		if err != nil || info.State.Msgs != 0 {
+			t.Fatalf("archive plan performed a write: %v, %v", info, err)
+		}
+		tooLarge := row
+		tooLarge.ID, tooLarge.Body = randomID(), strings.Repeat("x", 2048)
+		call(owner, "ctl.admin.owner", map[string]any{"action": "import-hub-history", "history": &tooLarge}, "invalid")
+		liveSubject := "csl.vi.agent.worker-a.inbox"
+		pending, err := js.Publish(ctx, liveSubject, []byte("pending live delivery"))
+		if err != nil {
+			t.Fatal(err)
+		}
 		for _, want := range []string{"imported", "existing"} {
 			var result sendResult
 			if err := json.Unmarshal(admin(req), &result); err != nil || result != (sendResult{row.ID, want}) {
@@ -151,6 +176,13 @@ func TestOperatorMode(t *testing.T) {
 		}
 		call(sender, "ctl.history.sender", history, "not_found")
 		call(third, "ctl.receipt.worker-b", sendResult{row.ID, "acked"}, "forbidden")
+		unread, err := service.stream.GetMsg(ctx, pending.Sequence)
+		if err != nil || !bytes.Equal(unread.Data, []byte("pending live delivery")) {
+			t.Fatalf("archive import evicted a pending live message: %v", err)
+		}
+		if err := service.stream.DeleteMsg(ctx, pending.Sequence); err != nil {
+			t.Fatal(err)
+		}
 		if err := service.deliveryTick(ctx); err != nil {
 			t.Fatal(err)
 		}
@@ -164,27 +196,22 @@ func TestOperatorMode(t *testing.T) {
 				t.Fatalf("history reached %s inbox: %v, %v", name, info, err)
 			}
 		}
-		archive, err := service.stream.GetLastMsgForSubject(ctx, "csl.vi.agent._history-"+row.ID+".inbox")
+		archive, err := service.archiveMessage(ctx, archiveStream, row.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		// A successful archive write may be followed by an interrupted index write.
-		if err := service.state.Delete(ctx, "message."+row.ID); err != nil {
-			t.Fatal(err)
+		if _, _, err := readState[messageRecord](ctx, service.state, "message."+row.ID); !errors.Is(err, jetstream.ErrKeyNotFound) {
+			t.Fatalf("archive modified live history index: %v", err)
 		}
-		admin(req)
-		recovered, _, err := readState[messageRecord](ctx, service.state, "message."+row.ID)
-		if err != nil || recovered.Sequence != archive.Sequence {
-			t.Fatalf("archive retry changed stream sequence: %d, %v", recovered.Sequence, err)
-		}
-		info, err := service.stream.Info(ctx)
+		info, err = archiveStream.Info(ctx)
 		if err != nil || info.State.Msgs != 1 {
 			t.Fatalf("expected one archived copy: %v, %v", info, err)
 		}
-		if err := service.stream.DeleteMsg(ctx, archive.Sequence); err != nil {
-			t.Fatal(err)
+		live, err := service.stream.Info(ctx)
+		if err != nil || live.State.Msgs != 0 {
+			t.Fatalf("import wrote to the live stream: %v, %v", live, err)
 		}
-		if err := service.state.Delete(ctx, "message."+row.ID); err != nil {
+		if err := archiveStream.DeleteMsg(ctx, archive.Sequence); err != nil {
 			t.Fatal(err)
 		}
 	})

@@ -1,11 +1,17 @@
+from contextlib import redirect_stderr
+from io import StringIO
+import json
 from pathlib import Path
 import sqlite3
 import tempfile
+import sys
+from types import SimpleNamespace
 import unittest
+from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 from csl_agent_hub import Hub
-from scripts.import_hub_history import load_history, pair
+from scripts.import_hub_history import apply_history, load_history, pair
 
 
 class HubHistoryImportTests(unittest.TestCase):
@@ -30,7 +36,6 @@ class HubHistoryImportTests(unittest.TestCase):
         with self.hub.connect() as db:
             self.hub.remember(db, packet, status)
             if parent:
-                import json
                 packet['in_reply_to'] = parent
                 db.execute('INSERT INTO envelopes VALUES(?,?,?,?,?,?,NULL,0)',
                            (mid, source, target, self.agents[target]['machine'], json.dumps(packet), status))
@@ -58,3 +63,30 @@ class HubHistoryImportTests(unittest.TestCase):
             db.execute("UPDATE history SET state='dropped',target_machine='stale'")
         with self.assertRaisesRegex(ValueError, 'does not match the current machines'):
             load_history(self.database, [self.selected])
+
+
+class ArchiveCapacityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_batch_reports_capacity_before_all_writes(self):
+        actions = []
+
+        async def request(_subject, raw, *, timeout):
+            data = json.loads(raw)
+            actions.append(data['action'])
+            return SimpleNamespace(data=json.dumps({
+                'id': data['history']['id'], 'payload_bytes': 1024,
+                'reserve_bytes': 2048, 'available_bytes': 3072,
+            }).encode())
+
+        connection = SimpleNamespace(request=request, close=AsyncMock())
+        nats = SimpleNamespace(connect=AsyncMock(return_value=connection))
+        args = SimpleNamespace(tenant='vi', server='tls://example.test:4222', owner_creds='unused', ca=None)
+        report = StringIO()
+        with patch.dict(sys.modules, {'nats': nats}), redirect_stderr(report):
+            with self.assertRaisesRegex(ValueError, 'no rows were written'):
+                await apply_history(args, [{'id': 'first'}, {'id': 'second'}])
+        self.assertEqual(actions, ['plan-hub-history', 'plan-hub-history'])
+        self.assertEqual(json.loads(report.getvalue()), {
+            'rows': 2, 'payload_bytes': 2048, 'reserve_bytes': 4096,
+            'available_bytes': 3072, 'applied': False,
+        })
+        connection.close.assert_awaited_once()

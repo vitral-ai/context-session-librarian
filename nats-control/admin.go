@@ -46,8 +46,8 @@ func (s *Service) admin(ctx context.Context, body []byte) (response any, err err
 	switch request.Action {
 	case "status":
 		return s.fleet(ctx, "status", []byte("{}"))
-	case "import-hub-history":
-		return s.importHubHistory(ctx, request.History)
+	case "plan-hub-history", "import-hub-history":
+		return s.importHubHistory(ctx, request.History, request.Action == "plan-hub-history")
 	case "export":
 		return s.export(ctx, request.Tenant, request.After)
 	case "fetch", "file-acl":

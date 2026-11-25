@@ -73,12 +73,33 @@ async def apply_history(args, rows):
         allow_reconnect=False, connect_timeout=4,
     )
     counts = {'imported': 0, 'existing': 0}
+
+    async def submit(action, row):
+        request = {'action': action, 'history': row}
+        reply = await connection.request(f'{root}.ctl.admin.owner', json.dumps(request).encode(), timeout=12)
+        result = json.loads(reply.data)
+        if result.get('id') != row['id']:
+            raise ValueError(f'Owner {action} refused envelope {row["id"]}')
+        return result
+
     try:
+        payload = reserve = 0
+        available = None
         for row in rows:
-            request = {'action': 'import-hub-history', 'history': row}
-            reply = await connection.request(f'{root}.ctl.admin.owner', json.dumps(request).encode(), timeout=12)
-            result = json.loads(reply.data)
-            if result.get('id') != row['id'] or result.get('state') not in counts:
+            plan = await submit('plan-hub-history', row)
+            used, upper, free = (plan.get(key) for key in ('payload_bytes', 'reserve_bytes', 'available_bytes'))
+            if not all(type(value) is int and value >= 0 for value in (used, upper, free)) or upper < used:
+                raise ValueError('Owner returned an invalid archive capacity plan')
+            payload += used
+            reserve += upper
+            available = free if available is None else min(available, free)
+        print(json.dumps({'rows': len(rows), 'payload_bytes': payload, 'reserve_bytes': reserve,
+                          'available_bytes': available, 'applied': False}), file=sys.stderr, flush=True)
+        if available is not None and reserve > available:
+            raise ValueError('Archive batch exceeds available capacity; no rows were written')
+        for row in rows:
+            result = await submit('import-hub-history', row)
+            if result.get('state') not in counts:
                 raise ValueError(f'Owner import refused envelope {row["id"]}; rerun is safe after correction')
             counts[result['state']] += 1
     finally:
@@ -110,7 +131,7 @@ def main():
                 print(json.dumps(row))
             return
         rows = (load_history(args.hub_db, args.pair) if args.hub_db else
-                (json.loads(line) for line in sys.stdin))
+                [json.loads(line) for line in sys.stdin])
         if not args.apply:
             print(json.dumps({'pairs': len(set(args.pair)), 'rows': len(rows), 'applied': False}))
             return
