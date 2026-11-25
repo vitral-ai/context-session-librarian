@@ -126,9 +126,12 @@ def delivery_members(envelope, agent, size):
 
 
 def digest_entry(item, config_path):
+    text = frame_message(item['from'], item['id'], None, item['body'])
+    if item['from'] in RESERVED_AGENTS or item['from'] == item['to']:
+        return text
     command = shlex.join(['csl', 'reply', item['id'], '--from', item['to'], '--to', item['from'],
                           '--nats-config', str(config_path), '--text', '...'])
-    return frame_message(item['from'], item['id'], None, item['body']) + '\nReply via NATS: ' + command
+    return text + '\nReply via NATS: ' + command
 
 
 def delivery_parts(envelope, config_path):

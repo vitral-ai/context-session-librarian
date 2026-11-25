@@ -214,7 +214,10 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
             db.execute('INSERT INTO agents VALUES (?,?)', ('alice', self.thread))
         inbox = ClaudeInbox(self.store, 'vi', 'alice', self.thread)
         parent = dict(json.loads(self.message.data), body='NATS-only message')
-        digest = dict(parent, id=str(uuid.uuid4()), kind='digest', body='', items=[parent],
+        ci = dict(parent, id=str(uuid.uuid4()), kind='ci', body='CI completion', **{'from': 'ci-notices'})
+        reminder = dict(parent, id=str(uuid.uuid4()), kind='reminder', body='Control reminder',
+                        **{'from': 'csl-control'})
+        digest = dict(parent, id=str(uuid.uuid4()), kind='digest', body='', items=[ci, reminder, parent],
                       **{'from': 'csl-control'})
         inbox.stage(digest, 'digest', config_path=self.config_path)
         outputs = []
@@ -222,6 +225,9 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         surface_nats(self.home, 'vi', 'alice', event, {'session_id': self.thread, 'hook_event_name': event},
                      10, outputs.append)
         text = json.loads(outputs[0])['hookSpecificOutput']['additionalContext']
+        self.assertIn(ci['body'], text)
+        self.assertIn(reminder['body'], text)
+        self.assertEqual(text.count('Reply via NATS:'), 1)
         footer = text.split('Reply via NATS: ', 1)[1]
         _, *args = shlex.split(footer)
         self.assertEqual(args[-1], '...')
