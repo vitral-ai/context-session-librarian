@@ -13,6 +13,7 @@ import (
 )
 
 const mirrorJSZ = "$SYS.REQ.SERVER.PING.JSZ"
+const mirrorContactLimit = time.Minute
 
 var mirroredStreams = []string{"CSL_MSG", "KV_CSL_STATE", "OBJ_CSL_FILES"}
 
@@ -37,9 +38,10 @@ func mirrorLag(body []byte, server, account string) (map[string]uint64, error) {
 				ID      string `json:"id"`
 				Streams []struct {
 					Mirror *struct {
-						Name  string           `json:"name"`
-						Lag   uint64           `json:"lag"`
-						Error *json.RawMessage `json:"error"`
+						Name   string           `json:"name"`
+						Lag    *uint64          `json:"lag"`
+						Active *time.Duration   `json:"active"`
+						Error  *json.RawMessage `json:"error"`
 					} `json:"mirror"`
 				} `json:"stream_detail"`
 			} `json:"account_details"`
@@ -58,10 +60,12 @@ func mirrorLag(body []byte, server, account string) (map[string]uint64, error) {
 			if mirror == nil || !slices.Contains(mirroredStreams, mirror.Name) {
 				continue
 			}
-			if _, exists := lag[mirror.Name]; exists || mirror.Error != nil {
+			if _, exists := lag[mirror.Name]; exists || mirror.Error != nil ||
+				mirror.Lag == nil || mirror.Active == nil || *mirror.Active < 0 ||
+				*mirror.Active > mirrorContactLimit {
 				return nil, errors.New("mirror JSZ reported an unavailable stream")
 			}
-			lag[mirror.Name] = mirror.Lag
+			lag[mirror.Name] = *mirror.Lag
 		}
 	}
 	if len(lag) != len(mirroredStreams) {

@@ -10,9 +10,9 @@ import (
 
 func TestDecodeMirrorLag(t *testing.T) {
 	body := `{"server":{"name":"standby"},"data":{"account_details":[
-		{"id":"foreign","stream_detail":[{"mirror":{"name":"CSL_MSG","lag":99}}]},
-		{"id":"tenant","stream_detail":[{"mirror":{"name":"CSL_MSG","lag":5}},
-		{"mirror":{"name":"KV_CSL_STATE","lag":0}},{"mirror":{"name":"OBJ_CSL_FILES","lag":1}}]}
+		{"id":"foreign","stream_detail":[{"mirror":{"name":"CSL_MSG","lag":99,"active":12}}]},
+		{"id":"tenant","stream_detail":[{"mirror":{"name":"CSL_MSG","lag":5,"active":12}},
+		{"mirror":{"name":"KV_CSL_STATE","lag":0,"active":0}},{"mirror":{"name":"OBJ_CSL_FILES","lag":1,"active":12}}]}
 	]}}`
 	got, err := mirrorLag([]byte(body), "standby", "tenant")
 	if err != nil || got["CSL_MSG"] != 5 || got["KV_CSL_STATE"] != 0 || got["OBJ_CSL_FILES"] != 1 {
@@ -22,6 +22,12 @@ func TestDecodeMirrorLag(t *testing.T) {
 		strings.Replace(body, "standby", "unexpected", 1),
 		strings.Replace(body, "OBJ_CSL_FILES", "irrelevant", 1),
 		strings.Replace(body, `"lag":5`, `"lag":5,"error":{"description":"inactive"}`, 1),
+		strings.Replace(body, `"lag":5,`, "", 1),
+		strings.Replace(body, `"lag":5`, `"lag":null`, 1),
+		strings.Replace(body, `,"active":0`, "", 1),
+		strings.Replace(body, `"active":0`, `"active":null`, 1),
+		strings.Replace(body, `"active":0`, `"active":-1`, 1),
+		strings.Replace(body, `"active":0`, `"active":61000000000`, 1),
 	} {
 		if _, err := mirrorLag([]byte(invalid), "standby", "tenant"); err == nil {
 			t.Fatal("invalid or unavailable mirror response was treated as healthy")
