@@ -36,6 +36,7 @@ LOG = logging.getLogger(__name__)
 class ControlRejected(BridgeError):
     def __init__(self, code, message):
         super().__init__(message)
+        self.code = code
         self.uncertain = code == 'invalid' and message == 'control operation unavailable'
         self.reply_parent_missing = code == 'not_found' and message == 'reply target does not belong to this pair'
 
@@ -778,7 +779,7 @@ async def post_saved(client, store, key, thread, envelope, *, replay=False):
         result = await client.send(envelope, timeout=3 if replay else 12)
         state = result.get('state')
         if result.get('id') != message_id or state not in ('queued', 'delivered', 'acked', 'refused', 'dropped'):
-            raise BridgeError(f'Unexpected NATS send receipt; retry with --id {message_id}')
+            raise BridgeError('Unexpected NATS send receipt; retry with the printed config pin and message ID')
     except ControlRejected as error:
         # A reply can reach the promoted broker before the sender replays its parent.
         waiting_for_parent = error.reply_parent_missing and envelope.get('kind') == 'reply'
@@ -852,6 +853,8 @@ def send_command(args):
     from csl_nats_tools import attachment, file_id
     file_ids = list(dict.fromkeys(file_id(value) for value in getattr(args, 'attach', [])))
     print('message_id=' + message_id, file=sys.stderr)
+    if reply_to:
+        print('retry_reply=' + shlex.join((reply_to, '--to', target)), file=sys.stderr)
     thread = settings['agents'][source]['session']
     store = Store(settings['connector_home'])
 
@@ -877,7 +880,7 @@ def send_command(args):
     except BridgeError:
         raise
     except Exception as error:
-        raise BridgeError(f'NATS send unconfirmed ({type(error).__name__}); retry with --id {message_id}') from None
+        raise BridgeError(f'NATS send unconfirmed ({type(error).__name__}); retry with the printed config pin and message ID') from None
     finally:
         store.close()
     print(encode(result))

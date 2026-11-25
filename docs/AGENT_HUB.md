@@ -197,7 +197,26 @@ registered. For a NATS-only name, use
 `csl bridge --home HOME agent --nats NAME --thread UUID`.
 Send with `csl send --nats-config PATH --from alice --to bob --text
 "Hello"`. Add `--urgent --reason blocked` for an urgent message. If the send
-outcome is unknown, retry with the printed `--id` and the same text and target.
+outcome is unknown, retry with `--id` set to the printed `message_id`, the
+printed `retry_pin` option, and the same sender, target, text and reply parent.
+For a NATS reply, use the printed `retry_reply` arguments in place of the
+original parent and target arguments.
+
+To opt in an individual sender, add its name and absolute NATS config path
+to `senders` in the owner-managed `~/.config/csl/sender-routes.json`. Set
+`nats_recipients` to the names enrolled in that NATS tenant:
+
+```json
+{"senders":{"alice":"/private/config/vi.json"},"nats_recipients":["alice","bob"]}
+```
+
+Plain `csl send` and `csl reply` print `transport=nats` for enrolled recipients
+and `transport=hub` for other recipients. Sends and replies with an explicit
+`--id` require the original config pin so a retry survives routing changes.
+Use `--hub-config PATH` to reply to an old Hub message whose parent
+has yet to be imported, or `--nats-config PATH` with `--to` and the full parent
+ID to pin a NATS reply. A reply with a short ID and no target must resolve
+uniquely across both histories.
 
 For Claude, add `"cli": "claude"`, `"mailbox_home": "/private/bridge/claude"`
 and `"claude_config": "/private/claude"` to the agent entry. Register the

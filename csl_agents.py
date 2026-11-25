@@ -5,14 +5,16 @@ import logging
 import os
 import sqlite3
 from pathlib import Path
+import shlex
 import ssl
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 import uuid
 
-from csl_bridge_store import BridgeError, decode, encode, identifier, message_header, name
+from csl_bridge_store import BridgeError, decode, encode, identifier, message_header, message_selector, name
 
 
 def frame_message(source, task, session, text):
@@ -24,6 +26,7 @@ def frame_message(source, task, session, text):
 
 
 DEFAULT_CONFIG = Path.home() / '.config/csl/agents.json'
+SENDER_ROUTES = DEFAULT_CONFIG.with_name('sender-routes.json')
 
 
 def config(path=DEFAULT_CONFIG):
@@ -173,11 +176,88 @@ def loop(connector):
         connector.stop.wait(min(30, 2 ** min(failures, 5)) if failures else .5)
 
 
+def reply_route(hub, nats_config, source, selector, target, enrolled):
+    from csl_nats import ControlRejected
+    from csl_nats_tools import call as nats_call, history
+
+    hub_rows = call(hub, {'action': 'history', 'source': source, 'id': selector})['messages']
+    if len(selector) == 36 and len(hub_rows) == 1:
+        row = hub_rows[0]
+        if row['target'] == source and row['source'] not in enrolled:
+            return row['source'], identifier(row['id'])
+
+    async def lookup(client):
+        return await history(client, message_id=selector)
+
+    try:
+        nats_rows = nats_call(nats_config, source, lookup)['messages']
+    except ControlRejected as error:
+        if error.code != 'not_found':
+            raise
+        nats_rows = []
+    matches = {(row['id'], row['source'], row['target']) for row in hub_rows}
+    matches.update((row['id'], row['from'], row['to']) for row in nats_rows)
+    if len(matches) != 1:
+        raise BridgeError('Reply needs one matching message across Hub and NATS. Use the full ID and --to.')
+    reply, sender, recipient = matches.pop()
+    if recipient != source or (target and target != sender):
+        raise BridgeError('Reply target does not match the original incoming message')
+    return sender, identifier(reply)
+
+
+def select_sender_route(args):
+    from csl_bridge_claude_notify import owned_json
+
+    try:
+        routes = owned_json(SENDER_ROUTES)
+    except FileNotFoundError:
+        return
+    except ValueError:
+        raise BridgeError('Invalid CSL sender routing file') from None
+    if (not isinstance(routes, dict) or not isinstance(routes.get('senders'), dict)
+            or not isinstance(routes.get('nats_recipients'), list)
+            or not all(isinstance(value, str) for value in routes['nats_recipients'])):
+        raise BridgeError('Invalid CSL sender routing file')
+    source = args.source or os.environ.get('CSL_AGENT')
+    if not source:
+        source = config().get('agent')
+    if source not in routes['senders']:
+        return
+    route = routes['senders'][source]
+    if not isinstance(route, str) or not Path(route).expanduser().is_absolute():
+        raise BridgeError('CSL sender routing needs an absolute NATS configuration path')
+    args.source = source
+    nats_config = Path(route).expanduser()
+    enrolled = routes['nats_recipients']
+    if args.is_reply:
+        if args.message_id and args.in_reply_to:
+            raise BridgeError('Use the positional reply ID or --in-reply-to, not both')
+        selector = message_selector(args.message_id or args.in_reply_to)
+        if not args.to or (args.to in enrolled and len(selector) != 36):
+            args.to, selector = reply_route(config(), nats_config, source, selector, args.to, enrolled)
+        args.message_id, args.in_reply_to = selector, None
+    if args.to in enrolled:
+        args.nats_config = nats_config
+        print('transport=nats', file=sys.stderr)
+    else:
+        if args.is_reply:
+            args.message_id, args.in_reply_to = None, args.message_id
+        print('transport=hub', file=sys.stderr)
+
+
 def _execute(args):
     if (args.hub_action == 'status' and getattr(args, 'owner', None) is None) or args.hub_action in ('versions', 'close', 'complete', 'put', 'fetch') or (
             args.hub_action == 'history' and args.nats_config):
         from csl_nats_tools import command
         return command(args)
+    if args.hub_action == 'send':
+        if args.nats_config is None and args.hub_config is None:
+            if args.id:
+                raise BridgeError('Use --id with the original --nats-config or --hub-config path printed for the send')
+            select_sender_route(args)
+        flag = '--nats-config' if args.nats_config is not None else '--hub-config'
+        path = (args.nats_config or args.hub_config or DEFAULT_CONFIG).expanduser().absolute()
+        print('retry_pin=' + shlex.join((flag, str(path))), file=sys.stderr)
     if getattr(args, 'nats_config', None):
         from csl_nats import send_command
         return send_command(args)
@@ -185,7 +265,7 @@ def _execute(args):
         raise BridgeError('Urgency options require --nats-config')
     if getattr(args, 'attach', []):
         raise BridgeError('Attachments require --nats-config')
-    settings = config(args.hub_config)
+    settings = config(args.hub_config or DEFAULT_CONFIG)
     request = {'action': args.hub_action}
     if args.hub_action == 'register':
         request.update({key: getattr(args, key) for key in ('name', 'session', 'cli', 'machine')})
@@ -221,7 +301,6 @@ def _execute(args):
             if contains_findings(args.text):
                 raise BridgeError('Possible secrets detected; select redacted text before sending')
         # Print the ID before networking: unknown outcomes are retried with this ID.
-        import sys
         print('message_id=' + request['id'], file=sys.stderr)
     elif args.hub_action == 'history':
         source = args.source or os.environ.get('CSL_AGENT') or settings.get('agent')
@@ -267,14 +346,15 @@ def add_commands(subparsers, _):
         pair.add_argument('source'); pair.add_argument('target'); pair.add_argument('--both', action='store_true')
     for action in ('send', 'reply'):
         send = subparsers.add_parser(action, help='Send a durable envelope and wake its registered recipient.')
-        send.add_argument('--hub-config', type=Path, default=DEFAULT_CONFIG)
         send.add_argument('--from', dest='source')
         send.add_argument('--to', required=action == 'send')
         body = send.add_mutually_exclusive_group()
         body.add_argument('--text-file', type=Path, default=Path('-'))
         body.add_argument('--text')
-        send.add_argument('--id')
-        send.add_argument('--nats-config', type=Path)
+        send.add_argument('--id', help='Message UUID. Requires the original --hub-config or --nats-config path.')
+        route = send.add_mutually_exclusive_group()
+        route.add_argument('--hub-config', type=Path)
+        route.add_argument('--nats-config', type=Path)
         send.add_argument('--attach', action='append', default=[], metavar='FILE_ID')
         if action == 'send':
             send.add_argument('--urgent', action='store_true')
