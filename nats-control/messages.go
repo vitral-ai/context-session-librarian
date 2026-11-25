@@ -52,12 +52,13 @@ type Envelope struct {
 }
 
 type messageRecord struct {
-	Envelope    Envelope  `json:"envelope"`
-	Fingerprint string    `json:"fingerprint,omitempty"`
-	AcceptedAt  time.Time `json:"accepted_at"`
-	ReadyAt     time.Time `json:"ready_at"`
-	Sequence    uint64    `json:"sequence,omitempty"`
-	PublishFrom uint64    `json:"publish_from,omitempty"`
+	HubHistoryState string    `json:"hub_history_state,omitempty"`
+	Envelope        Envelope  `json:"envelope"`
+	Fingerprint     string    `json:"fingerprint,omitempty"`
+	AcceptedAt      time.Time `json:"accepted_at"`
+	ReadyAt         time.Time `json:"ready_at"`
+	Sequence        uint64    `json:"sequence,omitempty"`
+	PublishFrom     uint64    `json:"publish_from,omitempty"`
 }
 
 type messageState struct {

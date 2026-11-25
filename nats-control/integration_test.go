@@ -119,6 +119,76 @@ func TestOperatorMode(t *testing.T) {
 	call(peer, "ctl.status.worker-a", map[string]string{}, "forbidden")
 	call(peer, "ctl.admin.worker-a", map[string]string{"action": "register"}, "forbidden")
 
+	t.Run("HubHistoryImport", func(t *testing.T) {
+		stamp := time.Now().UTC().Add(-time.Hour)
+		row := hubHistoryRow{ID: randomID(), From: "worker-a", To: "worker-b",
+			FromMachine: "fixture", ToMachine: "fixture", CreatedAt: stamp, State: "delivered", Body: "old Hub body"}
+		req := map[string]any{"action": "import-hub-history", "history": &row}
+		call(peer, "ctl.admin.worker-a", req, "forbidden")
+		row.ToMachine = "another-machine"
+		call(owner, "ctl.admin.owner", req, "forbidden")
+		row.ToMachine = "fixture"
+		row.State = "queued"
+		call(owner, "ctl.admin.owner", req, "invalid")
+		row.State = "delivered"
+		for _, want := range []string{"imported", "existing"} {
+			var result sendResult
+			if err := json.Unmarshal(admin(req), &result); err != nil || result != (sendResult{row.ID, want}) {
+				t.Fatalf("import: %#v, %v", result, err)
+			}
+		}
+		row.Body = "mismatched"
+		call(owner, "ctl.admin.owner", req, "invalid")
+		row.Body = "old Hub body"
+		history := map[string]string{"id": row.ID}
+		for name, conn := range map[string]*nats.Conn{"worker-a": peer, "worker-b": third} {
+			var result struct{ Messages []historyEntry }
+			if err := json.Unmarshal(call(conn, "ctl.history."+name, history, ""), &result); err != nil ||
+				len(result.Messages) != 1 || result.Messages[0].Body != row.Body ||
+				result.Messages[0].State != row.State || !result.Messages[0].CreatedAt.Equal(stamp) {
+				t.Fatalf("history: %#v, %v", result, err)
+			}
+		}
+		call(sender, "ctl.history.sender", history, "not_found")
+		call(third, "ctl.receipt.worker-b", sendResult{row.ID, "acked"}, "forbidden")
+		if err := service.deliveryTick(ctx); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"worker-a", "worker-b"} {
+			c, err := service.stream.Consumer(ctx, "agent-"+name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := c.Info(ctx)
+			if err != nil || info.NumPending != 0 {
+				t.Fatalf("history reached %s inbox: %v, %v", name, info, err)
+			}
+		}
+		archive, err := service.stream.GetLastMsgForSubject(ctx, "csl.vi.agent._history-"+row.ID+".inbox")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A successful archive write may be followed by an interrupted index write.
+		if err := service.state.Delete(ctx, "message."+row.ID); err != nil {
+			t.Fatal(err)
+		}
+		admin(req)
+		recovered, _, err := readState[messageRecord](ctx, service.state, "message."+row.ID)
+		if err != nil || recovered.Sequence != archive.Sequence {
+			t.Fatalf("archive retry changed stream sequence: %d, %v", recovered.Sequence, err)
+		}
+		info, err := service.stream.Info(ctx)
+		if err != nil || info.State.Msgs != 1 {
+			t.Fatalf("expected one archived copy: %v, %v", info, err)
+		}
+		if err := service.stream.DeleteMsg(ctx, archive.Sequence); err != nil {
+			t.Fatal(err)
+		}
+		if err := service.state.Delete(ctx, "message."+row.ID); err != nil {
+			t.Fatal(err)
+		}
+	})
+
 	text := strings.Repeat("x", maxBody-1) + "\n"
 	message := Envelope{V: 1, ID: randomID(), From: "sender", To: "worker-a", Kind: "message",
 		Urgency: "normal", CreatedAt: time.Now().UTC(), Body: text, ClientVersion: "1.3.0+abc"}

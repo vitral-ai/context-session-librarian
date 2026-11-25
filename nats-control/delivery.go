@@ -38,6 +38,18 @@ func (s *Service) messages(ctx context.Context) ([]messageEntry, error) {
 		if order := a.record.AcceptedAt.Compare(b.record.AcceptedAt); order != 0 {
 			return order
 		}
+		if (a.record.HubHistoryState != "") != (b.record.HubHistoryState != "") {
+			if a.record.HubHistoryState != "" {
+				return -1
+			}
+			return 1
+		}
+		if a.record.HubHistoryState != "" && a.record.Sequence != b.record.Sequence {
+			if a.record.Sequence < b.record.Sequence {
+				return -1
+			}
+			return 1
+		}
 		return strings.Compare(a.record.Envelope.ID, b.record.Envelope.ID)
 	})
 	return entries, nil
@@ -149,11 +161,15 @@ func (s *Service) history(ctx context.Context, caller string, body []byte) (any,
 		if request.ID != "" && request.ID != entry.record.Envelope.ID {
 			continue
 		}
-		state, _, err := readState[messageState](ctx, s.state, "msg."+entry.record.Envelope.ID)
-		if err != nil {
-			return nil, err
+		state := entry.record.HubHistoryState
+		if state == "" {
+			current, _, err := readState[messageState](ctx, s.state, "msg."+entry.record.Envelope.ID)
+			if err != nil {
+				return nil, err
+			}
+			state = current.State
 		}
-		item := historyEntry{entry.record.Envelope, state.State}
+		item := historyEntry{entry.record.Envelope, state}
 		raw, err := json.Marshal(item)
 		if err != nil {
 			return nil, err
@@ -194,7 +210,7 @@ func (s *Service) receipt(ctx context.Context, caller string, body []byte) (any,
 	if err != nil {
 		return nil, err
 	}
-	if entry.Sequence == 0 {
+	if entry.HubHistoryState != "" || entry.Sequence == 0 {
 		return nil, forbidden("message has not reached the inbox")
 	}
 	state, revision, err := readState[messageState](ctx, s.state, "msg."+request.ID)
