@@ -156,7 +156,10 @@ func (s *Service) send(ctx context.Context, caller string, body []byte) (sendRes
 	allowed, _, err := readState[bool](ctx, s.state, "pair."+caller+"."+envelope.To)
 	if errors.Is(err, jetstream.ErrKeyNotFound) || (err == nil && !allowed) {
 		s.notice(ctx, "Unapproved pair", caller, envelope.To)
-		return sendResult{}, forbidden("pair permission is required")
+		return sendResult{}, forbidden(fmt.Sprintf(
+			"pair permission is required for %s -> %s. Ask the owner via nats-control to approve this direction.",
+			caller, envelope.To,
+		))
 	}
 	if err != nil {
 		return sendResult{}, err

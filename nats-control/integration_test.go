@@ -334,7 +334,12 @@ func TestOperatorMode(t *testing.T) {
 	text := strings.Repeat("x", maxBody-1) + "\n"
 	message := Envelope{V: 1, ID: randomID(), From: "sender", To: "worker-a", Kind: "message",
 		Urgency: "normal", CreatedAt: time.Now().UTC(), Body: text, ClientVersion: "1.3.0+abc"}
-	call(sender, "send.sender", message, "forbidden")
+	refusal := call(sender, "send.sender", message, "forbidden")
+	var pairError apiError
+	if err := json.Unmarshal(refusal, &pairError); err != nil ||
+		pairError.Message != "pair permission is required for sender -> worker-a. Ask the owner via nats-control to approve this direction." {
+		t.Fatalf("unexpected pair refusal: %s", refusal)
+	}
 	admin(map[string]any{"action": "allow", "from": "sender", "to": "worker-a"})
 	message.From = "worker-b"
 	call(sender, "send.sender", message, "forbidden")
