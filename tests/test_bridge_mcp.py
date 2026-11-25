@@ -1,11 +1,13 @@
 """Stdio adapter boundaries; no native runtime, network, auth or inference."""
+import hashlib
 import io
 import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -57,6 +59,67 @@ class MCPTests(unittest.TestCase):
             self.adapter.call('history', {})
         with self.assertRaises(BridgeError):
             self.adapter.call('history', {'with': 'other', 'source': 'spoof'})
+
+    def nats_adapter(self, transfer=None):
+        store = Store(self.home)
+        try:
+            thread = store.agents()['worker']
+        finally:
+            store.close()
+        config = Path(self.temp.name) / 'nats.json'
+        settings = {'tenant': 'vi', 'connector_home': self.home, 'agents': {'worker': {'session': thread}}}
+        with patch('csl_nats.config', return_value=settings):
+            adapter = Adapter(self.home, 'worker', nats_config=config, transfer_dir=transfer)
+        return adapter, settings
+
+    def test_nats_config_replacement_cannot_rebind_running_mcp(self):
+        adapter, settings = self.nats_adapter()
+        altered = [
+            dict(settings, tenant='other'),
+            dict(settings, connector_home=self.home.parent / 'other'),
+            dict(settings, agents={'worker': {'session': str(uuid.uuid4())}}),
+        ]
+        with patch('csl_nats_tools.Client.connect', new_callable=AsyncMock) as connect:
+            for replacement in altered:
+                with patch('csl_nats_tools.config', return_value=replacement):
+                    with self.assertRaisesRegex(BridgeError, 'bound MCP'):
+                        adapter.call('versions', {})
+            connect.assert_not_awaited()
+
+    def test_nats_file_tools_reject_a_substituted_directory(self):
+        directory = Path(self.temp.name) / 'transfer'
+        directory.mkdir(mode=0o700)
+        adapter, settings = self.nats_adapter(directory)
+        directory.rename(directory.with_name('original'))
+        directory.mkdir(mode=0o700)
+        (directory / 'substitute.txt').write_text('must not upload')
+        client = SimpleNamespace(request=AsyncMock(), connection=SimpleNamespace(close=AsyncMock()))
+        with patch('csl_nats_tools.config', return_value=settings), patch('csl_nats_tools.Client.connect', return_value=client):
+            for tool, args in [('put_file', {'name': 'substitute.txt'}), ('fetch_file', {'id': 'a' * 64})]:
+                with self.assertRaisesRegex(BridgeError, 'directory changed'):
+                    adapter.call(tool, args)
+        self.assertEqual([call.args[0] for call in client.request.await_args_list], ['ctl.hello'] * 2)
+
+    def test_nats_fetch_keeps_directory_fd_during_replacement(self):
+        directory = Path(self.temp.name) / 'transfer'
+        directory.mkdir(mode=0o700)
+        adapter, settings = self.nats_adapter(directory)
+        original = directory.with_name('original')
+        digest = hashlib.sha256(b'a').hexdigest()
+
+        async def request(verb, _):
+            if verb == 'ctl.hello':
+                return {}
+            self.assertEqual(verb, 'ctl.fetch')
+            directory.rename(original)
+            directory.mkdir(mode=0o700)
+            return {'id': digest, 'name': 'report.txt', 'size': 1, 'data': 'YQ==', 'next_offset': None}
+
+        client = SimpleNamespace(request=request, connection=SimpleNamespace(close=AsyncMock()))
+        with patch('csl_nats_tools.config', return_value=settings), patch('csl_nats_tools.Client.connect', return_value=client):
+            adapter.call('fetch_file', {'id': digest})
+        self.assertEqual(list(directory.iterdir()), [])
+        self.assertEqual((original / 'report.txt').read_bytes(), b'a')
 
     def test_fixed_identity_and_no_sensitive_surfaces(self):
         with patch('csl_bridge_mcp.local_call', return_value={'state': 'delivered'}) as call:

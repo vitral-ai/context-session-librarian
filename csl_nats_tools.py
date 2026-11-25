@@ -1,11 +1,13 @@
 """One-shot operations on the authenticated NATS control API."""
 import base64
 import binascii
+from contextlib import contextmanager
 import hashlib
 import os
 from pathlib import Path
 import re
-from tempfile import NamedTemporaryFile, TemporaryFile
+from tempfile import TemporaryFile
+import uuid
 
 from csl_bridge_store import BridgeError, encode, identifier, message_selector
 from csl_nats import Client, agent_name, config, run_cli
@@ -80,7 +82,25 @@ def verify_file_receipt(result, info):
         raise BridgeError('NATS file metadata changed')
 
 
-async def fetch(client, value, out=None, *, directory=Path('.')):
+@contextmanager
+def download_target(directory, directory_fd, filename):
+    owned = directory_fd is None
+    parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY) if owned else directory_fd
+    temporary = '.csl-download-' + uuid.uuid4().hex
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent)
+        try:
+            with os.fdopen(fd, 'wb') as stream:
+                yield stream
+            os.link(temporary, filename, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+        finally:
+            os.unlink(temporary, dir_fd=parent)
+    finally:
+        if owned:
+            os.close(parent)
+
+
+async def fetch(client, value, out=None, *, directory=Path('.'), directory_fd=None):
     identifier = file_id(value)
     first = await client.request('ctl.fetch', {'id': identifier, 'offset': 0})
     info = attachment({'id': identifier, 'name': first.get('name'), 'size': first.get('size')})
@@ -89,7 +109,7 @@ async def fetch(client, value, out=None, *, directory=Path('.')):
     digest = hashlib.sha256()
     offset, page = 0, first
     # Publish the fully verified file without replacing an existing path.
-    with NamedTemporaryFile(dir=dest.parent) as temporary:
+    with download_target(dest.parent, directory_fd, dest.name) as temporary:
         while True:
             verify_file_receipt(page, info)
             try:
@@ -109,8 +129,6 @@ async def fetch(client, value, out=None, *, directory=Path('.')):
             page = await client.request('ctl.fetch', {'id': identifier, 'offset': offset})
         if digest.hexdigest() != identifier:
             raise BridgeError('Downloaded file does not match its SHA-256 ID')
-        temporary.flush()
-        os.link(temporary.name, dest)
     return {**info, 'path': str(dest)}
 
 
@@ -140,9 +158,11 @@ async def history(client, *, partner=None, message_id=None, last=None):
     return {'messages': messages, 'retention': retention}
 
 
-def call(path, source, operation):
+def call(path, source, operation, *, validate_settings=None):
     settings = config(path)
     agent = agent_name(source or os.environ.get('CSL_AGENT'), registration=True)
+    if validate_settings is not None:
+        validate_settings(settings)
 
     async def run():
         client = await Client.connect(settings, agent)

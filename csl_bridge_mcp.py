@@ -6,6 +6,7 @@ directory. It has no shell, auth, or runtime tools.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import json
 import os
 import re
@@ -131,17 +132,45 @@ class Adapter:
             from csl_nats import agent_name, config
             agent_name(agent, registration=True)
             settings = config(nats_config)
-            endpoint = settings['agents'].get(agent)
-            if (endpoint is None or endpoint['session'] != thread or
-                    endpoint.get('mailbox_home', settings['connector_home']) != self.home.resolve()):
-                raise BridgeError('NATS configuration does not match the bound MCP home and session')
+            self.nats_identity = (settings['tenant'], thread, self.home.resolve())
+            self.require_nats_binding(settings)
         if transfer_dir is not None:
             if nats_config is None:
                 raise BridgeError('The transfer directory requires NATS')
             self.transfer_dir = Path(transfer_dir).resolve(strict=True)
-            mode = self.transfer_dir.stat()
-            if not stat.S_ISDIR(mode.st_mode) or mode.st_uid != os.getuid() or mode.st_mode & 0o077:
-                raise BridgeError('Use an owned private transfer directory')
+            self.transfer_identity = None
+            with self.open_transfer_dir() as directory:
+                info = os.fstat(directory)
+                self.transfer_identity = (info.st_dev, info.st_ino)
+
+    def require_nats_binding(self, settings):
+        endpoint = settings['agents'].get(self.agent)
+        if endpoint is None:
+            raise BridgeError('NATS configuration does not match the bound MCP agent')
+        home = endpoint.get('mailbox_home', settings['connector_home'])
+        if (settings['tenant'], endpoint['session'], home) != self.nats_identity:
+            raise BridgeError('NATS configuration does not match the bound MCP home and session')
+        store = Store(self.home)
+        try:
+            if store.agents().get(self.agent) != endpoint['session']:
+                raise BridgeError('The bound MCP agent registration changed')
+        finally:
+            store.close()
+
+    @contextmanager
+    def open_transfer_dir(self):
+        try:
+            directory = os.open(self.transfer_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as error:
+            raise BridgeError('The MCP transfer directory is unavailable') from error
+        try:
+            info = os.fstat(directory)
+            if (info.st_uid != os.getuid() or info.st_mode & 0o077 or
+                    self.transfer_identity not in (None, (info.st_dev, info.st_ino))):
+                raise BridgeError('The private MCP transfer directory changed')
+            yield directory
+        finally:
+            os.close(directory)
 
     def tool_spec(self, tool):
         if tool in NATS_TOOLS and (not self.nats_config or tool in NATS_FILES and self.transfer_dir is None):
@@ -262,22 +291,23 @@ class Adapter:
             if tool == 'history':
                 return await history(client, partner=arguments.get('with'), message_id=arguments.get('id'),
                                      last=arguments.get('last'))
-            if tool == 'put_file':
-                filename = file_name(arguments['name'])
-                path = self.transfer_dir / filename
-                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-                with os.fdopen(fd, 'rb') as source:
-                    file = os.fstat(source.fileno())
-                    if not stat.S_ISREG(file.st_mode) or file.st_uid != os.getuid() or file.st_nlink != 1:
-                        raise BridgeError('Upload requires an owned regular file in the transfer directory')
-                    return await put(client, source, filename, [arguments['to']] if 'to' in arguments else [])
-            if tool == 'fetch_file':
-                dest = self.transfer_dir / file_name(arguments['name']) if 'name' in arguments else None
-                return await fetch(client, arguments['id'], dest, directory=self.transfer_dir)
+            if tool in NATS_FILES:
+                with self.open_transfer_dir() as directory:
+                    if tool == 'fetch_file':
+                        out = self.transfer_dir / file_name(arguments['name']) if 'name' in arguments else None
+                        return await fetch(client, arguments['id'], out, directory=self.transfer_dir,
+                                           directory_fd=directory)
+                    filename = file_name(arguments['name'])
+                    fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+                    with os.fdopen(fd, 'rb') as source:
+                        file = os.fstat(source.fileno())
+                        if not stat.S_ISREG(file.st_mode) or file.st_uid != os.getuid() or file.st_nlink != 1:
+                            raise BridgeError('Upload requires an owned regular file in the transfer directory')
+                        return await put(client, source, filename, [arguments['to']] if 'to' in arguments else [])
             verb = 'status' if tool == 'agents_status' else tool
             return await client.request('ctl.' + verb, arguments)
 
-        return call(self.nats_config, self.agent, operation)
+        return call(self.nats_config, self.agent, operation, validate_settings=self.require_nats_binding)
 
     def grant_call(self, tool, arguments):
         from csl_bridge_mailbox import grant, inspect_grants, schema, MailRejected
