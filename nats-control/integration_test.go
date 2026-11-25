@@ -72,7 +72,7 @@ func TestOperatorMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner := fixtureConnect(t, url, "owner", fixtureCredentials(t, account, "owner",
-		[]string{"csl.vi.ctl.*.owner"}, []string{"_INBOX.csl.vi.owner.>"}))
+		[]string{"csl.vi.ctl.admin.owner"}, []string{"_INBOX.csl.vi.owner.>"}))
 	admin := func(request map[string]any) []byte {
 		result := fixtureRequest(t, ctx, owner, "csl.vi.ctl.admin.owner", request)
 		assertResponseCode(t, result, "")
@@ -312,6 +312,17 @@ func TestOperatorMode(t *testing.T) {
 	if !bytes.Equal(content, received.Bytes()) {
 		t.Fatal("download failed SHA-256 witness")
 	}
+	var ownerChunk fileResult
+	if err := json.Unmarshal(admin(map[string]any{"action": "fetch", "id": id, "offset": 7}), &ownerChunk); err != nil ||
+		!bytes.Equal(ownerChunk.Data, content[7:7+maxChunk]) {
+		t.Fatal("scoped owner could not fetch a file through admin")
+	}
+	admin(map[string]any{"action": "file-acl", "id": id, "allowed": []string{"worker-a", "worker-b"}})
+	call(third, "ctl.fetch.worker-b", fileRequest{ID: id}, "")
+	admin(map[string]any{"action": "file-acl", "id": id, "allowed": []string{"worker-a"}})
+	call(third, "ctl.fetch.worker-b", fileRequest{ID: id}, "not_found")
+	call(third, "ctl.admin.worker-b", map[string]any{"action": "fetch", "id": id}, "forbidden")
+
 	exported := admin(map[string]any{"action": "export", "tenant": "vi"})
 	if !bytes.Contains(exported, []byte("file."+id)) || !bytes.Contains(exported, []byte("message."+message.ID)) {
 		t.Fatal("owner export did not contain message and file metadata")

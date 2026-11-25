@@ -59,6 +59,10 @@ func (s *Service) file(ctx context.Context, caller, verb string, body []byte) (a
 	if err := decode(body, &request); err != nil {
 		return nil, err
 	}
+	return s.performFileOperation(ctx, caller, verb, request)
+}
+
+func (s *Service) performFileOperation(ctx context.Context, caller, verb string, request fileRequest) (any, error) {
 	if !fileID.MatchString(request.ID) || request.Offset < 0 {
 		return nil, invalid("invalid file ID or offset")
 	}

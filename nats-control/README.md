@@ -48,6 +48,11 @@ configuration against the promoted writable streams.
 
 ## Tenant administration
 
+The owner can fetch a file with `{"action":"fetch","id":"<sha256>","offset":0}`
+and update its ACL with `{"action":"file-acl","id":"<sha256>","allowed":["agent-name"]}`
+on the existing owner admin subject. The fetch reply uses the same chunk
+format as the agent download call.
+
 The authenticated owner can set `{"action":"settings","notices_to":"agent-name"}`
 to route sanitized system notices to a registered agent. Notices contain the
 reason and agent identities, and repeats of the same reason and pair are

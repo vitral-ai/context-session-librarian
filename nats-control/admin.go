@@ -9,25 +9,28 @@ import (
 )
 
 type adminRequest struct {
-	From          string `json:"from,omitempty"`
-	To            string `json:"to,omitempty"`
-	Action        string `json:"action"`
-	Tenant        string `json:"tenant,omitempty"`
-	After         string `json:"after,omitempty"`
-	NoticesTo     string `json:"notices_to,omitempty"`
-	Name          string `json:"name,omitempty"`
-	Machine       string `json:"machine,omitempty"`
-	CLI           string `json:"cli,omitempty"`
-	Role          string `json:"role,omitempty"`
-	Delivery      string `json:"delivery,omitempty"`
-	Minimum       string `json:"minimum,omitempty"`
-	Recommended   string `json:"recommended,omitempty"`
-	Retention     int    `json:"retention,omitempty"`
-	UrgentCap     int    `json:"urgent_cap,omitempty"`
-	StorageBytes  int64  `json:"storage_bytes,omitempty"`
-	FileBytes     int64  `json:"file_bytes,omitempty"`
-	RatePerMinute int    `json:"rate_per_minute,omitempty"`
-	Confirm       string `json:"confirm,omitempty"`
+	ID            string   `json:"id,omitempty"`
+	Offset        int64    `json:"offset,omitempty"`
+	Allowed       []string `json:"allowed,omitempty"`
+	From          string   `json:"from,omitempty"`
+	To            string   `json:"to,omitempty"`
+	Action        string   `json:"action"`
+	Tenant        string   `json:"tenant,omitempty"`
+	After         string   `json:"after,omitempty"`
+	NoticesTo     string   `json:"notices_to,omitempty"`
+	Name          string   `json:"name,omitempty"`
+	Machine       string   `json:"machine,omitempty"`
+	CLI           string   `json:"cli,omitempty"`
+	Role          string   `json:"role,omitempty"`
+	Delivery      string   `json:"delivery,omitempty"`
+	Minimum       string   `json:"minimum,omitempty"`
+	Recommended   string   `json:"recommended,omitempty"`
+	Retention     int      `json:"retention,omitempty"`
+	UrgentCap     int      `json:"urgent_cap,omitempty"`
+	StorageBytes  int64    `json:"storage_bytes,omitempty"`
+	FileBytes     int64    `json:"file_bytes,omitempty"`
+	RatePerMinute int      `json:"rate_per_minute,omitempty"`
+	Confirm       string   `json:"confirm,omitempty"`
 }
 
 func (s *Service) admin(ctx context.Context, body []byte) (response any, err error) {
@@ -44,6 +47,10 @@ func (s *Service) admin(ctx context.Context, body []byte) (response any, err err
 		return s.fleet(ctx, "status", []byte("{}"))
 	case "export":
 		return s.export(ctx, request.Tenant, request.After)
+	case "fetch", "file-acl":
+		return s.performFileOperation(ctx, "owner", request.Action, fileRequest{
+			ID: request.ID, Offset: request.Offset, Allowed: request.Allowed,
+		})
 	case "create-tenant":
 		if s.config.CreateTenant == nil {
 			return nil, forbidden("tenant provisioning is unavailable")
