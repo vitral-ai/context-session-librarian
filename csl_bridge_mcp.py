@@ -307,7 +307,15 @@ class Adapter:
             verb = 'status' if tool == 'agents_status' else tool
             return await client.request('ctl.' + verb, arguments)
 
-        return call(self.nats_config, self.agent, operation, validate_settings=self.require_nats_binding)
+        result = call(self.nats_config, self.agent, operation, validate_settings=self.require_nats_binding)
+        if tool == 'fetch_file':
+            try:
+                with self.open_transfer_dir():
+                    pass
+            except BridgeError as error:
+                raise BridgeError('The MCP transfer directory changed during download. '
+                                  'The file was saved in the original directory.') from error
+        return result
 
     def grant_call(self, tool, arguments):
         from csl_bridge_mailbox import grant, inspect_grants, schema, MailRejected

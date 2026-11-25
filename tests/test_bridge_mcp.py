@@ -100,7 +100,7 @@ class MCPTests(unittest.TestCase):
                     adapter.call(tool, args)
         self.assertEqual([call.args[0] for call in client.request.await_args_list], ['ctl.hello'] * 2)
 
-    def test_nats_fetch_keeps_directory_fd_during_replacement(self):
+    def test_nats_fetch_refuses_to_report_a_stale_path(self):
         directory = Path(self.temp.name) / 'transfer'
         directory.mkdir(mode=0o700)
         adapter, settings = self.nats_adapter(directory)
@@ -117,9 +117,24 @@ class MCPTests(unittest.TestCase):
 
         client = SimpleNamespace(request=request, connection=SimpleNamespace(close=AsyncMock()))
         with patch('csl_nats_tools.config', return_value=settings), patch('csl_nats_tools.Client.connect', return_value=client):
-            adapter.call('fetch_file', {'id': digest})
+            with self.assertRaisesRegex(BridgeError, 'directory changed during download'):
+                adapter.call('fetch_file', {'id': digest})
         self.assertEqual(list(directory.iterdir()), [])
         self.assertEqual((original / 'report.txt').read_bytes(), b'a')
+
+    def test_nats_fetch_returns_a_path_to_the_verified_file(self):
+        directory = Path(self.temp.name) / 'transfer'
+        directory.mkdir(mode=0o700)
+        adapter, settings = self.nats_adapter(directory)
+        digest = hashlib.sha256(b'a').hexdigest()
+        request = AsyncMock(side_effect=[{}, {'id': digest, 'name': 'report.txt', 'size': 1,
+                                              'data': 'YQ==', 'next_offset': None}])
+        client = SimpleNamespace(request=request, connection=SimpleNamespace(close=AsyncMock()))
+        with patch('csl_nats_tools.config', return_value=settings), patch('csl_nats_tools.Client.connect', return_value=client):
+            result = adapter.call('fetch_file', {'id': digest})['data']
+        path = Path(result['path'])
+        self.assertEqual(path, directory / 'report.txt')
+        self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), result['id'])
 
     def test_fixed_identity_and_no_sensitive_surfaces(self):
         with patch('csl_bridge_mcp.local_call', return_value={'state': 'delivered'}) as call:
