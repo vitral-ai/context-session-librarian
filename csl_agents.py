@@ -5,6 +5,7 @@ import logging
 import os
 import sqlite3
 from pathlib import Path
+import shlex
 import ssl
 import sys
 import threading
@@ -249,8 +250,14 @@ def _execute(args):
             args.hub_action == 'history' and args.nats_config):
         from csl_nats_tools import command
         return command(args)
-    if args.hub_action == 'send' and args.nats_config is None and args.hub_config is None:
-        select_sender_route(args)
+    if args.hub_action == 'send':
+        if args.nats_config is None and args.hub_config is None:
+            if args.id:
+                raise BridgeError('Use --id with the original --nats-config or --hub-config path printed for the send')
+            select_sender_route(args)
+        flag = '--nats-config' if args.nats_config is not None else '--hub-config'
+        path = (args.nats_config or args.hub_config or DEFAULT_CONFIG).expanduser().absolute()
+        print('retry_pin=' + shlex.join((flag, str(path))), file=sys.stderr)
     if getattr(args, 'nats_config', None):
         from csl_nats import send_command
         return send_command(args)
@@ -339,14 +346,15 @@ def add_commands(subparsers, _):
         pair.add_argument('source'); pair.add_argument('target'); pair.add_argument('--both', action='store_true')
     for action in ('send', 'reply'):
         send = subparsers.add_parser(action, help='Send a durable envelope and wake its registered recipient.')
-        send.add_argument('--hub-config', type=Path)
         send.add_argument('--from', dest='source')
         send.add_argument('--to', required=action == 'send')
         body = send.add_mutually_exclusive_group()
         body.add_argument('--text-file', type=Path, default=Path('-'))
         body.add_argument('--text')
-        send.add_argument('--id')
-        send.add_argument('--nats-config', type=Path)
+        send.add_argument('--id', help='Message UUID. Requires the original --hub-config or --nats-config path.')
+        route = send.add_mutually_exclusive_group()
+        route.add_argument('--hub-config', type=Path)
+        route.add_argument('--nats-config', type=Path)
         send.add_argument('--attach', action='append', default=[], metavar='FILE_ID')
         if action == 'send':
             send.add_argument('--urgent', action='store_true')

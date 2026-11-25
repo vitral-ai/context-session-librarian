@@ -779,7 +779,7 @@ async def post_saved(client, store, key, thread, envelope, *, replay=False):
         result = await client.send(envelope, timeout=3 if replay else 12)
         state = result.get('state')
         if result.get('id') != message_id or state not in ('queued', 'delivered', 'acked', 'refused', 'dropped'):
-            raise BridgeError(f'Unexpected NATS send receipt; retry with --id {message_id}')
+            raise BridgeError('Unexpected NATS send receipt; retry with the printed config pin and message ID')
     except ControlRejected as error:
         # A reply can reach the promoted broker before the sender replays its parent.
         waiting_for_parent = error.reply_parent_missing and envelope.get('kind') == 'reply'
@@ -878,7 +878,7 @@ def send_command(args):
     except BridgeError:
         raise
     except Exception as error:
-        raise BridgeError(f'NATS send unconfirmed ({type(error).__name__}); retry with --id {message_id}') from None
+        raise BridgeError(f'NATS send unconfirmed ({type(error).__name__}); retry with the printed config pin and message ID') from None
     finally:
         store.close()
     print(encode(result))

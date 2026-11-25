@@ -6,7 +6,7 @@ import io
 from pathlib import Path
 from unittest.mock import patch
 import csl_agents
-from csl_nats import ControlRejected
+from csl_nats import ControlRejected, send_command as nats_send_command
 import test_agent_hub
 import unittest
 from csl_agent_hub import Hub
@@ -222,9 +222,8 @@ class SenderRoutingTests(unittest.TestCase):
         self.hub.assert_not_called()
 
     def test_hub_only_and_unopted_source_still_use_hub(self):
-        message_id = str(uuid.uuid4())
-        self.assertIn('transport=hub', self.execute('send', '--to', 'legacy', '--id', message_id))
-        self.assertEqual(self.hub.call_args.args[1]['id'], message_id)
+        self.assertIn('transport=hub', self.execute('send', '--to', 'legacy'))
+        self.assertEqual(self.hub.call_args.args[1]['target'], 'legacy')
         self.assertNotIn('transport=', self.execute('send', '--to', 'worker', source='other'))
         self.assertEqual(self.hub.call_args.args[1]['source'], 'other')
         self.nats_send.assert_not_called()
@@ -241,6 +240,51 @@ class SenderRoutingTests(unittest.TestCase):
         with self.assertRaisesRegex(BridgeError, 'NATS send unconfirmed'):
             self.execute('send', '--to', 'worker')
         self.hub.assert_not_called()
+
+    def test_same_id_retry_requires_pin_even_after_sender_routes_are_removed(self):
+        message_id = str(uuid.uuid4())
+        parsed = self.parse('send', '--to', 'worker', '--from', 'client', '--text', 'test body')
+        settings = {'tenant': 'vi', 'connector_home': Path('/private/bridge'),
+                    'agents': {'client': {'session': self.parent}}}
+        self.nats_send.side_effect = nats_send_command
+
+        def interrupted(operation):
+            operation.close()
+            raise TimeoutError
+
+        with patch('csl_nats.config', return_value=settings), patch('csl_nats.Store'), \
+                patch('csl_nats.uuid.uuid4', return_value=uuid.UUID(message_id)), \
+                patch('csl_nats.run_cli', side_effect=interrupted), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr, \
+                self.assertRaisesRegex(BridgeError, 'NATS send unconfirmed.*printed config pin'):
+            csl_agents._execute(parsed)
+        self.assertIn('retry_pin=--nats-config /private/vi.json', stderr.getvalue())
+        self.assertIn('message_id=' + message_id, stderr.getvalue())
+        self.nats_send.reset_mock(side_effect=True)
+
+        self.routes['nats_recipients'] = []
+        for command in [('send', '--to', 'worker'), ('reply', self.parent)]:
+            with self.subTest(command=command), self.assertRaisesRegex(BridgeError, 'original --nats-config or --hub-config'):
+                self.execute(*command, '--id', message_id)
+        self.read_routes.side_effect = FileNotFoundError
+        with self.assertRaisesRegex(BridgeError, 'original --nats-config or --hub-config'):
+            self.execute('send', '--to', 'worker', '--id', message_id)
+        self.nats_send.assert_not_called()
+        self.hub.assert_not_called()
+
+        self.execute('send', '--to', 'worker', '--nats-config', '/private/vi.json', '--id', message_id)
+        sent = self.nats_send.call_args.args[0]
+        self.assertEqual((sent.id, sent.nats_config), (message_id, Path('/private/vi.json')))
+        self.hub.assert_not_called()
+
+    def test_hub_retry_stays_on_hub_after_enrollment(self):
+        output = self.execute('send', '--to', 'legacy')
+        self.assertIn('retry_pin=--hub-config ' + str(csl_agents.DEFAULT_CONFIG), output)
+        message_id = self.hub.call_args.args[1]['id']
+        self.routes['nats_recipients'].append('legacy')
+        self.execute('send', '--to', 'legacy', '--hub-config', str(csl_agents.DEFAULT_CONFIG), '--id', message_id)
+        self.assertEqual(self.hub.call_args.args[1]['id'], message_id)
+        self.nats_send.assert_not_called()
 
     def test_full_id_hub_only_reply_does_not_depend_on_nats(self):
         self.hub.side_effect = [{'messages': [{'id': self.parent, 'source': 'legacy', 'target': 'client'}]},

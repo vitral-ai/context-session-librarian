@@ -197,7 +197,8 @@ registered. For a NATS-only name, use
 `csl bridge --home HOME agent --nats NAME --thread UUID`.
 Send with `csl send --nats-config PATH --from alice --to bob --text
 "Hello"`. Add `--urgent --reason blocked` for an urgent message. If the send
-outcome is unknown, retry with the printed `--id` and the same text and target.
+outcome is unknown, retry with `--id` set to the printed `message_id`, the
+printed `retry_pin` option, and the same sender, target, text and reply parent.
 
 To opt in an individual sender, add its name and absolute NATS config path
 to `senders` in the owner-managed `~/.config/csl/sender-routes.json`. Set
@@ -208,8 +209,9 @@ to `senders` in the owner-managed `~/.config/csl/sender-routes.json`. Set
 ```
 
 Plain `csl send` and `csl reply` print `transport=nats` for enrolled recipients
-and `transport=hub` for other recipients. Keep the printed route and ID on
-retry. Use `--hub-config PATH` to reply to an old Hub message whose parent
+and `transport=hub` for other recipients. Sends and replies with an explicit
+`--id` require the original config pin so a retry survives routing changes.
+Use `--hub-config PATH` to reply to an old Hub message whose parent
 has yet to be imported, or `--nats-config PATH` with `--to` and the full parent
 ID to pin a NATS reply. A reply with a short ID and no target must resolve
 uniquely across both histories.
