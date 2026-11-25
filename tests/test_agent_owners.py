@@ -98,3 +98,23 @@ class OwnerTests(unittest.TestCase):
         with patch('csl_nats_tools.command', return_value={}) as command:
             csl_agents._execute(args)
         command.assert_called_once_with(args)
+
+    def test_unowned_sender_notifies_only_itself(self):
+        with self.assertRaises(BridgeError):
+            self.send('client', 'missing', 'remote')
+        self.assertEqual([r['target'] for r in self.notices()], ['client'])
+
+    def test_service_identity_is_reserved_and_cannot_own_agents(self):
+        import uuid
+        with self.assertRaisesRegex(BridgeError, 'Service registration'):
+            self.do('remote', action='register', name='ci-notices', cli='codex',
+                    machine='remote', session=str(uuid.uuid4()))
+        self.do('laptop', action='register', name='ci-notices', cli='codex',
+                machine='laptop', session=str(uuid.uuid4()))
+        with self.assertRaisesRegex(BridgeError, 'cannot own'):
+            self.set_owner('client', 'ci-notices')
+        with self.assertRaisesRegex(BridgeError, 'cannot own'):
+            self.set_owner('client', 'hub-notifier')
+        with self.assertRaises(BridgeError):
+            self.send('ci-notices', 'client')
+        self.assertEqual(self.notices(), [])

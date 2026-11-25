@@ -258,3 +258,13 @@ Refusals notify the sender and its coordinator once each, or only once when
 both are the same agent. Service refusals notify only a known target's owner;
 unknown CI-notice targets remain quiet drops. No unrelated coordinator receives
 the refusal. Removing a coordinator clears its ownership references.
+
+Deployment: back up the Hub database, deploy the module, then immediately backfill
+owners using the existing exact session/CLI/machine values with register --owner.
+Before backfill, unowned senders notify only themselves and unowned service
+recipients produce no notice. For the current deployment, assign laptop-orchestrator
+to cx-backend, cx-win, cx-client, cx-land, cx-verify and bridge-builder;
+releases-orchestrator to cx-rel; comms-orchestrator to nats-control, nats-infra
+and nats-clients. Set each of those three coordinators to own itself. Services
+remain unowned and only the admin machine may register ci-notices. Confirm all
+bindings, queued packet bytes and pair approvals are unchanged after backfill.

@@ -160,6 +160,8 @@ class Hub:
                 record = {k: request[k] for k in ('name', 'session', 'cli', 'machine')}
                 if record['name'] == NOTICE_SOURCE['name']:
                     raise BridgeError('Reserved hub notification identity')
+                if record['name'] in SERVICE_AGENTS and not admin:
+                    raise BridgeError('Service registration requires the owner machine')
                 name(record['name']); identifier(record['session']); name(record['machine'])
                 if record['cli'] not in ('codex', 'claude') or record['machine'] not in self.machines:
                     raise BridgeError('Unknown CLI or machine')
@@ -175,6 +177,8 @@ class Hub:
                         raise BridgeError('Coordinator ownership requires the owner machine')
                     if record['name'] in SERVICE_AGENTS and proposed is not None:
                         raise BridgeError('Service agents have no coordinator owner')
+                    if proposed in SERVICE_AGENTS:
+                        raise BridgeError('Service agents cannot own agents')
                     if proposed is not None and proposed != record['name']:
                         agent(proposed)
                     db.execute('INSERT OR REPLACE INTO agent_owners VALUES(?,?)', (record['name'], proposed))
