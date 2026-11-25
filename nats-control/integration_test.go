@@ -176,6 +176,7 @@ func TestOperatorMode(t *testing.T) {
 		}
 		call(sender, "ctl.history.sender", history, "not_found")
 		call(third, "ctl.receipt.worker-b", sendResult{row.ID, "acked"}, "forbidden")
+		call(sender, "ctl.receipt.sender", sendResult{row.ID, "acked"}, "not_found")
 		unread, err := service.stream.GetMsg(ctx, pending.Sequence)
 		if err != nil || !bytes.Equal(unread.Data, []byte("pending live delivery")) {
 			t.Fatalf("archive import evicted a pending live message: %v", err)
