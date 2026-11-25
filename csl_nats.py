@@ -147,6 +147,19 @@ def delivery_parts(envelope, config_path):
     return [frame_message(envelope['from'], envelope['id'], None, envelope['body'])]
 
 
+def raw_fingerprint(envelope):
+    return hashlib.sha256(encode(envelope).encode('utf-8')).hexdigest()
+
+
+def delivery_fingerprint(envelope):
+    semantic = {key: value for key, value in envelope.items() if key != 'session_id'}
+    if semantic['kind'] == 'digest':
+        semantic.pop('created_at', None)
+        semantic.pop('part', None)
+        semantic['items'] = [delivery_fingerprint(item) for item in semantic['items']]
+    return raw_fingerprint(semantic)
+
+
 class ClaudeInbox:
     def __init__(self, store, tenant, agent, session):
         self.store = store
@@ -158,6 +171,10 @@ class ClaudeInbox:
                 id TEXT NOT NULL, fingerprint TEXT NOT NULL, body TEXT NOT NULL,
                 woke INTEGER NOT NULL DEFAULT 0, surfaced INTEGER NOT NULL DEFAULT 0,
                 UNIQUE (tenant, agent, id))''')
+            db.execute('''CREATE TABLE IF NOT EXISTS nats_claude_digests (
+                tenant TEXT NOT NULL, agent TEXT NOT NULL, session TEXT NOT NULL,
+                id TEXT NOT NULL, fingerprint TEXT NOT NULL,
+                PRIMARY KEY (tenant, agent, id))''')
 
     def require_session(self, db):
         row = db.execute('SELECT thread FROM agents WHERE name=?', (self.route[1],)).fetchone()
@@ -170,13 +187,35 @@ class ClaudeInbox:
             row = db.execute('''SELECT session,fingerprint,surfaced FROM nats_claude_inbox
                 WHERE tenant=? AND agent=? AND id=?''', (*self.route[:2], envelope['id'])).fetchone()
             if row:
-                if (row['session'], row['fingerprint']) != (self.route[2], fingerprint):
+                if row['session'] != self.route[2] or row['fingerprint'] not in (delivery_fingerprint(envelope), raw_fingerprint(envelope)):
                     raise BridgeError('NATS Claude inbox ID collision')
                 return self.route[2] if row['surfaced'] else None
-            parts = delivery_parts(envelope, config_path)
-            db.execute('INSERT INTO nats_claude_inbox (tenant,agent,session,id,fingerprint,body) VALUES (?,?,?,?,?,?)',
-                       (*self.route, envelope['id'], fingerprint, encode(parts)))
-        return None
+            is_digest = envelope['kind'] == 'digest'
+            digest = db.execute('''SELECT session,fingerprint FROM nats_claude_digests
+                WHERE tenant=? AND agent=? AND id=?''', (*self.route[:2], envelope['id'])).fetchone()
+            if digest and (not is_digest or (digest['session'], digest['fingerprint']) != (self.route[2], fingerprint)):
+                raise BridgeError('NATS Claude digest ID collision')
+            if is_digest and not digest:
+                db.execute('INSERT INTO nats_claude_digests VALUES (?,?,?,?,?)', (*self.route, envelope['id'], fingerprint))
+            surfaced = True
+            for item in envelope['items'] if is_digest else [envelope]:
+                member_id = item['id']
+                member_fingerprint = delivery_fingerprint(item)
+                prior = db.execute('''SELECT session,fingerprint,surfaced FROM nats_claude_inbox
+                    WHERE tenant=? AND agent=? AND id=?''', (*self.route[:2], member_id)).fetchone()
+                if prior:
+                    if prior['session'] != self.route[2] or prior['fingerprint'] not in (member_fingerprint, raw_fingerprint(item)):
+                        raise BridgeError('NATS Claude inbox member ID collision')
+                    surfaced = surfaced and bool(prior['surfaced'])
+                    continue
+                if db.execute('SELECT 1 FROM nats_claude_digests WHERE tenant=? AND agent=? AND id=?',
+                              (*self.route[:2], member_id)).fetchone():
+                    raise BridgeError('NATS Claude digest ID collision')
+                part = digest_entry(item, config_path) if is_digest else delivery_parts(item, config_path)[0]
+                db.execute('INSERT INTO nats_claude_inbox (tenant,agent,session,id,fingerprint,body) VALUES (?,?,?,?,?,?)',
+                           (*self.route, member_id, member_fingerprint, encode([part])))
+                surfaced = False
+            return self.route[2] if surfaced else None
 
     def wake_waiting(self, claude_config):
         from csl_bridge_claude_notify import wake
@@ -312,13 +351,13 @@ class Ledger:
             if 'ack_broker' not in {row['name'] for row in db.execute('PRAGMA table_info(nats_delivered)')}:
                 db.execute('ALTER TABLE nats_delivered ADD COLUMN ack_broker TEXT')
 
-    def get(self, message_id, fingerprint):
+    def get(self, message_id, fingerprint, legacy=None):
         rows = self.store.rows('SELECT * FROM nats_delivered WHERE tenant=? AND agent=? AND id=?',
                                (*self.key, message_id))
         if not rows:
             return None
         row = rows[0]
-        if (row['thread'], row['fingerprint']) != (self.thread, fingerprint):
+        if row['thread'] != self.thread or row['fingerprint'] not in (fingerprint, legacy):
             raise BridgeError('NATS receipt does not match its original thread or envelope')
         return row
 
@@ -388,39 +427,63 @@ def envelope_ci(envelope):
     return None
 
 
+def digest_member_operation(store, envelope, thread):
+    message_id = envelope['id']
+    if store.rows("SELECT 1 FROM sqlite_master WHERE name='nats_digest_native' AND type='table'"):
+        rows = store.rows('SELECT * FROM nats_digest_native WHERE id=?', (message_id,))
+        if rows:
+            alias = rows[0]
+            if alias['fingerprint'] != delivery_fingerprint(envelope):
+                raise BridgeError('Native digest member ID collision; envelope differs')
+            parent = store.native_operation(alias['digest_id'], thread)
+            if not parent or parent['peer'] != NATIVE_PEER or message_id not in parent['request'].get('digest_items', []):
+                raise BridgeError('Native digest member is missing its pinned operation')
+            return Store.native_delivery(parent, alias['digest_id'], thread) or {'state': 'queued'}
+    return digest_ci_operation(store, message_id, thread, envelope_ci(envelope))
+
+
 def reserve_digest(store, request, thread, items):
     from csl_bridge_event_state import EventState
 
-    selected, aliases, prior_turn = [], [], None
+    selected, aliases, ci_aliases, prior_turn = [], [], [], None
     for item in items:
         item_id = item['id']
         completion = envelope_ci(item)
         old = store.native_operation(item_id, thread)
         if old:
-            same_ci_completion(old, completion)
+            if old['peer'] == NATIVE_PEER:
+                if old['request'].get('nats_fingerprint') not in (delivery_fingerprint(item), raw_fingerprint(item)):
+                    raise BridgeError('Native digest member ID collision; envelope differs')
+            else:
+                same_ci_completion(old, completion)
             receipt = Store.native_delivery(old, item_id, thread)
             if receipt is None:
                 return None
         else:
-            receipt = digest_ci_operation(store, item_id, thread, completion)
+            receipt = digest_member_operation(store, item, thread)
             if receipt and receipt['state'] != 'delivered':
                 return None
         if receipt:
             prior_turn = receipt['turn_id']
             continue
         selected.append(item_id)
+        aliases.append((item_id, request['id'], delivery_fingerprint(item)))
         if completion:
-            aliases.append((item_id, request['id'], completion))
+            ci_aliases.append((item_id, request['id'], completion))
     request['digest_items'] = selected
     with store.transaction() as db:
         store.reserve(NATIVE_PEER, request, transaction=db)
         if aliases:
-            db.execute('''CREATE TABLE IF NOT EXISTS nats_digest_ci
+            db.execute('''CREATE TABLE IF NOT EXISTS nats_digest_native
                 (id TEXT PRIMARY KEY, digest_id TEXT NOT NULL, fingerprint TEXT NOT NULL)''')
             digest_binding = hashlib.sha256(encode(request).encode()).hexdigest()
             for item_id, _, _ in aliases:
                 EventState.reserve_id(db, item_id, 'operation', digest_binding, thread)
-            db.executemany('INSERT INTO nats_digest_ci VALUES (?,?,?)', aliases)
+            db.executemany('INSERT INTO nats_digest_native VALUES (?,?,?)', aliases)
+        if ci_aliases:
+            db.execute('''CREATE TABLE IF NOT EXISTS nats_digest_ci
+                (id TEXT PRIMARY KEY, digest_id TEXT NOT NULL, fingerprint TEXT NOT NULL)''')
+            db.executemany('INSERT INTO nats_digest_ci VALUES (?,?,?)', ci_aliases)
         if not selected:
             result = {'state': 'delivered', 'request_id': request['id'],
                       'thread_id': thread, 'turn_id': prior_turn}
@@ -450,6 +513,8 @@ def deliver_codex(connector, thread, envelope, fingerprint, *, config_path):
             else:
                 # Reuse the exact persisted request, including pre-upgrade rows.
                 original = old['request']
+                if original.get('nats_fingerprint') == raw_fingerprint(envelope):
+                    request['nats_fingerprint'] = original['nats_fingerprint']
                 if 'ci_completion' not in original:
                     request.pop('ci_completion', None)
                 if 'digest_items' in original:
@@ -461,7 +526,7 @@ def deliver_codex(connector, thread, envelope, fingerprint, *, config_path):
                 receipt = Store.native_delivery(old, envelope['id'], thread)
                 return receipt['turn_id'] if receipt else None
         else:
-            member = digest_ci_operation(connector.store, envelope['id'], thread, completion)
+            member = digest_member_operation(connector.store, envelope, thread)
             if member:
                 return member.get('turn_id')
             if envelope.get('kind') == 'digest':
@@ -513,8 +578,8 @@ async def receive_one(client, ledger, message, deliver, *, retry_delay=60):
     envelope = json.loads(message.data)
     members = delivery_members(envelope, client.agent, len(message.data))
     message_id = envelope['id']
-    fingerprint = hashlib.sha256(encode(envelope).encode('utf-8')).hexdigest()
-    row = ledger.get(message_id, fingerprint)
+    fingerprint = delivery_fingerprint(envelope)
+    row = ledger.get(message_id, fingerprint, raw_fingerprint(envelope))
     if row is None:
         turn = await asyncio.to_thread(deliver, envelope, fingerprint)
         if turn is None:

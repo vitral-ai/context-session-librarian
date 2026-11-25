@@ -19,7 +19,8 @@ from csl_bridge_store import BridgeError, Store, encode, neutralize_headers
 from csl_ci_notice import notice_request
 from codex_sessions import main
 from csl_nats import (MAX_DIGEST, ClaudeInbox, Client, ControlRejected, Ledger, agent_name, body_text, deliver_codex,
-                      delivery_parts, post_saved, receive_one, recover_acks, remember_send, replay_outbox)
+                      delivery_fingerprint, delivery_parts, post_saved, receive_one, recover_acks, remember_send,
+                      replay_outbox)
 
 
 class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
@@ -79,6 +80,16 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rows(), [])
         self.message.nak.assert_awaited_once_with(delay=60)
         self.message.ack_sync.assert_not_awaited()
+
+    async def test_promoted_broker_can_reassign_session_without_rendering_again(self):
+        envelope = dict(json.loads(self.message.data), session_id=str(uuid.uuid4()))
+        self.message.data = encode(envelope).encode()
+        await receive_one(self.client, self.ledger, self.message, self.deliver)
+        self.client.broker = 'secondary'
+        self.message.data = encode(dict(envelope, session_id=str(uuid.uuid4()))).encode()
+        await receive_one(self.client, self.ledger, self.message, self.deliver)
+        self.deliver.assert_called_once()
+        self.assertEqual(self.rows()[0]['ack_broker'], 'secondary')
 
     async def test_digest_keeps_member_order_and_recovers_every_receipt(self):
         items = [dict(json.loads(self.message.data), id=str(uuid.uuid4()), body=body)
@@ -460,6 +471,47 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.deliver_codex(native, self.thread, digest, 'digest'), self.turn)
         self.assertEqual(deliver_hub(native, packet)['turn_id'], self.turn)
         self.assertEqual(native.invoke.call_count, 2)
+
+    def test_replay_of_regrouped_members_is_deduped_by_both_native_paths(self):
+        native, _ = self.dual_transport()
+        first = dict(json.loads(self.message.data), kind='message', body='first member', **{'from': 'bob'})
+        second = dict(first, id=str(uuid.uuid4()), body='second member')
+        third = dict(first, id=str(uuid.uuid4()), body='third member')
+        digest = dict(first, kind='digest', id=str(uuid.uuid4()), body='', items=[first, second],
+                      **{'from': 'csl-control'})
+        regrouped = dict(digest, id=str(uuid.uuid4()), items=[dict(second, session_id=str(uuid.uuid4())), third])
+
+        def codex(envelope):
+            return self.deliver_codex(native, self.thread, envelope, delivery_fingerprint(envelope))
+
+        self.assertEqual(codex(first), self.turn)
+        self.assertEqual(codex(digest), self.turn)
+        self.assertNotIn(first['body'], native.invoke.call_args.kwargs['native_text'])
+        self.assertEqual(codex(regrouped), self.turn)
+        self.assertNotIn(second['body'], native.invoke.call_args.kwargs['native_text'])
+        self.assertIn(third['body'], native.invoke.call_args.kwargs['native_text'])
+        self.assertEqual(codex(second), self.turn)
+        self.assertEqual(native.invoke.call_count, 3)
+        with self.assertRaises(BridgeError):
+            codex(dict(second, body='collision'))
+
+        inbox = ClaudeInbox(self.store, 'vi', 'alice', self.thread)
+
+        def claude(envelope):
+            return inbox.stage(envelope, delivery_fingerprint(envelope), config_path=self.config_path)
+
+        self.assertIsNone(claude(first))
+        self.assertIsNone(claude(digest))
+        self.assertIsNone(claude(regrouped))
+        output = []
+        inbox.surface(str, output.append, 10)
+        self.assertEqual(len(output), 1)
+        for item in (first, second, third):
+            self.assertEqual(output[0].count(item['body']), 1)
+            self.assertEqual(claude(item), self.thread)
+        self.assertEqual(claude(regrouped), self.thread)
+        with self.assertRaises(BridgeError):
+            claude(dict(second, body='collision'))
 
     def test_extended_names_can_be_registered_and_legacy_rules_still_apply(self):
         longest = '2' + 'a' * 62
