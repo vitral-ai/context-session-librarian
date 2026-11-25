@@ -338,6 +338,30 @@ class SenderRoutingTests(unittest.TestCase):
         self.assertIn('transport=hub', self.execute('reply', self.parent[:8]))
         self.assertEqual(self.hub.call_args.args[1]['in_reply_to'], self.parent)
 
+    def test_hub_parent_keeps_hub_route_for_enrolled_peer(self):
+        hub_parent = {'id': self.parent, 'source': 'worker', 'target': 'client'}
+        self.nats_history.return_value = {'messages': [{'id': self.parent, 'from': 'worker', 'to': 'client'}]}
+        for selector in (self.parent[:8], self.parent):
+            with self.subTest(selector=selector):
+                self.hub.side_effect = [{'messages': [hub_parent]}, {'state': 'queued'}]
+                self.assertIn('transport=hub', self.execute('reply', selector, '--to', 'worker'))
+                self.assertEqual(self.hub.call_args.args[1]['in_reply_to'], self.parent)
+        self.nats_send.assert_not_called()
+
+    def test_nats_parent_keeps_nats_route_for_peer_removed_from_enrollment(self):
+        self.routes['nats_recipients'] = []
+        self.nats_history.return_value = {'messages': [{'id': self.parent, 'from': 'worker', 'to': 'client'}]}
+        self.assertIn('transport=nats', self.execute('reply', self.parent, '--to', 'worker'))
+        self.nats_send.assert_called_once()
+        self.hub.assert_called_once()
+
+    def test_pinned_nats_reply_resolves_prefix_without_hub(self):
+        self.nats_history.return_value = {'messages': [{'id': self.parent, 'from': 'worker', 'to': 'client'}]}
+        self.execute('reply', self.parent[:24], '--nats-config', '/private/vi.json')
+        sent = self.nats_send.call_args.args[0]
+        self.assertEqual((sent.message_id, sent.to), (self.parent, 'worker'))
+        self.hub.assert_not_called()
+
     def test_cross_transport_prefix_collision_refuses_to_send(self):
         self.hub.return_value = {'messages': [{'id': self.parent, 'source': 'legacy', 'target': 'client'}]}
         other = '12345678-2222-4222-8222-222222222222'

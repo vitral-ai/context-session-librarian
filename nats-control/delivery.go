@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -69,7 +68,22 @@ func (s *Service) pendingUrgent(ctx context.Context) (map[string]int, error) {
 	return pending, nil
 }
 
-var messagePrefix = regexp.MustCompile(`^[a-f0-9]{8,12}$`)
+func validMessagePrefix(id string) bool {
+	const format = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+	if len(id) < 8 || len(id) > len(format) {
+		return false
+	}
+	for i, ch := range []byte(id) {
+		if format[i] == '-' {
+			if ch != '-' {
+				return false
+			}
+		} else if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
+			return false
+		}
+	}
+	return true
+}
 
 type historyEntry struct {
 	Envelope
@@ -127,7 +141,7 @@ func (s *Service) history(ctx context.Context, caller string, body []byte) (any,
 		return nil, invalid("invalid pair or history limit")
 	}
 	if request.ID != "" {
-		if request.With != "" || request.Before != "" || (!messageID.MatchString(request.ID) && !messagePrefix.MatchString(request.ID)) {
+		if request.With != "" || request.Before != "" || (!messageID.MatchString(request.ID) && !validMessagePrefix(request.ID)) {
 			return nil, invalid("provide one message ID or pair name")
 		}
 	} else if _, err := pairKey(caller, request.With); err != nil {
