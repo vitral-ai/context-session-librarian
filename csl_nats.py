@@ -36,6 +36,7 @@ class ControlRejected(BridgeError):
     def __init__(self, code, message):
         super().__init__(message)
         self.uncertain = code == 'invalid' and message == 'control operation unavailable'
+        self.reply_parent_missing = code == 'not_found' and message == 'reply target does not belong to this pair'
 
 
 def agent_name(value, *, registration=False):
@@ -768,7 +769,9 @@ async def post_saved(client, store, key, thread, envelope, *, replay=False):
         if result.get('id') != message_id or state not in ('queued', 'delivered', 'acked', 'refused', 'dropped'):
             raise BridgeError(f'Unexpected NATS send receipt; retry with --id {message_id}')
     except ControlRejected as error:
-        if not error.uncertain:
+        # A reply can reach the promoted broker before the sender replays its parent.
+        waiting_for_parent = error.reply_parent_missing and envelope.get('kind') == 'reply'
+        if not error.uncertain and not waiting_for_parent:
             with store.transaction() as db:
                 # Broker-specific denials stop consuming recovery slots on this
                 # broker while allowing a different primary to decide on promotion.

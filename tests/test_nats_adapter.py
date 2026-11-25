@@ -664,6 +664,33 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.rows('SELECT state,count(*) AS count FROM nats_outbox GROUP BY state'),
                          [{'state': 'queued', 'count': 1}, {'state': 'replay_refused', 'count': 16}])
 
+    async def test_promoted_broker_retries_reply_after_parent_is_restored(self):
+        reply = json.loads(self.message.data) | {'from': 'alice', 'to': 'bob', 'kind': 'reply',
+                                                'reply_to': str(uuid.uuid4())}
+        newer = dict(reply, id=str(uuid.uuid4()), kind='message', reply_to=None)
+        self.connection.request.side_effect = [SimpleNamespace(data=encode(response).encode()) for response in (
+            {'id': reply['id'], 'state': 'queued'},
+            {'error': 'not_found', 'message': 'reply target does not belong to this pair'},
+            {'id': newer['id'], 'state': 'queued'},
+            {'id': reply['id'], 'state': 'queued'},
+        )]
+        with patch('csl_nats.time.time', return_value=100) as clock:
+            remember_send(self.store, 'vi', reply, self.thread)
+            await post_saved(self.client, self.store, self.ledger.key, self.thread, reply)
+            clock.return_value = 101
+            remember_send(self.store, 'vi', newer, self.thread)
+            self.client.broker = 'promoted'
+            clock.return_value = 150
+            await replay_outbox(self.client, self.ledger, (BridgeError,))
+            self.assertEqual(self.store.rows('SELECT broker,state FROM nats_outbox WHERE id=?', (reply['id'],)),
+                             [{'broker': 'primary', 'state': 'queued'}])
+            clock.return_value = 210
+            await replay_outbox(self.client, self.ledger, (BridgeError,))
+        self.assertEqual([json.loads(call.args[1]) for call in self.connection.request.await_args_list],
+                         [reply, reply, newer, reply])
+        self.assertEqual(self.store.rows('SELECT broker,state FROM nats_outbox WHERE id=?', (reply['id'],)),
+                         [{'broker': 'promoted', 'state': 'queued'}])
+
     async def test_active_selection_requires_a_control_hello(self):
         try:
             from nats.errors import NoRespondersError
