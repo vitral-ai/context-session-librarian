@@ -178,6 +178,49 @@ func TestOperatorMode(t *testing.T) {
 		call(sender, "ctl.history.sender", history, "not_found")
 		call(third, "ctl.receipt.worker-b", sendResult{row.ID, "acked"}, "forbidden")
 		call(sender, "ctl.receipt.sender", sendResult{row.ID, "acked"}, "not_found")
+		t.Run("Unread", func(t *testing.T) {
+			request := map[string]string{"with": "worker-a"}
+			check := func(want []string) {
+				t.Helper()
+				var result unreadResult
+				raw := call(third, "ctl.unread.worker-b", request, "")
+				if err := json.Unmarshal(raw, &result); err != nil ||
+					result.Count != len(want) || result.IDs == nil || !slices.Equal(result.IDs, want) {
+					t.Fatalf("unread got %s, want %v", raw, want)
+				}
+			}
+			check([]string{}) // The delivered archive row was never a NATS inbox message.
+			add := func(from, to, state string, createdAt time.Time) string {
+				t.Helper()
+				id := randomID()
+				record := messageRecord{Envelope: Envelope{ID: id, From: from, To: to, CreatedAt: createdAt},
+					AcceptedAt: time.Now().UTC()}
+				if err := writeState(ctx, service.state, "message."+id, record, 0); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					for _, key := range []string{"message." + id, "msg." + id} {
+						if err := service.state.Delete(ctx, key); err != nil {
+							t.Error(err)
+						}
+					}
+				})
+				if err := writeState(ctx, service.state, "msg."+id, messageState{State: state}, 0); err != nil {
+					t.Fatal(err)
+				}
+				return id
+			}
+			newer := add("worker-a", "worker-b", "queued", stamp.Add(time.Minute))
+			older := add("worker-a", "worker-b", "delivered", stamp)
+			add("worker-b", "worker-a", "queued", stamp)
+			add("sender", "worker-b", "queued", stamp)
+			add("worker-a", "sender", "delivered", stamp)
+			add("worker-a", "worker-b", "acked", stamp)
+			add("worker-a", "worker-b", "dropped", stamp)
+			check([]string{older, newer})
+			call(third, "ctl.unread.worker-b", map[string]string{"with": "worker-b"}, "invalid")
+			call(third, "ctl.unread.worker-b", map[string]string{"with": "worker-a", "recipient": "sender"}, "invalid")
+		})
 		unread, err := service.stream.GetMsg(ctx, pending.Sequence)
 		if err != nil || !bytes.Equal(unread.Data, []byte("pending live delivery")) {
 			t.Fatalf("archive import evicted a pending live message: %v", err)
