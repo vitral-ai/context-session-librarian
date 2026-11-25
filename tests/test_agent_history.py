@@ -367,15 +367,17 @@ class SenderRoutingTests(unittest.TestCase):
         self.hub.side_effect = [{'messages': []}, {'state': 'queued'}]
         self.assertIn('transport=hub', self.execute('reply', '--to', 'legacy', '--in-reply-to', self.parent))
         self.assertEqual(self.hub.call_args.args[1]['in_reply_to'], self.parent)
-        self.nats_history.assert_not_called()
+        self.nats_history.assert_called_once()
         self.nats_send.assert_not_called()
 
     def test_nats_parent_keeps_nats_route_for_peer_removed_from_enrollment(self):
         self.routes['nats_recipients'] = []
         self.nats_history.return_value = {'messages': [{'id': self.parent, 'from': 'worker', 'to': 'client'}]}
-        self.assertIn('transport=nats', self.execute('reply', self.parent, '--to', 'worker'))
-        self.nats_send.assert_called_once()
-        self.hub.assert_called_once()
+        for parent_args in ((self.parent,), ('--in-reply-to', self.parent)):
+            with self.subTest(parent_args=parent_args):
+                self.assertIn('transport=nats', self.execute('reply', *parent_args, '--to', 'worker'))
+        self.assertEqual(self.nats_send.call_count, 2)
+        self.assertTrue(all(call.args[1]['action'] == 'history' for call in self.hub.call_args_list))
 
     def test_pinned_nats_reply_resolves_prefix_without_hub(self):
         self.nats_history.return_value = {'messages': [{'id': self.parent, 'from': 'worker', 'to': 'client'}]}

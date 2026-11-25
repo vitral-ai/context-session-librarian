@@ -217,11 +217,11 @@ def reply_route(nats_config, source, selector, target, hub_ledger):
         # The retained Hub parent is authoritative, including for archived copies.
         sender, parent = incoming_parent(matches, source, target)
         return sender, parent, 'hub'
-    if hub is not None and not hub_rows and hub_ledger:
-        # Explicit Hub-only replies still work after retained history is evicted.
-        return target, selector, 'hub'
     rows = nats_reply_history(nats_config, source, selector)
     matches.update((row['id'], row['from'], row['to']) for row in rows)
+    if hub is not None and not matches and hub_ledger:
+        # Explicit Hub-only replies still work after retained history is evicted.
+        return target, selector, 'hub'
     sender, parent = incoming_parent(matches, source, target)
     return sender, parent, 'hub' if hub_rows else 'nats'
 
