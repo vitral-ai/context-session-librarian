@@ -210,13 +210,12 @@ to `senders` in the owner-managed `~/.config/csl/sender-routes.json`. Set
 {"senders":{"alice":"/private/config/vi.json"},"nats_recipients":["alice","bob"]}
 ```
 
-Plain `csl send` and `csl reply` print `transport=nats` for enrolled recipients
-and `transport=hub` for other recipients. Sends and replies with an explicit
-`--id` require the original config pin so a retry survives routing changes.
-Use `--hub-config PATH` to reply to an old Hub message whose parent
-has yet to be imported, or `--nats-config PATH` with `--to` and the full parent
-ID to pin a NATS reply. A reply with a short ID and no target must resolve
-uniquely across both histories.
+Plain `csl send` selects NATS for enrolled recipients and Hub for others.
+`csl reply ID_OR_PREFIX` resolves the incoming parent and uses its original
+transport when the parent is still retained there. Prefixes must match exactly
+one message, starting with at least eight characters of its UUID. The CLI prints
+the selected transport. A retry using `--id` requires the original config pin.
+For a pinned NATS retry, use the printed full parent ID and `--to`.
 
 Before a NATS send or reply, the CLI reports unread messages from the recipient
 and lists their IDs on stderr. The send still proceeds if the unread lookup

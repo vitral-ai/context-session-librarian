@@ -441,6 +441,8 @@ func TestOperatorMode(t *testing.T) {
 	}
 	call(third, "ctl.history.worker-b", map[string]string{"id": message.ID}, "not_found")
 	call(peer, "ctl.history.worker-a", map[string]string{"id": message.ID[:8]}, "")
+	call(peer, "ctl.history.worker-a", map[string]string{"id": message.ID[:24]}, "")
+	call(peer, "ctl.history.worker-a", map[string]string{"id": message.ID[:9] + "-"}, "invalid")
 
 	admin(map[string]any{"action": "quotas", "retention": 200, "urgent_cap": 1})
 	call(peer, "ctl.settings.worker-a", map[string]string{"delivery": "grouped:15"}, "")

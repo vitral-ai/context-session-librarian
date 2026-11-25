@@ -176,33 +176,54 @@ def loop(connector):
         connector.stop.wait(min(30, 2 ** min(failures, 5)) if failures else .5)
 
 
-def reply_route(hub, nats_config, source, selector, target, enrolled):
+def nats_reply_history(nats_config, source, selector):
     from csl_nats import ControlRejected
     from csl_nats_tools import call as nats_call, history
-
-    hub_rows = call(hub, {'action': 'history', 'source': source, 'id': selector})['messages']
-    if len(selector) == 36 and len(hub_rows) == 1:
-        row = hub_rows[0]
-        if row['target'] == source and row['source'] not in enrolled:
-            return row['source'], identifier(row['id'])
 
     async def lookup(client):
         return await history(client, message_id=selector)
 
     try:
-        nats_rows = nats_call(nats_config, source, lookup)['messages']
+        return nats_call(nats_config, source, lookup)['messages']
     except ControlRejected as error:
         if error.code != 'not_found':
             raise
-        nats_rows = []
-    matches = {(row['id'], row['source'], row['target']) for row in hub_rows}
-    matches.update((row['id'], row['from'], row['to']) for row in nats_rows)
+        return []
+
+
+def reply_parent(args):
+    if args.message_id and args.in_reply_to:
+        raise BridgeError('Use the positional reply ID or --in-reply-to, not both')
+    return message_selector(args.message_id or args.in_reply_to)
+
+
+def incoming_parent(matches, source, target):
     if len(matches) != 1:
-        raise BridgeError('Reply needs one matching message across Hub and NATS. Use the full ID and --to.')
-    reply, sender, recipient = matches.pop()
+        raise BridgeError('Reply needs one matching message. Use a longer prefix, full ID, or original transport pin.')
+    reply, sender, recipient = next(iter(matches))
     if recipient != source or (target and target != sender):
         raise BridgeError('Reply target does not match the original incoming message')
     return sender, identifier(reply)
+
+
+def reply_route(nats_config, source, selector, target, hub_ledger):
+    try:
+        hub = config()
+    except FileNotFoundError:
+        hub = None
+    hub_rows = call(hub, {'action': 'history', 'source': source, 'id': selector})['messages'] if hub is not None else []
+    matches = {(row['id'], row['source'], row['target']) for row in hub_rows}
+    if hub_rows and len(selector) == 36:
+        # The retained Hub parent is authoritative, including for archived copies.
+        sender, parent = incoming_parent(matches, source, target)
+        return sender, parent, 'hub'
+    rows = nats_reply_history(nats_config, source, selector)
+    matches.update((row['id'], row['from'], row['to']) for row in rows)
+    if hub is not None and not matches and hub_ledger:
+        # Explicit Hub-only replies still work after retained history is evicted.
+        return target, selector, 'hub'
+    sender, parent = incoming_parent(matches, source, target)
+    return sender, parent, 'hub' if hub_rows else 'nats'
 
 
 def sender_routes():
@@ -244,20 +265,27 @@ def select_sender_route(args):
         return
     args.source, nats_config, enrolled = enrollment
     source = args.source
+    transport = 'nats' if args.to in enrolled else 'hub'
     if args.is_reply:
-        if args.message_id and args.in_reply_to:
-            raise BridgeError('Use the positional reply ID or --in-reply-to, not both')
-        selector = message_selector(args.message_id or args.in_reply_to)
-        if not args.to or (args.to in enrolled and len(selector) != 36):
-            args.to, selector = reply_route(config(), nats_config, source, selector, args.to, enrolled)
+        hub_ledger = bool(args.in_reply_to and args.to and args.to not in enrolled)
+        args.to, selector, transport = reply_route(nats_config, source, reply_parent(args),
+                                                  args.to, hub_ledger)
         args.message_id, args.in_reply_to = selector, None
-    if args.to in enrolled:
+    if transport == 'nats':
         args.nats_config = nats_config
-        print('transport=nats', file=sys.stderr)
-    else:
-        if args.is_reply:
-            args.message_id, args.in_reply_to = None, args.message_id
-        print('transport=hub', file=sys.stderr)
+    elif args.is_reply:
+        args.message_id, args.in_reply_to = None, args.message_id
+    print(f'transport={transport}', file=sys.stderr)
+
+
+def resolve_pinned_nats_reply(args):
+    selector = reply_parent(args)
+    if not args.to or len(selector) != 36:
+        source = args.source or os.environ.get('CSL_AGENT')
+        rows = nats_reply_history(args.nats_config, source, selector)
+        matches = {(row['id'], row['from'], row['to']) for row in rows}
+        args.to, selector = incoming_parent(matches, source, args.to)
+    args.message_id, args.in_reply_to = selector, None
 
 
 def _execute(args):
@@ -276,6 +304,8 @@ def _execute(args):
         from csl_nats_tools import command
         return command(args)
     if args.hub_action == 'send':
+        if args.nats_config is not None and args.is_reply:
+            resolve_pinned_nats_reply(args)
         if args.nats_config is None and hub_config is None:
             if args.id:
                 raise BridgeError('Use --id with the original --nats-config or --hub-config path printed for the send')
@@ -327,6 +357,8 @@ def _execute(args):
                 raise BridgeError('Possible secrets detected; select redacted text before sending')
         # Print the ID before networking: unknown outcomes are retried with this ID.
         print('message_id=' + request['id'], file=sys.stderr)
+        if reply:
+            print('retry_reply=' + shlex.join(('--in-reply-to', reply, '--to', target)), file=sys.stderr)
     elif args.hub_action == 'history':
         source = args.source or os.environ.get('CSL_AGENT') or settings.get('agent')
         if not source:
@@ -386,7 +418,7 @@ def add_commands(subparsers, _):
             send.add_argument('--reason', choices=('blocked', 'needs_approval', 'security', 'operation_failed'))
         if action == 'reply':
             send.add_argument('message_id', nargs='?',
-                              help='Full message UUID (Hub also accepts a unique prefix of 8+ characters).')
+                              help='Full message UUID or a unique prefix of 8+ characters.')
             send.add_argument('--in-reply-to')
         send.set_defaults(func=execute, hub_action='send', is_reply=action == 'reply')
     history = sub.add_parser('history', help='Read your retained pair history (CSL_AGENT identifies you).')
