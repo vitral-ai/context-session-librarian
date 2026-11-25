@@ -18,8 +18,9 @@ from csl_bridge_hooks import surface_nats
 from csl_bridge_store import BridgeError, Store, encode, neutralize_headers
 from csl_ci_notice import notice_request
 from codex_sessions import main
-from csl_nats import (MAX_DIGEST, ClaudeInbox, Client, Ledger, agent_name, body_text, deliver_codex, delivery_parts,
-                      receive_one, recover_acks, remember_send)
+from csl_nats import (MAX_DIGEST, NATIVE_PEER, ClaudeInbox, Client, ControlRejected, Ledger, agent_name, body_text, deliver_codex,
+                      delivery_fingerprint, delivery_parts, post_saved, raw_fingerprint, receive_one, recover_acks, remember_send,
+                      replay_outbox)
 
 
 class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
@@ -36,7 +37,7 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.id = str(uuid.uuid4())
         self.ledger = Ledger(self.store, 'vi', 'alice', self.thread)
         self.connection = SimpleNamespace(request=AsyncMock())
-        self.client = Client(self.connection, 'vi', 'alice')
+        self.client = Client(self.connection, 'vi', 'alice', broker='primary')
         self.calls = []
 
         async def receipt(message_id, state):
@@ -79,6 +80,84 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rows(), [])
         self.message.nak.assert_awaited_once_with(delay=60)
         self.message.ack_sync.assert_not_awaited()
+
+    async def test_promoted_broker_can_reassign_session_without_rendering_again(self):
+        envelope = dict(json.loads(self.message.data), session_id=str(uuid.uuid4()))
+        self.message.data = encode(envelope).encode()
+        await receive_one(self.client, self.ledger, self.message, self.deliver)
+        self.client.broker = 'secondary'
+        self.message.data = encode(dict(envelope, session_id=str(uuid.uuid4()))).encode()
+        await receive_one(self.client, self.ledger, self.message, self.deliver)
+        self.deliver.assert_called_once()
+        self.assertEqual(self.rows()[0]['ack_broker'], 'secondary')
+
+    async def test_legacy_codex_digest_member_is_never_rendered_twice(self):
+        await self.check_legacy_digest_replay('codex')
+
+    async def test_legacy_claude_digest_member_is_never_rendered_twice(self):
+        await self.check_legacy_digest_replay('claude')
+
+    async def check_legacy_digest_replay(self, cli):
+        native, _ = self.dual_transport()
+        old = dict(json.loads(self.message.data), id=str(uuid.uuid4()), body='seen before upgrade')
+        digest = dict(old, id=str(uuid.uuid4()), kind='digest', body='', items=[old],
+                      **{'from': 'csl-control'})
+        with self.store.transaction() as db:
+            # The shipped ledger saved an outer hash, native receipt and member
+            # IDs, with no separate historical member fingerprint.
+            db.execute('''INSERT INTO nats_delivered
+                (tenant,agent,id,thread,fingerprint,turn,ack_state,delivered_at)
+                VALUES (?,?,?,?,?,?,'acked',1)''', ('vi', 'alice', digest['id'], self.thread,
+                                                 raw_fingerprint(digest), self.turn))
+            db.execute('INSERT INTO nats_digest_members VALUES (?,?,?,?)', ('vi', 'alice', digest['id'], old['id']))
+
+        output = Mock()
+        if cli == 'claude':
+            inbox = ClaudeInbox(self.store, 'vi', 'alice', self.thread)
+            with self.store.transaction() as db:
+                db.execute("""INSERT INTO nats_claude_inbox
+                    (tenant,agent,session,id,fingerprint,body,surfaced) VALUES (?,?,?,?,?,?,1)""",
+                    ('vi', 'alice', self.thread, digest['id'], raw_fingerprint(digest),
+                     encode(delivery_parts(digest, self.config_path))))
+            deliver = partial(inbox.stage, config_path=self.config_path)
+            payload = {'session_id': self.thread, 'hook_event_name': 'PostToolUse'}
+            surface = partial(surface_nats, self.home, 'vi', 'alice', 'PostToolUse', payload, 10, output)
+        else:
+            self.store.reserve(NATIVE_PEER, {
+                'version': 1, 'op': 'followup', 'id': digest['id'], 'source': digest['from'],
+                'target': 'alice', 'text': '', 'nats_fingerprint': raw_fingerprint(digest),
+                'digest_items': [old['id']],
+            })
+            self.store.operation(digest['id'], 'delivered', {'state': 'delivered',
+                                 'request_id': digest['id'], 'thread_id': self.thread, 'turn_id': self.turn})
+            deliver = partial(self.deliver_codex, native, self.thread)
+
+        self.client.broker = 'secondary'
+        self.client.receipt = AsyncMock()
+        self.message.ack_sync.side_effect = None
+        self.message.data = encode(dict(digest, created_at='2026-11-25T09:00:00Z')).encode()
+        self.assertTrue(await receive_one(self.client, self.ledger, self.message, deliver))
+        self.message.data = encode(old).encode()
+        self.assertTrue(await receive_one(self.client, self.ledger, self.message, deliver))
+        native.invoke.assert_not_called()
+
+        fresh = dict(old, id=str(uuid.uuid4()), body='new after upgrade')
+        regrouped = dict(digest, id=str(uuid.uuid4()), items=[old, fresh])
+        self.message.data = encode(regrouped).encode()
+        if cli == 'claude':
+            self.assertFalse(await receive_one(self.client, self.ledger, self.message, deliver))
+            surface()
+            surface()
+            output.assert_called_once()
+            rendered = output.call_args.args[0]
+        self.assertTrue(await receive_one(self.client, self.ledger, self.message, deliver))
+        if cli == 'codex':
+            native.invoke.assert_called_once()
+            rendered = native.invoke.call_args.kwargs['native_text']
+        self.assertIn(fresh['body'], rendered)
+        self.assertNotIn(old['body'], rendered)
+        self.client.receipt.assert_any_await(old['id'], 'acked')
+        self.client.receipt.assert_any_await(fresh['id'], 'acked')
 
     async def test_digest_keeps_member_order_and_recovers_every_receipt(self):
         items = [dict(json.loads(self.message.data), id=str(uuid.uuid4()), body=body)
@@ -162,6 +241,21 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         await recover_acks(self.client, Ledger(reopened, 'vi', 'alice', self.thread), (TimeoutError,))
         self.connection.request.assert_awaited_once_with(self.message.reply, b'+ACK', timeout=1)
         self.assertEqual(self.rows()[0]['ack_state'], 'acked')
+        self.deliver.assert_called_once()
+
+    async def test_failover_needs_a_fresh_broker_delivery_for_ack(self):
+        self.message.ack_sync.side_effect = TimeoutError
+        with self.assertRaises(TimeoutError):
+            await receive_one(self.client, self.ledger, self.message, self.deliver)
+        self.client.broker = 'promoted'
+        await recover_acks(self.client, self.ledger, (TimeoutError,))
+        self.connection.request.assert_not_awaited()
+        self.message.reply = '$JS.ACK.CSL_MSG.agent-alice.1.99.3.1234.0'
+        self.message.ack_sync.side_effect = None
+        self.calls.clear()
+        self.assertTrue(await receive_one(self.client, self.ledger, self.message, self.deliver))
+        self.assertEqual(self.calls, ['delivered', 'acked'])
+        self.assertEqual(self.rows()[0]['ack_broker'], 'promoted')
         self.deliver.assert_called_once()
 
     def test_unsurfaced_claude_batch_retries_one_successful_wake_after_reopen(self):
@@ -258,7 +352,7 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.connection.request.side_effect = response
         with (self.assertLogs(asyncio_log, level='WARNING') as logs,
-              patch.object(Client, 'connect', new=AsyncMock(return_value=self.client)),
+              patch.object(Client, 'connect_active', new=AsyncMock(return_value=self.client)),
               patch('csl_agents.call', side_effect=AssertionError('unexpected Hub request')) as hub,
               patch('sys.stdout', new_callable=io.StringIO), patch('sys.stderr', new_callable=io.StringIO)):
             self.assertEqual(main(args), 0)
@@ -446,6 +540,47 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(deliver_hub(native, packet)['turn_id'], self.turn)
         self.assertEqual(native.invoke.call_count, 2)
 
+    def test_replay_of_regrouped_members_is_deduped_by_both_native_paths(self):
+        native, _ = self.dual_transport()
+        first = dict(json.loads(self.message.data), kind='message', body='first member', **{'from': 'bob'})
+        second = dict(first, id=str(uuid.uuid4()), body='second member')
+        third = dict(first, id=str(uuid.uuid4()), body='third member')
+        digest = dict(first, kind='digest', id=str(uuid.uuid4()), body='', items=[first, second],
+                      **{'from': 'csl-control'})
+        regrouped = dict(digest, id=str(uuid.uuid4()), items=[dict(second, session_id=str(uuid.uuid4())), third])
+
+        def codex(envelope):
+            return self.deliver_codex(native, self.thread, envelope, delivery_fingerprint(envelope))
+
+        self.assertEqual(codex(first), self.turn)
+        self.assertEqual(codex(digest), self.turn)
+        self.assertNotIn(first['body'], native.invoke.call_args.kwargs['native_text'])
+        self.assertEqual(codex(regrouped), self.turn)
+        self.assertNotIn(second['body'], native.invoke.call_args.kwargs['native_text'])
+        self.assertIn(third['body'], native.invoke.call_args.kwargs['native_text'])
+        self.assertEqual(codex(second), self.turn)
+        self.assertEqual(native.invoke.call_count, 3)
+        with self.assertRaises(BridgeError):
+            codex(dict(second, body='collision'))
+
+        inbox = ClaudeInbox(self.store, 'vi', 'alice', self.thread)
+
+        def claude(envelope):
+            return inbox.stage(envelope, delivery_fingerprint(envelope), config_path=self.config_path)
+
+        self.assertIsNone(claude(first))
+        self.assertIsNone(claude(digest))
+        self.assertIsNone(claude(regrouped))
+        output = []
+        inbox.surface(str, output.append, 10)
+        self.assertEqual(len(output), 1)
+        for item in (first, second, third):
+            self.assertEqual(output[0].count(item['body']), 1)
+            self.assertEqual(claude(item), self.thread)
+        self.assertEqual(claude(regrouped), self.thread)
+        with self.assertRaises(BridgeError):
+            claude(dict(second, body='collision'))
+
     def test_extended_names_can_be_registered_and_legacy_rules_still_apply(self):
         longest = '2' + 'a' * 62
         for valid in ('01', longest):
@@ -467,6 +602,109 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(remember_send(self.store, 'vi', retry), env)
         with self.assertRaises(BridgeError):
             remember_send(self.store, 'vi', {**env, 'to': 'charlie'})
+
+    async def test_outbox_replays_original_envelope_to_promoted_broker(self):
+        env = json.loads(self.message.data) | {'from': 'alice', 'to': 'bob', 'created_at': 'original',
+                                               'client_version': '0.5.0+original'}
+        self.client.send = AsyncMock(return_value={'id': self.id, 'state': 'queued'})
+        with patch('csl_nats.time.time', return_value=100) as clock:
+            remember_send(self.store, 'vi', env, self.thread)
+            await post_saved(self.client, self.store, self.ledger.key, self.thread, env)
+            self.client.send.reset_mock()
+            clock.return_value = 150
+            await replay_outbox(self.client, self.ledger, (BridgeError,))
+            self.client.send.assert_not_awaited()
+            self.client.broker = 'promoted'
+            await replay_outbox(self.client, self.ledger, (BridgeError,))
+            self.client.send.assert_awaited_once_with(env, timeout=3)
+            clock.return_value = 220
+            await replay_outbox(self.client, self.ledger, (BridgeError,))
+            self.assertEqual(self.client.send.await_count, 1)
+            clock.return_value = 1000
+            self.client.broker = 'rebuilt'
+            await replay_outbox(self.client, self.ledger, (BridgeError,))
+            self.assertEqual(self.client.send.await_count, 1)
+            self.assertEqual(self.store.rows('SELECT id FROM nats_outbox'), [])
+
+    async def test_outbox_skips_refusals_and_different_threads(self):
+        env = json.loads(self.message.data) | {'from': 'alice', 'to': 'bob'}
+        self.client.send = AsyncMock(side_effect=ControlRejected('forbidden', 'pair permission is required'))
+        with patch('csl_nats.time.time', return_value=100) as clock:
+            remember_send(self.store, 'vi', env, self.thread)
+            remember_send(self.store, 'vi', dict(env, id=str(uuid.uuid4())), str(uuid.uuid4()))
+            with self.assertRaises(ControlRejected):
+                await post_saved(self.client, self.store, self.ledger.key, self.thread, env)
+            self.client.send.reset_mock()
+            self.client.broker = 'promoted'
+            clock.return_value = 150
+            await replay_outbox(self.client, self.ledger, (BridgeError,))
+            self.client.send.assert_not_awaited()
+
+    async def test_promoted_broker_denials_do_not_starve_newer_messages(self):
+        envelope = json.loads(self.message.data) | {'from': 'alice', 'to': 'bob'}
+        denied = [dict(envelope, id=str(uuid.uuid4()), to='unavailable') for _ in range(16)]
+
+        async def send(item, **_):
+            if item['to'] == 'unavailable':
+                raise ControlRejected('forbidden', 'pair permission is required')
+            return {'id': item['id'], 'state': 'queued'}
+
+        self.client.broker = 'promoted'
+        self.client.send = AsyncMock(side_effect=send)
+        with patch('csl_nats.time.time', return_value=100) as clock:
+            for item in denied:
+                remember_send(self.store, 'vi', item, self.thread)
+            clock.return_value = 101
+            remember_send(self.store, 'vi', envelope, self.thread)
+            for now in range(150, 400, 60):
+                clock.return_value = now
+                await replay_outbox(self.client, self.ledger, (BridgeError,))
+        self.assertEqual(self.client.send.await_count, 17)
+        self.client.send.assert_awaited_with(envelope, timeout=3)
+        self.assertEqual(self.store.rows('SELECT state,count(*) AS count FROM nats_outbox GROUP BY state'),
+                         [{'state': 'queued', 'count': 1}, {'state': 'replay_refused', 'count': 16}])
+
+    async def test_promoted_broker_retries_reply_after_parent_is_restored(self):
+        reply = json.loads(self.message.data) | {'from': 'alice', 'to': 'bob', 'kind': 'reply',
+                                                'reply_to': str(uuid.uuid4())}
+        newer = dict(reply, id=str(uuid.uuid4()), kind='message', reply_to=None)
+        self.connection.request.side_effect = [SimpleNamespace(data=encode(response).encode()) for response in (
+            {'id': reply['id'], 'state': 'queued'},
+            {'error': 'not_found', 'message': 'reply target does not belong to this pair'},
+            {'id': newer['id'], 'state': 'queued'},
+            {'id': reply['id'], 'state': 'queued'},
+        )]
+        with patch('csl_nats.time.time', return_value=100) as clock:
+            remember_send(self.store, 'vi', reply, self.thread)
+            await post_saved(self.client, self.store, self.ledger.key, self.thread, reply)
+            clock.return_value = 101
+            remember_send(self.store, 'vi', newer, self.thread)
+            self.client.broker = 'promoted'
+            clock.return_value = 150
+            await replay_outbox(self.client, self.ledger, (BridgeError,))
+            self.assertEqual(self.store.rows('SELECT broker,state FROM nats_outbox WHERE id=?', (reply['id'],)),
+                             [{'broker': 'primary', 'state': 'queued'}])
+            clock.return_value = 210
+            await replay_outbox(self.client, self.ledger, (BridgeError,))
+        self.assertEqual([json.loads(call.args[1]) for call in self.connection.request.await_args_list],
+                         [reply, reply, newer, reply])
+        self.assertEqual(self.store.rows('SELECT broker,state FROM nats_outbox WHERE id=?', (reply['id'],)),
+                         [{'broker': 'promoted', 'state': 'queued'}])
+
+    async def test_active_selection_requires_a_control_hello(self):
+        try:
+            from nats.errors import NoRespondersError
+        except ImportError:
+            self.skipTest('nats-py is not installed')
+        inactive = SimpleNamespace(request=AsyncMock(side_effect=NoRespondersError),
+                                   connection=SimpleNamespace(close=AsyncMock()))
+        active = SimpleNamespace(request=AsyncMock(), connection=SimpleNamespace(close=AsyncMock()))
+        settings = {'servers': ['inactive', 'active']}
+        with patch.object(Client, 'connect', new=AsyncMock(side_effect=[inactive, active])) as connect:
+            self.assertIs(await Client.connect_active(settings, 'alice'), active)
+        self.assertEqual([entry.kwargs['server'] for entry in connect.await_args_list], settings['servers'])
+        inactive.connection.close.assert_awaited_once()
+        active.connection.close.assert_not_awaited()
 
     def test_byte_limit(self):
         self.assertEqual(body_text('é' * 24576), 'é' * 24576)

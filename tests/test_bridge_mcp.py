@@ -79,7 +79,7 @@ class MCPTests(unittest.TestCase):
             dict(settings, connector_home=self.home.parent / 'other'),
             dict(settings, agents={'worker': {'session': str(uuid.uuid4())}}),
         ]
-        with patch('csl_nats_tools.Client.connect', new_callable=AsyncMock) as connect:
+        with patch('csl_nats_tools.Client.connect_active', new_callable=AsyncMock) as connect:
             for replacement in altered:
                 with patch('csl_nats_tools.config', return_value=replacement):
                     with self.assertRaisesRegex(BridgeError, 'bound MCP'):
@@ -94,11 +94,11 @@ class MCPTests(unittest.TestCase):
         directory.mkdir(mode=0o700)
         (directory / 'substitute.txt').write_text('must not upload')
         client = SimpleNamespace(request=AsyncMock(), connection=SimpleNamespace(close=AsyncMock()))
-        with patch('csl_nats_tools.config', return_value=settings), patch('csl_nats_tools.Client.connect', return_value=client):
+        with patch('csl_nats_tools.config', return_value=settings), patch('csl_nats_tools.Client.connect_active', return_value=client):
             for tool, args in [('put_file', {'name': 'substitute.txt'}), ('fetch_file', {'id': 'a' * 64})]:
                 with self.assertRaisesRegex(BridgeError, 'directory changed'):
                     adapter.call(tool, args)
-        self.assertEqual([call.args[0] for call in client.request.await_args_list], ['ctl.hello'] * 2)
+        client.request.assert_not_awaited()
 
     def test_nats_fetch_refuses_to_report_a_stale_path(self):
         directory = Path(self.temp.name) / 'transfer'
@@ -108,15 +108,13 @@ class MCPTests(unittest.TestCase):
         digest = hashlib.sha256(b'a').hexdigest()
 
         async def request(verb, _):
-            if verb == 'ctl.hello':
-                return {}
             self.assertEqual(verb, 'ctl.fetch')
             directory.rename(original)
             directory.mkdir(mode=0o700)
             return {'id': digest, 'name': 'report.txt', 'size': 1, 'data': 'YQ==', 'next_offset': None}
 
         client = SimpleNamespace(request=request, connection=SimpleNamespace(close=AsyncMock()))
-        with patch('csl_nats_tools.config', return_value=settings), patch('csl_nats_tools.Client.connect', return_value=client):
+        with patch('csl_nats_tools.config', return_value=settings), patch('csl_nats_tools.Client.connect_active', return_value=client):
             result = adapter.call('fetch_file', {'id': digest})['data']
         self.assertEqual(result['state'], 'saved_in_original_directory')
         self.assertNotIn('path', result)
@@ -134,8 +132,8 @@ class MCPTests(unittest.TestCase):
             directory.rename(original)
             directory.mkdir(mode=0o700)
 
-        request = AsyncMock(side_effect=[{}, {'id': digest, 'name': 'report.txt', 'size': 1,
-                                              'data': 'YQ==', 'next_offset': None}])
+        request = AsyncMock(return_value={'id': digest, 'name': 'report.txt', 'size': 1,
+                                         'data': 'YQ==', 'next_offset': None})
         client = SimpleNamespace(request=request, connection=SimpleNamespace(close=close))
         messages = [{'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
                      'params': {'protocolVersion': '2024-11-05'}},
@@ -143,7 +141,7 @@ class MCPTests(unittest.TestCase):
                      'params': {'name': 'fetch_file', 'arguments': {'id': digest}}}]
         stdin = io.BytesIO(('\n'.join(encode(message) for message in messages) + '\n').encode())
         stdout = io.StringIO()
-        with patch('csl_nats_tools.config', return_value=settings), patch('csl_nats_tools.Client.connect', return_value=client):
+        with patch('csl_nats_tools.config', return_value=settings), patch('csl_nats_tools.Client.connect_active', return_value=client):
             serve(adapter, stdin, stdout)
         responses = {response['id']: response for response in map(json.loads, stdout.getvalue().splitlines())}
         result = responses[2]['result']
@@ -160,10 +158,10 @@ class MCPTests(unittest.TestCase):
         directory.mkdir(mode=0o700)
         adapter, settings = self.nats_adapter(directory)
         digest = hashlib.sha256(b'a').hexdigest()
-        request = AsyncMock(side_effect=[{}, {'id': digest, 'name': 'report.txt', 'size': 1,
-                                              'data': 'YQ==', 'next_offset': None}])
+        request = AsyncMock(return_value={'id': digest, 'name': 'report.txt', 'size': 1,
+                                         'data': 'YQ==', 'next_offset': None})
         client = SimpleNamespace(request=request, connection=SimpleNamespace(close=AsyncMock()))
-        with patch('csl_nats_tools.config', return_value=settings), patch('csl_nats_tools.Client.connect', return_value=client):
+        with patch('csl_nats_tools.config', return_value=settings), patch('csl_nats_tools.Client.connect_active', return_value=client):
             result = adapter.call('fetch_file', {'id': digest})['data']
         path = Path(result['path'])
         self.assertEqual(path, directory / 'report.txt')

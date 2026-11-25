@@ -11,7 +11,6 @@ import uuid
 
 from csl_bridge_store import BridgeError, encode, identifier, message_selector
 from csl_nats import Client, agent_name, config, run_cli
-from csl_version import build_version
 
 CHUNK_BYTES = 256 * 1024
 MAX_FILE_BYTES = 25 * 1024 * 1024
@@ -165,9 +164,8 @@ def call(path, source, operation, *, validate_settings=None):
         validate_settings(settings)
 
     async def run():
-        client = await Client.connect(settings, agent)
+        client = await Client.connect_active(settings, agent)
         try:
-            await client.request('ctl.hello', {'client_version': build_version()})
             return await operation(client)
         finally:
             await client.connection.close()
