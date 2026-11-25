@@ -19,7 +19,7 @@ from csl_bridge_store import BridgeError, Store, encode, neutralize_headers
 from csl_ci_notice import notice_request
 from codex_sessions import build_parser, main
 from csl_nats import (MAX_DIGEST, NATIVE_PEER, ClaudeInbox, Client, ControlRejected, Ledger, agent_name, body_text, deliver_codex,
-                      delivery_fingerprint, delivery_parts, post_saved, raw_fingerprint, receive_one, recover_acks, remember_send,
+                      delivery_fingerprint, delivery_parts, post_saved, print_unread, raw_fingerprint, receive_one, recover_acks, remember_send,
                       replay_outbox)
 
 
@@ -345,8 +345,14 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.connection.close = AsyncMock(side_effect=close)
 
+        pending = str(uuid.uuid4())
+
         async def response(subject, payload, **_):
             data = json.loads(payload)
+            if subject == 'csl.vi.ctl.unread.alice':
+                self.assertEqual(data, {'with': 'bob'})
+                return SimpleNamespace(data=encode({'ids': [pending], 'count': 1}).encode())
+            self.assertIn(f'you have 1 unread message(s) from bob ({pending})', sys.stderr.getvalue())
             result = {'id': data['id'], 'state': 'queued'} if subject == 'csl.vi.send.alice' else {}
             return SimpleNamespace(data=encode(result).encode())
 
@@ -368,6 +374,40 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
                          ('reply', 'alice', 'bob', parent['id'], 'Reply without a Hub row'))
         self.assertNotEqual(reply['id'], parent['id'])
         self.assertEqual(kwargs['headers'], {'Nats-Msg-Id': reply['id']})
+
+    def test_send_posts_when_unread_hint_cannot_be_written(self):
+        class ClosedHint(io.StringIO):
+            def write(self, text):
+                if text.startswith('you have '):
+                    raise BrokenPipeError
+                return super().write(text)
+
+        pending = str(uuid.uuid4())
+        sent_id = str(uuid.uuid4())
+        settings = {'tenant': 'vi', 'connector_home': self.home, 'agents': {'alice': {'session': self.thread}}}
+        client = SimpleNamespace(
+            request=AsyncMock(return_value={'ids': [pending], 'count': 1}),
+            connection=SimpleNamespace(close=AsyncMock()),
+        )
+        with (patch('csl_nats.config', return_value=settings),
+              patch.object(Client, 'connect_active', new=AsyncMock(return_value=client)),
+              patch('csl_nats.post_saved', new=AsyncMock(return_value={'id': sent_id, 'state': 'queued'})) as post,
+              patch('sys.stderr', ClosedHint()), patch('sys.stdout', new_callable=io.StringIO) as stdout):
+            self.assertEqual(main(['send', '--from', 'alice', '--to', 'bob', '--text', 'proof',
+                                   '--nats-config', str(self.config_path), '--id', sent_id]), 0)
+        client.request.assert_awaited_once_with('ctl.unread', {'with': 'bob'}, timeout=1)
+        post.assert_awaited_once()
+        self.assertEqual(post.await_args.args[4]['id'], sent_id)
+        self.assertEqual(json.loads(stdout.getvalue()), {'id': sent_id, 'state': 'queued'})
+
+    async def test_unread_is_quiet_for_empty_invalid_and_unavailable_results(self):
+        cases = ({'ids': [], 'count': 0}, {'ids': ['bad ID'], 'count': 1}, TimeoutError())
+        for result in cases:
+            with self.subTest(result=result), patch('sys.stderr', new_callable=io.StringIO) as stderr:
+                client = SimpleNamespace(request=AsyncMock(side_effect=[result]))
+                await print_unread(client, 'bob')
+                client.request.assert_awaited_once_with('ctl.unread', {'with': 'bob'}, timeout=1)
+                self.assertEqual(stderr.getvalue(), '')
 
     async def test_failed_control_receipt_retries_without_second_handoff(self):
         self.client.receipt = AsyncMock(side_effect=TimeoutError)

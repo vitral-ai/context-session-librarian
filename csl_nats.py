@@ -810,6 +810,28 @@ async def replay_outbox(client, ledger, expected_errors):
             LOG.debug('NATS outbox %s still pending (%s)', row['id'], type(error).__name__)
 
 
+async def print_unread(client, target):
+    try:
+        response = await client.request('ctl.unread', {'with': target}, timeout=1)
+        count, ids = response.get('count'), response.get('ids')
+        if (type(count) is not int or not isinstance(ids, list)
+                or len(ids) != min(count, 1000)):
+            return
+        checked_ids = [identifier(value) for value in ids]
+    except Exception as error:
+        # Older or unavailable control must not delay the send beyond the read timeout.
+        LOG.debug('NATS unread lookup unavailable (%s)', type(error).__name__)
+        return
+    if count:
+        details = ', '.join(checked_ids)
+        if count > len(checked_ids):
+            details += f', {count - len(checked_ids)} more'
+        try:
+            print(f'you have {count} unread message(s) from {target} ({details})', file=sys.stderr)
+        except (OSError, ValueError) as error:
+            LOG.debug('NATS unread hint could not be written (%s)', type(error).__name__)
+
+
 def send_command(args):
     settings = config(args.nats_config)
     source = agent_name(args.source or os.environ.get('CSL_AGENT'), registration=True)
@@ -866,6 +888,7 @@ def send_command(args):
                 envelope['attachments'].append(info)
             if remembered is None:
                 remembered = remember_send(store, settings['tenant'], envelope, thread)
+            await print_unread(client, target)
             return await post_saved(client, store, (settings['tenant'], source), thread, remembered)
         finally:
             await client.connection.close()
