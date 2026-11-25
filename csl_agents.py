@@ -174,11 +174,17 @@ def loop(connector):
 
 
 def _execute(args):
+    if args.hub_action in ('status', 'versions', 'close', 'complete', 'put', 'fetch') or (
+            args.hub_action == 'history' and args.nats_config):
+        from csl_nats_tools import command
+        return command(args)
     if getattr(args, 'nats_config', None):
         from csl_nats import send_command
         return send_command(args)
     if getattr(args, 'urgent', False) or getattr(args, 'reason', None):
         raise BridgeError('Urgency options require --nats-config')
+    if getattr(args, 'attach', []):
+        raise BridgeError('Attachments require --nats-config')
     settings = config(args.hub_config)
     request = {'action': args.hub_action}
     if args.hub_action == 'register':
@@ -236,6 +242,7 @@ def execute(args):
 
 
 def add_commands(subparsers, _):
+    from csl_nats_tools import add_options
     parser = subparsers.add_parser('agents', help='Owner-approved cross-machine agent registry and directed approvals.')
     parser.add_argument('--hub-config', type=Path, default=DEFAULT_CONFIG)
     sub = parser.add_subparsers(dest='hub_action', required=True)
@@ -259,6 +266,7 @@ def add_commands(subparsers, _):
         body.add_argument('--text')
         send.add_argument('--id')
         send.add_argument('--nats-config', type=Path)
+        send.add_argument('--attach', action='append', default=[], metavar='FILE_ID')
         if action == 'send':
             send.add_argument('--urgent', action='store_true')
             send.add_argument('--reason', choices=('blocked', 'needs_approval', 'security', 'operation_failed'))
@@ -271,8 +279,28 @@ def add_commands(subparsers, _):
     selection = history.add_mutually_exclusive_group(required=True)
     selection.add_argument('--with', dest='partner')
     selection.add_argument('--id', dest='message_id')
-    history.add_argument('--from', dest='source')
+    add_options(history)
     history.add_argument('--last', type=int)
+    subparsers.add_parser('history', parents=[history], add_help=False,
+                          help='Read retained agent message history.').set_defaults(func=execute, hub_action='history',
+                                                                                    hub_config=DEFAULT_CONFIG)
+    for action in ('status', 'versions', 'close', 'complete'):
+        control = sub.add_parser(action)
+        add_options(control)
+        if action in ('close', 'complete'):
+            control.add_argument('--with', dest='partner', required=action == 'close')
+        if action == 'complete':
+            control.add_argument('--task')
+    put = subparsers.add_parser('put', help='Upload a file to NATS with an explicit recipient ACL.')
+    add_options(put)
+    put.add_argument('path', type=Path)
+    put.add_argument('--to', action='append', default=[])
+    put.set_defaults(func=execute, hub_action='put')
+    fetch = subparsers.add_parser('fetch', help='Fetch and verify a NATS file by its SHA-256 ID.')
+    add_options(fetch)
+    fetch.add_argument('id')
+    fetch.add_argument('--out', type=Path)
+    fetch.set_defaults(func=execute, hub_action='fetch')
     receipt = sub.add_parser('receipt'); receipt.add_argument('id')
     parser.set_defaults(func=execute)
 
