@@ -125,6 +125,8 @@ func RevokeAccountUsers(ctx context.Context, system *nats.Conn, operator nkeys.K
 
 // RevokeAccountUsersOnPair reconciles the two isolated account resolvers before
 // declaring a batch complete. A retry starts from both current claims.
+// The caller must hold the active writer fence for all changes to this account.
+// The resolver replaces a signed JWT and offers no conditional update.
 func RevokeAccountUsersOnPair(ctx context.Context, local, peer *nats.Conn, operator nkeys.KeyPair, account string, keys []string, at time.Time) error {
 	localID, peerID := local.ConnectedServerId(), peer.ConnectedServerId()
 	if localID == "" || peerID == "" || localID == peerID {

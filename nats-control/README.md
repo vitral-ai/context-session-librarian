@@ -48,8 +48,12 @@ It reads both claims, requires matching account policy and signs one update
 with the highest cutoff per key. Both readbacks must confirm the merged
 revocations within the same 17-second deadline. A partial failure returns
 an error, and the next batch retry starts from both resolvers' current claims.
-The control service
-denies further calls as soon as the owner revocation is recorded.
+The deployment must hold the active broker's exclusive account writer fence
+from the first lookup through final readback. All account claim changes,
+including manual maintenance and promotion handoff, use the same authority.
+The resolver replaces a complete signed JWT on update. Concurrent writers
+could each verify their own update and still overwrite an unseen cutoff.
+The control service denies further calls as soon as the owner revocation is recorded.
 The owner response includes `pending: true` until broker revocation completes.
 The existing control scheduler calls the helper with batches of at most 100
 keys, a fixed cutoff and a 30-second caller deadline. Batch retries survive
