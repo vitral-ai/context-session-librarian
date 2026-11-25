@@ -143,11 +143,6 @@ def message_text(item, config_path):
         command = shlex.join(['csl', 'fetch', file['id'], '--from', item['to'],
                               '--nats-config', str(config_path)])
         text += f"\nFile ({file['size']} bytes): {file['name']!r} — {command}"
-    return text
-
-
-def digest_entry(item, config_path):
-    text = message_text(item, config_path)
     if item['from'] in RESERVED_AGENTS or item['from'] == item['to']:
         return text
     command = shlex.join(['csl', 'reply', item['id'], '--from', item['to'], '--to', item['from'],
@@ -157,7 +152,7 @@ def digest_entry(item, config_path):
 
 def delivery_parts(envelope, config_path):
     if envelope.get('kind') == 'digest':
-        return [digest_entry(item, config_path) for item in envelope['items']]
+        return [message_text(item, config_path) for item in envelope['items']]
     return [message_text(envelope, config_path)]
 
 
@@ -225,7 +220,7 @@ class ClaudeInbox:
                 if db.execute('SELECT 1 FROM nats_claude_digests WHERE tenant=? AND agent=? AND id=?',
                               (*self.route[:2], member_id)).fetchone():
                     raise BridgeError('NATS Claude digest ID collision')
-                part = digest_entry(item, config_path) if is_digest else delivery_parts(item, config_path)[0]
+                part = message_text(item, config_path)
                 db.execute('INSERT INTO nats_claude_inbox (tenant,agent,session,id,fingerprint,body) VALUES (?,?,?,?,?,?)',
                            (*self.route, member_id, member_fingerprint, encode([part])))
                 surfaced = False
