@@ -248,6 +248,17 @@ class SenderRoutingTests(unittest.TestCase):
             tool.assert_called_once()
         self.read_routes.assert_not_called()
 
+    def test_enrollment_takes_precedence_over_inherited_connector_path(self):
+        with patch.dict(os.environ, {'CSL_NATS_CONFIG': '/private/env.json'}, clear=True), \
+                patch('csl_nats_tools.command') as tool, contextlib.redirect_stdout(io.StringIO()):
+            csl_agents._execute(self.parse('agents', 'status', '--from', 'client'))
+            self.assertEqual(tool.call_args.args[0].nats_config, Path('/private/vi.json'))
+            csl_agents._execute(self.parse('history', '--with', 'worker', '--from', 'other'))
+            self.assertEqual(self.hub.call_args.args[1]['source'], 'other')
+            self.read_routes.side_effect = FileNotFoundError
+            csl_agents._execute(self.parse('history', '--with', 'worker', '--from', 'client'))
+            self.assertEqual(tool.call_args.args[0].nats_config, Path('/private/env.json'))
+
     def test_hub_only_and_unopted_source_still_use_hub(self):
         self.assertIn('transport=hub', self.execute('send', '--to', 'legacy'))
         self.assertEqual(self.hub.call_args.args[1]['target'], 'legacy')

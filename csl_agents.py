@@ -205,7 +205,7 @@ def reply_route(hub, nats_config, source, selector, target, enrolled):
     return sender, identifier(reply)
 
 
-def local_enrollment(source):
+def sender_routes():
     from csl_bridge_claude_notify import owned_json
 
     try:
@@ -218,6 +218,12 @@ def local_enrollment(source):
             or not isinstance(routes.get('nats_recipients'), list)
             or not all(isinstance(value, str) for value in routes['nats_recipients'])):
         raise BridgeError('Invalid CSL sender routing file')
+    return routes
+
+
+def local_enrollment(source, routes):
+    if routes is None:
+        return
     source = source or os.environ.get('CSL_AGENT')
     if not source:
         try:
@@ -233,7 +239,7 @@ def local_enrollment(source):
 
 
 def select_sender_route(args):
-    enrollment = local_enrollment(args.source)
+    enrollment = local_enrollment(args.source, sender_routes())
     if enrollment is None:
         return
     args.source, nats_config, enrolled = enrollment
@@ -260,11 +266,12 @@ def _execute(args):
                  or args.hub_action in ('versions', 'close', 'complete', 'put', 'fetch'))
     if nats_tool or args.hub_action == 'history':
         if args.nats_config is None and hub_config is None:
-            legacy_config = os.environ.get('CSL_NATS_CONFIG')
-            if legacy_config:
-                args.nats_config = Path(legacy_config)
-            elif enrollment := local_enrollment(args.source):
+            routes = sender_routes()
+            if enrollment := local_enrollment(args.source, routes):
                 args.source, args.nats_config, _ = enrollment
+            elif nats_tool or routes is None:
+                if legacy_config := os.environ.get('CSL_NATS_CONFIG'):
+                    args.nats_config = Path(legacy_config)
     if nats_tool or (args.hub_action == 'history' and args.nats_config):
         from csl_nats_tools import command
         return command(args)
