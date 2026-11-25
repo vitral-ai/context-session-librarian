@@ -127,6 +127,13 @@ def deliver(connector, packet):
                 raise BridgeError('Request ID collision; content differs')
             if old['state'] != 'pending':
                 return old['result'] or {'state': old['state']}
+        else:
+            from csl_nats import ci_completion_fingerprint, digest_ci_operation
+            completion = (ci_completion_fingerprint(source['name'], agent, packet['text'])
+                          if packet.get('in_reply_to') is None else None)
+            member = digest_ci_operation(connector.store, packet['id'], thread, completion)
+            if member:
+                return member
         state = connector.current(agent)
         # Active Codex turns accept turn/steer at their next input boundary.
         # Waiting for idle starves recipients that keep working in one turn.
@@ -251,12 +258,13 @@ def add_commands(subparsers, _):
         body.add_argument('--text-file', type=Path, default=Path('-'))
         body.add_argument('--text')
         send.add_argument('--id')
+        send.add_argument('--nats-config', type=Path)
         if action == 'send':
-            send.add_argument('--nats-config', type=Path)
             send.add_argument('--urgent', action='store_true')
             send.add_argument('--reason', choices=('blocked', 'needs_approval', 'security', 'operation_failed'))
         if action == 'reply':
-            send.add_argument('message_id', nargs='?', help='Full message UUID or a unique prefix (8+ characters).')
+            send.add_argument('message_id', nargs='?',
+                              help='Full message UUID (Hub also accepts a unique prefix of 8+ characters).')
             send.add_argument('--in-reply-to')
         send.set_defaults(func=execute, hub_action='send', is_reply=action == 'reply')
     history = sub.add_parser('history', help='Read your retained pair history (CSL_AGENT identifies you).')

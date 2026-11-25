@@ -170,7 +170,7 @@ Hub native messages include a one-line `Reply via hub: csl reply FULL_ID --from 
 
 ## Experimental NATS adapter
 
-The first NATS slice supports sending and individual Codex delivery. Install
+The NATS adapter supports text delivery to Codex and Claude. Install
 `nats-py[nkeys]` in the Python environment used by CSL. Use a private JSON file
 (mode 0600) with owner-issued credentials and an existing private bridge home:
 
@@ -197,9 +197,20 @@ Send with `csl send --nats-config PATH --from alice --to bob --text
 "Hello"`. Add `--urgent --reason blocked` for an urgent message. If the send
 outcome is unknown, retry with the printed `--id` and the same text and target.
 
+For Claude, add `"cli": "claude"`, `"mailbox_home": "/private/bridge/claude"`
+and `"claude_config": "/private/claude"` to the agent entry. Register the
+exact Claude session in the mailbox home. Run
+`csl bridge --home "$CLAUDE_MAIL_HOME" hook --agent carol --event PostToolUse --nats-tenant vi`
+at each tool boundary. Use the actual event name for `SessionStart`,
+`UserPromptSubmit` and `Stop` hooks. The native wake carries a short alert.
+The hook supplies the message text and records delivery after writing it.
+An unsurfaced batch can retry its wake once after 30 seconds.
+
 The local `nats_delivered` table in the connector's private `bridge.sqlite`
-records the pinned native thread, turn, and acknowledgment state. This draft
-handles individual text envelopes. Batch digests, attachments and Claude
-delivery require the subsequent adapter slices.
+records the pinned session, turn, and acknowledgment state. A text digest
+retains the original message IDs and order. If a Claude digest exceeds the
+rendered hook limit, it continues at the next boundary without splitting a
+member or acknowledging the digest before its last part is emitted.
 During dual delivery, matching CI completion notices reuse the confirmed
-native turn for the same message ID, recipient thread and body.
+native turn for the same message ID, recipient thread and body, including
+notices delivered inside a digest.

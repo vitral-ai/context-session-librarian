@@ -10,8 +10,7 @@ from csl_bridge_store import BridgeError, Store, compact_message, decode, encode
 EVENTS = ('SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop')
 
 
-def surface(home, agent, event, payload, include_body=False, limit=10, session_binding=None):
-    """Return hook output; surfaced is an emission attempt, never proof of reading."""
+def hook_session(event, payload, limit):
     if event not in EVENTS or not isinstance(payload, dict):
         raise BridgeError('Unsupported hook event or input')
     session = payload.get('session_id')
@@ -22,6 +21,22 @@ def surface(home, agent, event, payload, include_body=False, limit=10, session_b
     if type(limit) is not int or not 1 <= limit <= 20:
         raise BridgeError('Hook limit must be 1..20')
     if event == 'Stop' and payload.get('stop_hook_active') is True:
+        return None
+    return session
+
+
+def hook_output(event, text):
+    if event == 'PostToolUse':
+        return encode({'hookSpecificOutput': {'hookEventName': event, 'additionalContext': text}})
+    if event == 'Stop':
+        return encode({'decision': 'block', 'reason': text})
+    return text
+
+
+def surface(home, agent, event, payload, include_body=False, limit=10, session_binding=None):
+    """Return hook output; surfaced is an emission attempt, never proof of reading."""
+    session = hook_session(event, payload, limit)
+    if session is None:
         return ''
     store = Store(home)
     try:
@@ -60,11 +75,7 @@ def surface(home, agent, event, payload, include_body=False, limit=10, session_b
                 text = '\n\n'.join(item['preview'] for item in headers)
                 if more_available:
                     text += '\nMore CSL messages waiting: csl receive.'
-                if event == 'PostToolUse':
-                    return encode({'hookSpecificOutput': {'hookEventName': event, 'additionalContext': text}})
-                if event == 'Stop':
-                    return encode({'decision': 'block', 'reason': text})
-                return text
+                return hook_output(event, text)
             output = render()
             while len(output.encode('utf-8')) > 48000:
                 if len(headers) > 1:
@@ -80,6 +91,19 @@ def surface(home, agent, event, payload, include_body=False, limit=10, session_b
         store.close()
 
 
+def surface_nats(home, tenant, agent, event, payload, limit, emit):
+    from csl_nats import ClaudeInbox, agent_name, tenant_name
+    session = hook_session(event, payload, limit)
+    if session is None:
+        return
+    store = Store(home)
+    try:
+        inbox = ClaudeInbox(store, tenant_name(tenant), agent_name(agent, registration=True), identifier(session))
+        inbox.surface(lambda text: hook_output(event, text), emit, limit)
+    finally:
+        store.close()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--home', required=True)
@@ -89,12 +113,19 @@ def main(argv=None):
                         help='Compatibility option; compact body previews are now always included')
     parser.add_argument('--limit', type=int, default=10)
     parser.add_argument('--session-binding', help='Explicit owner-only harness-session binding override for this profile')
+    parser.add_argument('--nats-tenant', help='Use the registered NATS Claude inbox for this tenant')
     args = parser.parse_args(argv)
     try:
         raw = sys.stdin.buffer.read(65537)
         if len(raw) > 65536:
             raise BridgeError('Hook input exceeds limit')
         payload = json.loads(raw)
+        if args.nats_tenant is not None:
+            if args.session_binding:
+                raise BridgeError('NATS hook requires the exact registered session')
+            surface_nats(args.home, args.nats_tenant, args.agent, args.event, payload, args.limit,
+                         lambda text: print(text, flush=True))
+            return 0
         output = surface(args.home, args.agent, args.event, payload, args.include_body, args.limit, args.session_binding)
         if output:
             print(output)

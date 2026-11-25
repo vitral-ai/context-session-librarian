@@ -4,6 +4,7 @@ No listener or permission grant. Native IPC is version-dependent; the ordinary
 session-bound hook remains the fallback. A socket write is an emission attempt,
 not proof of model consumption. Failed writes leave the hook fallback eligible.
 """
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -77,6 +78,29 @@ def endpoint(config, session):
     return record, path, key['peerToken']
 
 
+@contextmanager
+def native_connection(session, config=None):
+    record, path, token = endpoint(config or Path.home() / '.claude', session)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(1)
+        connection.connect(str(path))
+        pid, uid, _ = struct.unpack('3i', connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        if (pid, uid) != (record['pid'], os.getuid()) or start_ticks(pid) != record['procStart']:
+            raise BridgeError('Native peer changed before delivery')
+        yield connection, token
+
+
+def send_native(connection, token, session, text):
+    connection.sendall((encode({'type': 'auth', 'token': token}) + '\n' + encode({
+        'type': 'user', 'session_id': session, 'from': 'csl-mailbox',
+        'priority': 'next', 'message': {'content': text}}) + '\n').encode())
+
+
+def wake(session, config=None):
+    with native_connection(session, config) as (connection, token):
+        send_native(connection, token, session, 'CSL: new messages')
+
+
 def notify(home, agent, message_id, config=None):
     """Emit one compact preview per session/message, shared with hook fallback."""
     store = Store(home)
@@ -92,14 +116,8 @@ def notify(home, agent, message_id, config=None):
         envelope = decode(row['envelope'])
         if envelope.get('expires_at') and timestamp(envelope['expires_at']) <= timestamp(now()):
             return False
-        record, path, token = endpoint(config or Path.home() / '.claude', session)
         text = compact_message(row['source'], message_id, envelope['body'], target=agent if row['peer'] == 'agent-hub' else None)
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-            connection.settimeout(1)
-            connection.connect(str(path))
-            pid, uid, _ = struct.unpack('3i', connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-            if (pid, uid) != (record['pid'], os.getuid()) or start_ticks(pid) != record['procStart']:
-                raise BridgeError('Native peer changed before delivery')
+        with native_connection(session, config) as (connection, token):
             # Share the hook's emission ledger. A bounded socket send is serialized
             # with hooks; failure rolls back and leaves their fallback eligible.
             with store.transaction() as db:
@@ -108,9 +126,7 @@ def notify(home, agent, message_id, config=None):
                 if db.execute('SELECT 1 FROM mail_surfaced WHERE agent=? AND session=? AND id=?',
                               (agent, session, message_id)).fetchone():
                     return False
-                connection.sendall((encode({'type': 'auth', 'token': token}) + '\n' + encode({
-                    'type': 'user', 'session_id': session, 'from': 'csl-mailbox',
-                    'priority': 'next', 'message': {'content': text}}) + '\n').encode())
+                send_native(connection, token, session, text)
                 db.execute('INSERT INTO mail_surfaced VALUES(?,?,?,?)',
                            (agent, session, message_id, now()))
         return True
