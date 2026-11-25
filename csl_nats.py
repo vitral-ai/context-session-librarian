@@ -826,7 +826,10 @@ async def print_unread(client, target):
         details = ', '.join(checked_ids)
         if count > len(checked_ids):
             details += f', {count - len(checked_ids)} more'
-        print(f'you have {count} unread message(s) from {target} ({details})', file=sys.stderr)
+        try:
+            print(f'you have {count} unread message(s) from {target} ({details})', file=sys.stderr)
+        except (OSError, ValueError) as error:
+            LOG.debug('NATS unread hint could not be written (%s)', type(error).__name__)
 
 
 def send_command(args):
