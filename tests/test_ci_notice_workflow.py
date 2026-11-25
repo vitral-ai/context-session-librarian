@@ -38,6 +38,13 @@ class NoticeWorkflowTests(unittest.TestCase):
         self.assertIn("!cancelled() && steps.trusted-checkout.outcome == 'success'", publish)
         self.assertIn('CSL_NATS_CI_CREDS: ${{ secrets.CSL_NATS_CI_CREDS }}', publish)
 
+    def test_stalled_optional_setup_leaves_time_for_hub(self):
+        workflow = Path('.github/workflows/pr-completion-notice.yml').read_text()
+        job_timeout = int(re.search(r'^    timeout-minutes: (\d+)$', workflow, re.M).group(1))
+        step_timeouts = [int(value) for value in re.findall(r'^        timeout-minutes: (\d+)$', workflow, re.M)]
+        self.assertEqual(step_timeouts, [2, 1, 1, 2])
+        self.assertGreater(job_timeout, sum(step_timeouts))
+
     def test_unprivileged_producers_have_no_notice_credentials(self):
         for filename in ('test.yml', 'workload-image.yml'):
             workflow = Path('.github/workflows', filename).read_text()
