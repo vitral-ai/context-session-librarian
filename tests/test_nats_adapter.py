@@ -10,9 +10,11 @@ from unittest.mock import AsyncMock, Mock, patch
 import uuid
 
 from csl_agents import deliver as deliver_hub
+from csl_bridge_hooks import surface_nats
 from csl_bridge_store import BridgeError, Store
 from csl_ci_notice import notice_request
-from csl_nats import Client, Ledger, agent_name, body_text, deliver_codex, receive_one, recover_acks, remember_send
+from csl_nats import (ClaudeInbox, Client, Ledger, agent_name, body_text, deliver_codex, delivery_text,
+                      receive_one, recover_acks, remember_send)
 
 
 class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
@@ -70,6 +72,76 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rows(), [])
         self.message.nak.assert_awaited_once_with(delay=60)
         self.message.ack_sync.assert_not_awaited()
+
+    async def test_digest_keeps_member_order_and_recovers_every_receipt(self):
+        items = [dict(json.loads(self.message.data), id=str(uuid.uuid4()), body=body)
+                 for body in ('a' * 49000 + ' first end', 'b' * 49000 + ' second end')]
+        self.message.data = json.dumps(dict(items[0], id=self.id, kind='digest', **{'from': 'csl-control'},
+                                            body='', items=items)).encode()
+        self.client.receipt = AsyncMock()
+        self.message.ack_sync.side_effect = TimeoutError
+        with self.assertRaises(TimeoutError):
+            await receive_one(self.client, self.ledger, self.message, self.deliver)
+        text = delivery_text(self.deliver.call_args.args[0])
+        self.assertLess(text.index(items[0]['body']), text.index(items[1]['body']))
+        self.assertEqual({call.args for call in self.client.receipt.await_args_list},
+                         {(entry['id'], 'delivered') for entry in items} | {(self.id, 'delivered')})
+        self.client.receipt.reset_mock()
+        reopened = Store(self.home)
+        self.addCleanup(reopened.close)
+        await recover_acks(self.client, Ledger(reopened, 'vi', 'alice', self.thread), (TimeoutError,))
+        self.assertEqual({call.args for call in self.client.receipt.await_args_list},
+                         {(entry['id'], 'acked') for entry in items} | {(self.id, 'acked')})
+        self.deliver.assert_called_once()
+
+    async def test_digest_with_duplicate_or_foreign_child_is_rejected_before_handoff(self):
+        item = dict(json.loads(self.message.data), id=str(uuid.uuid4()), body='message')
+        for items in ([item, item], [dict(item, to='charlie')]):
+            self.message.data = json.dumps(dict(item, id=self.id, kind='digest', **{'from': 'csl-control'},
+                                                body='', items=items)).encode()
+            with self.assertRaises(BridgeError):
+                await receive_one(self.client, self.ledger, self.message, self.deliver)
+        self.deliver.assert_not_called()
+        self.message.ack_sync.assert_not_awaited()
+
+    async def test_claude_wake_is_batched_and_ack_waits_for_hook_output(self):
+        with self.store.transaction() as db:
+            db.execute('INSERT INTO agents VALUES (?,?)', ('alice', self.thread))
+        inbox = ClaudeInbox(self.store, 'vi', 'alice', self.thread)
+        self.assertFalse(await receive_one(self.client, self.ledger, self.message, inbox.stage))
+        second = dict(json.loads(self.message.data), id=str(uuid.uuid4()), body='second body')
+        inbox.stage(second, 'second-fingerprint')
+        with patch('csl_bridge_claude_notify.wake') as wake:
+            wake.side_effect = OSError('closed socket')
+            with self.assertRaises(OSError):
+                inbox.wake_waiting('/fixture')
+            wake.side_effect = None
+            inbox.wake_waiting('/fixture')
+            inbox.wake_waiting('/fixture')
+            self.assertEqual(wake.call_count, 2)
+            wake.assert_called_with(self.thread, '/fixture')
+        self.assertEqual(self.rows(), [])
+
+        event = 'PostToolUse'
+        payload = {'session_id': self.thread, 'hook_event_name': event}
+        output = Mock(side_effect=BrokenPipeError)
+        with self.assertRaises(BrokenPipeError):
+            surface_nats(self.home, 'vi', 'alice', event, payload, 10, output)
+        self.assertEqual(self.rows(), [])
+        output = Mock()
+        surface_nats(self.home, 'other', 'alice', event, payload, 10, output)
+        output.assert_not_called()
+        with self.assertRaises(BridgeError):
+            surface_nats(self.home, 'vi', 'alice', event, dict(payload, session_id=self.turn), 10, output)
+        surface_nats(self.home, 'vi', 'alice', event, payload, 10, output)
+        surface_nats(self.home, 'vi', 'alice', event, payload, 10, output)
+        output.assert_called_once()
+        body = json.loads(output.call_args.args[0])['hookSpecificOutput']['additionalContext']
+        self.assertIn('x' * 49152 + '\n\nCSL from bob', body)
+        self.assertTrue(body.endswith('second body'))
+        self.assertTrue(await receive_one(self.client, self.ledger, self.message, inbox.stage))
+        self.assertEqual(self.rows()[0]['turn'], self.thread)
+        self.assertEqual(self.calls, ['delivered', 'broker ACK', 'acked'])
 
     async def test_lost_ack_confirmation_recovers_without_second_handoff(self):
         self.message.ack_sync.side_effect = TimeoutError

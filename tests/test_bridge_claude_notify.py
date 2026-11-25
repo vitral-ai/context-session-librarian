@@ -10,7 +10,7 @@ import uuid
 
 from csl_bridge_engine import Connector
 from csl_bridge_store import BridgeError, Store, encode
-from csl_bridge_claude_notify import notify, owned_json
+from csl_bridge_claude_notify import notify, owned_json, wake
 
 
 class NotifyTests(unittest.TestCase):
@@ -65,6 +65,16 @@ class NotifyTests(unittest.TestCase):
         self.assertEqual(frames[1]['from'], 'csl-mailbox')
         self.assertEqual('CSL from sender (' + self.mid[:8] + '):\nSECRET REMOTE BODY', frames[1]['message']['content'])
         self.assertIsNone(self.connector.mailbox.message(self.mid)['acknowledged_at'])
+
+    def test_wake_sends_only_fixed_notification(self):
+        with patch('csl_bridge_claude_notify.endpoint', return_value=(self.record, Path('/test/socket'), '0' * 32)), \
+             patch('csl_bridge_claude_notify.socket.socket', return_value=self.sock), \
+             patch('csl_bridge_claude_notify.start_ticks', return_value='123'):
+            wake(self.session)
+        frames = [json.loads(line) for line in self.sock.sendall.call_args.args[0].decode().splitlines()]
+        self.assertEqual(frames[1]['session_id'], self.session)
+        self.assertEqual(frames[1]['message']['content'], 'CSL: new messages')
+        self.assertTrue(self.run_notify())
 
     def test_hub_provenance_adds_reply_footer_only_to_hub_mail(self):
         with self.connector.store.transaction() as db:

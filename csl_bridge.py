@@ -159,6 +159,8 @@ def run(args):
                 values.append('--include-body')
             if args.session_binding:
                 values += ['--session-binding', args.session_binding]
+            if args.nats_tenant is not None:
+                values += ['--nats-tenant', args.nats_tenant]
             raise SystemExit(hook_main(values))
         if args.action in ('init', 'agent', 'peer', 'peer-session', 'peer-sources', 'grant', 'grant-revoke', 'grant-list', 'grant-show'):
             result = configure(args)
@@ -315,6 +317,7 @@ def add_commands(subparsers, csl):
     hook.add_argument('--event', required=True, choices=['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop'])
     hook.add_argument('--limit', type=int, default=10)
     hook.add_argument('--session-binding', help='Explicit owner-supplied UUID binding override for isolated tests; never inferred from message contents.')
+    hook.add_argument('--nats-tenant', help='Use the registered NATS Claude inbox for this tenant.')
     hook.add_argument('--include-body', action='store_true', help='Explicit local owner opt-in to surface bounded untrusted message bodies at this turn boundary.')
     notify = sub.add_parser('notify', help='Owner-run Codex native queue notification; opt-in and local activate grant required, no work execution.')
     notify.add_argument('--agent', required=True)
