@@ -719,10 +719,13 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
             js.consumer_info.side_effect = ServiceUnavailableError
             with self.assertRaises(ServiceUnavailableError):
                 await self.client.pull()
+            js.consumer_info.side_effect = NotFoundError(code=404, err_code=10059, description='stream not found')
+            with self.assertRaises(NotFoundError):
+                await self.client.pull()
             request.assert_not_awaited()
             js.pull_subscribe_bind.assert_awaited_once()
 
-            js.consumer_info.side_effect = NotFoundError
+            js.consumer_info.side_effect = NotFoundError(code=404, err_code=10014, description='consumer not found')
 
             async def bind(**kwargs):
                 request.assert_awaited_once_with('ctl.ensure_consumer', {})
