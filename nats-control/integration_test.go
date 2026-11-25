@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -37,6 +38,13 @@ func TestOperatorMode(t *testing.T) {
 		Name: "CSL_MSG", Subjects: []string{"csl.vi.agent.*.inbox"}, Storage: jetstream.FileStorage,
 		MaxAge: messageAge, Duplicates: 2 * time.Minute, MaxMsgSize: 1024 * 1024,
 	}); err != nil {
+		t.Fatal(err)
+	}
+	archiveStream, err := js.CreateStream(ctx, jetstream.StreamConfig{
+		Name: hubArchiveName, Subjects: []string{"csl.vi.archive.>"}, Storage: jetstream.FileStorage,
+		Discard: jetstream.DiscardNew, MaxBytes: 2048, MaxMsgSize: 1024 * 1024,
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
@@ -118,6 +126,149 @@ func TestOperatorMode(t *testing.T) {
 	call(sender, "ctl.hello.sender", map[string]string{"client_version": "1.3.0+abc", "status": "working"}, "")
 	call(peer, "ctl.status.worker-a", map[string]string{}, "forbidden")
 	call(peer, "ctl.admin.worker-a", map[string]string{"action": "register"}, "forbidden")
+
+	t.Run("HubHistoryImport", func(t *testing.T) {
+		stamp := time.Now().UTC().Add(-time.Hour)
+		row := hubHistoryRow{ID: randomID(), From: "worker-a", To: "worker-b",
+			FromMachine: "fixture", ToMachine: "fixture", CreatedAt: stamp, State: "delivered", Body: "old Hub body"}
+		req := map[string]any{"action": "import-hub-history", "history": &row}
+		call(peer, "ctl.admin.worker-a", req, "forbidden")
+		row.ToMachine = "another-machine"
+		call(owner, "ctl.admin.owner", req, "forbidden")
+		row.ToMachine = "fixture"
+		row.State = "queued"
+		call(owner, "ctl.admin.owner", req, "invalid")
+		row.State = "delivered"
+		var plan hubHistoryPlan
+		if err := json.Unmarshal(admin(map[string]any{"action": "plan-hub-history", "history": &row}), &plan); err != nil ||
+			plan.ID != row.ID || plan.PayloadBytes <= 0 || plan.ReserveBytes <= plan.PayloadBytes || plan.Available != 2048 {
+			t.Fatalf("archive plan: %#v, %v", plan, err)
+		}
+		info, err := archiveStream.Info(ctx)
+		if err != nil || info.State.Msgs != 0 {
+			t.Fatalf("archive plan performed a write: %v, %v", info, err)
+		}
+		tooLarge := row
+		tooLarge.ID, tooLarge.Body = randomID(), strings.Repeat("x", 2048)
+		call(owner, "ctl.admin.owner", map[string]any{"action": "import-hub-history", "history": &tooLarge}, "invalid")
+		liveSubject := "csl.vi.agent.worker-a.inbox"
+		pending, err := js.Publish(ctx, liveSubject, []byte("pending live delivery"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"imported", "existing"} {
+			var result sendResult
+			if err := json.Unmarshal(admin(req), &result); err != nil || result != (sendResult{row.ID, want}) {
+				t.Fatalf("import: %#v, %v", result, err)
+			}
+		}
+		row.Body = "mismatched"
+		call(owner, "ctl.admin.owner", req, "invalid")
+		row.Body = "old Hub body"
+		history := map[string]string{"id": row.ID}
+		for name, conn := range map[string]*nats.Conn{"worker-a": peer, "worker-b": third} {
+			var result struct{ Messages []historyEntry }
+			if err := json.Unmarshal(call(conn, "ctl.history."+name, history, ""), &result); err != nil ||
+				len(result.Messages) != 1 || result.Messages[0].Body != row.Body ||
+				result.Messages[0].State != row.State || !result.Messages[0].CreatedAt.Equal(stamp) {
+				t.Fatalf("history: %#v, %v", result, err)
+			}
+		}
+		call(sender, "ctl.history.sender", history, "not_found")
+		call(third, "ctl.receipt.worker-b", sendResult{row.ID, "acked"}, "forbidden")
+		call(sender, "ctl.receipt.sender", sendResult{row.ID, "acked"}, "not_found")
+		unread, err := service.stream.GetMsg(ctx, pending.Sequence)
+		if err != nil || !bytes.Equal(unread.Data, []byte("pending live delivery")) {
+			t.Fatalf("archive import evicted a pending live message: %v", err)
+		}
+		if err := service.stream.DeleteMsg(ctx, pending.Sequence); err != nil {
+			t.Fatal(err)
+		}
+		if err := service.deliveryTick(ctx); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"worker-a", "worker-b"} {
+			c, err := service.stream.Consumer(ctx, "agent-"+name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := c.Info(ctx)
+			if err != nil || info.NumPending != 0 {
+				t.Fatalf("history reached %s inbox: %v, %v", name, info, err)
+			}
+		}
+		archive, err := service.archiveMessage(ctx, archiveStream, row.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := readState[messageRecord](ctx, service.state, "message."+row.ID); !errors.Is(err, jetstream.ErrKeyNotFound) {
+			t.Fatalf("archive modified live history index: %v", err)
+		}
+		info, err = archiveStream.Info(ctx)
+		if err != nil || info.State.Msgs != 1 {
+			t.Fatalf("expected one archived copy: %v, %v", info, err)
+		}
+		live, err := service.stream.Info(ctx)
+		if err != nil || live.State.Msgs != 0 {
+			t.Fatalf("import wrote to the live stream: %v, %v", live, err)
+		}
+		admin(map[string]any{"action": "allow", "from": "worker-a", "to": "worker-b"})
+		duplicate := Envelope{V: 1, ID: row.ID, To: "worker-b", Kind: "message",
+			Urgency: "normal", CreatedAt: stamp, Body: row.Body, ClientVersion: "1.3.0+abc"}
+		call(peer, "send.worker-a", duplicate, "invalid")
+		duplicate.ID, duplicate.Kind, duplicate.ReplyTo = randomID(), "reply", &row.ID
+		call(peer, "send.worker-a", duplicate, "not_found")
+
+		reply := Envelope{V: 1, ID: randomID(), To: "worker-a", Kind: "reply",
+			Urgency: "normal", CreatedAt: time.Now().UTC(), Body: "reply to imported Hub message",
+			ReplyTo: &row.ID, ClientVersion: "1.3.0+abc"}
+		call(third, "send.worker-b", reply, "forbidden")
+		admin(map[string]any{"action": "allow", "from": "worker-b", "to": "worker-a"})
+		worker, revision, err := readState[Agent](ctx, service.state, "agent.worker-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		rebound := worker
+		rebound.Machine = "replacement"
+		if err := writeState(ctx, service.state, "agent.worker-a", rebound, revision); err != nil {
+			t.Fatal(err)
+		}
+		call(third, "send.worker-b", reply, "not_found")
+		_, revision, err = readState[Agent](ctx, service.state, "agent.worker-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := writeState(ctx, service.state, "agent.worker-a", worker, revision); err != nil {
+			t.Fatal(err)
+		}
+		refused := row
+		refused.ID, refused.State = randomID(), "refused"
+		admin(map[string]any{"action": "import-hub-history", "history": &refused})
+		reply.ReplyTo = &refused.ID
+		call(third, "send.worker-b", reply, "not_found")
+		reply.ReplyTo = &row.ID
+		call(third, "send.worker-b", reply, "")
+		saved, _, err := readState[messageRecord](ctx, service.state, "message."+reply.ID)
+		if err != nil || saved.Envelope.ReplyTo == nil || *saved.Envelope.ReplyTo != row.ID || saved.Sequence == 0 {
+			t.Fatalf("reply to archive did not reach the live stream: %#v, %v", saved, err)
+		}
+		call(peer, "ctl.receipt.worker-a", sendResult{reply.ID, "acked"}, "")
+		call(peer, "ctl.complete.worker-a", map[string]string{"with": "worker-b"}, "")
+		call(third, "ctl.complete.worker-b", map[string]string{"with": "worker-a"}, "")
+		if err := service.stream.DeleteMsg(ctx, saved.Sequence); err != nil {
+			t.Fatal(err)
+		}
+		refusedMessage, err := service.archiveMessage(ctx, archiveStream, refused.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := archiveStream.DeleteMsg(ctx, refusedMessage.Sequence); err != nil {
+			t.Fatal(err)
+		}
+		if err := archiveStream.DeleteMsg(ctx, archive.Sequence); err != nil {
+			t.Fatal(err)
+		}
+	})
 
 	text := strings.Repeat("x", maxBody-1) + "\n"
 	message := Envelope{V: 1, ID: randomID(), From: "sender", To: "worker-a", Kind: "message",

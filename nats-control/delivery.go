@@ -75,6 +75,12 @@ type historyEntry struct {
 	State string `json:"state"`
 }
 
+type historyRecord struct {
+	historyEntry
+	acceptedAt      time.Time
+	archiveSequence uint64
+}
+
 func (s *Service) history(ctx context.Context, caller string, body []byte) (any, error) {
 	var request struct {
 		With   string `json:"with,omitempty"`
@@ -92,49 +98,43 @@ func (s *Service) history(ctx context.Context, caller string, body []byte) (any,
 	if request.Last == 0 {
 		request.Last = min(5, retention)
 	}
-	entries, err := s.messages(ctx)
-	if err != nil {
-		return nil, err
+	if request.Last < 1 || request.Last > retention {
+		return nil, invalid("invalid pair or history limit")
 	}
 	if request.ID != "" {
 		if request.With != "" || request.Before != "" || (!messageID.MatchString(request.ID) && !messagePrefix.MatchString(request.ID)) {
 			return nil, invalid("provide one message ID or pair name")
 		}
-		var matched string
-		for _, entry := range entries {
-			envelope := entry.record.Envelope
-			if !strings.HasPrefix(envelope.ID, request.ID) || (caller != envelope.To && caller != envelope.From) ||
-				(envelope.Kind != "message" && envelope.Kind != "reply") {
-				continue
-			}
-			if matched != "" {
-				return nil, invalid("ambiguous message prefix")
-			}
-			matched = envelope.ID
-			request.With = envelope.From
-			if request.With == caller {
-				request.With = envelope.To
-			}
-		}
-		request.ID = matched
-		if request.With == "" {
-			return nil, missing("message unavailable")
-		}
-	}
-	if _, err := pairKey(caller, request.With); err != nil || request.Last < 1 || request.Last > retention {
+	} else if _, err := pairKey(caller, request.With); err != nil {
 		return nil, invalid("invalid pair or history limit")
 	}
-	matches := make([]messageEntry, 0, retention)
-	for _, entry := range entries {
-		env := entry.record.Envelope
-		if (env.From == caller && env.To == request.With) || (env.To == caller && env.From == request.With) {
-			matches = append(matches, entry)
+	matches, err := s.historyRecords(ctx, caller, request.With, request.ID)
+	if err != nil {
+		return nil, err
+	}
+	if request.ID != "" {
+		switch len(matches) {
+		case 0:
+			return nil, missing("message unavailable")
+		case 1:
+			match := matches[0]
+			request.ID = match.ID
+			request.With = match.From
+			if request.With == caller {
+				request.With = match.To
+			}
+		default:
+			return nil, invalid("ambiguous message prefix")
+		}
+		matches, err = s.historyRecords(ctx, caller, request.With, "")
+		if err != nil {
+			return nil, err
 		}
 	}
 	matches = matches[max(0, len(matches)-retention):]
 	if request.Before != "" {
-		index := slices.IndexFunc(matches, func(entry messageEntry) bool {
-			return entry.record.Envelope.ID == request.Before
+		index := slices.IndexFunc(matches, func(entry historyRecord) bool {
+			return entry.ID == request.Before
 		})
 		if index < 0 {
 			return nil, missing("history cursor unavailable")
@@ -145,15 +145,17 @@ func (s *Service) history(ctx context.Context, caller string, body []byte) (any,
 	result := make([]historyEntry, 0, requested)
 	encoded := 0
 	for i := len(matches) - 1; i >= 0 && len(result) < requested; i-- {
-		entry := matches[i]
-		if request.ID != "" && request.ID != entry.record.Envelope.ID {
+		item := matches[i].historyEntry
+		if request.ID != "" && item.ID != request.ID {
 			continue
 		}
-		state, _, err := readState[messageState](ctx, s.state, "msg."+entry.record.Envelope.ID)
-		if err != nil {
-			return nil, err
+		if item.State == "" {
+			current, _, err := readState[messageState](ctx, s.state, "msg."+item.ID)
+			if err != nil {
+				return nil, err
+			}
+			item.State = current.State
 		}
-		item := historyEntry{entry.record.Envelope, state.State}
 		raw, err := json.Marshal(item)
 		if err != nil {
 			return nil, err
@@ -179,6 +181,143 @@ func (s *Service) history(ctx context.Context, caller string, body []byte) (any,
 	}{result, retention, next}, nil
 }
 
+func (s *Service) historyRecords(ctx context.Context, caller, peer, id string) ([]historyRecord, error) {
+	var live []messageEntry
+	if messageID.MatchString(id) {
+		record, revision, err := readState[messageRecord](ctx, s.state, "message."+id)
+		switch {
+		case err == nil:
+			live = []messageEntry{{record, revision}}
+		case !errors.Is(err, jetstream.ErrKeyNotFound):
+			return nil, err
+		}
+	} else {
+		var err error
+		live, err = s.messages(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	matches := make([]historyRecord, 0)
+	liveIDs := make(map[string]bool, len(live))
+	for _, item := range live {
+		record := item.record
+		liveIDs[record.Envelope.ID] = true
+		if historyMatches(record.Envelope, caller, peer, id) {
+			matches = append(matches, historyRecord{
+				historyEntry: historyEntry{Envelope: record.Envelope},
+				acceptedAt:   record.AcceptedAt,
+			})
+		}
+	}
+	if messageID.MatchString(id) && len(matches) != 0 {
+		return matches, nil
+	}
+	archive, err := s.archiveStream(ctx)
+	if errors.Is(err, jetstream.ErrStreamNotFound) {
+		return matches, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	machines := make(map[string]string)
+	machine := func(name string) (string, error) {
+		if value, ok := machines[name]; ok {
+			return value, nil
+		}
+		agent, _, err := readState[Agent](ctx, s.state, "agent."+name)
+		if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
+			return "", err
+		}
+		machines[name] = agent.Machine
+		return agent.Machine, nil
+	}
+	add := func(raw *jetstream.RawStreamMsg) error {
+		var entry archiveEntry
+		if err := json.Unmarshal(raw.Data, &entry); err != nil {
+			return err
+		}
+		if !messageID.MatchString(entry.ID) || !isRegisteredName(entry.From) || !isRegisteredName(entry.To) ||
+			entry.From == entry.To || entry.CreatedAt.IsZero() ||
+			(entry.State != "delivered" && entry.State != "refused" && entry.State != "dropped") ||
+			raw.Subject != s.subject("archive."+entry.ID+"."+min(entry.From, entry.To)+"."+max(entry.From, entry.To)) {
+			return errors.New("invalid archived history record")
+		}
+		if liveIDs[entry.ID] || !historyMatches(entry.Envelope, caller, peer, id) {
+			return nil
+		}
+		from, err := machine(entry.From)
+		if err != nil {
+			return err
+		}
+		to, err := machine(entry.To)
+		if err != nil {
+			return err
+		}
+		if from != "" && to != "" && from == entry.FromMachine && to == entry.ToMachine {
+			matches = append(matches, historyRecord{entry.historyEntry, entry.CreatedAt, raw.Sequence})
+		}
+		return nil
+	}
+	if messageID.MatchString(id) {
+		raw, err := s.archiveMessage(ctx, archive, id)
+		if errors.Is(err, jetstream.ErrMsgNotFound) {
+			return matches, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := add(raw); err != nil {
+			return nil, err
+		}
+	} else {
+		root := s.subject("archive.*.")
+		filters := []string{root + caller + ".*", root + "*." + caller}
+		if peer != "" {
+			filters = []string{root + min(caller, peer) + "." + max(caller, peer)}
+		}
+		for _, filter := range filters {
+			for next := uint64(1); ; {
+				raw, err := archive.GetMsg(ctx, next, jetstream.WithGetMsgSubject(filter))
+				if errors.Is(err, jetstream.ErrMsgNotFound) {
+					break
+				}
+				if err != nil {
+					return nil, err
+				}
+				if raw.Sequence < next {
+					return nil, errors.New("archive stream returned a non-advancing sequence")
+				}
+				if err := add(raw); err != nil {
+					return nil, err
+				}
+				next = raw.Sequence + 1
+			}
+		}
+	}
+	slices.SortFunc(matches, func(a, b historyRecord) int {
+		if order := a.acceptedAt.Compare(b.acceptedAt); order != 0 {
+			return order
+		}
+		if a.archiveSequence != b.archiveSequence {
+			if a.archiveSequence == 0 || (b.archiveSequence != 0 && a.archiveSequence > b.archiveSequence) {
+				return 1
+			}
+			return -1
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return matches, nil
+}
+
+func historyMatches(env Envelope, caller, peer, id string) bool {
+	if id != "" {
+		return (env.From == caller || env.To == caller) && strings.HasPrefix(env.ID, id) &&
+			(env.Kind == "message" || env.Kind == "reply")
+	}
+	return (env.From == caller && env.To == peer) || (env.To == caller && env.From == peer)
+}
+
 func (s *Service) receipt(ctx context.Context, caller string, body []byte) (any, error) {
 	var request sendResult
 	if err := decode(body, &request); err != nil {
@@ -188,11 +327,21 @@ func (s *Service) receipt(ctx context.Context, caller string, body []byte) (any,
 		return nil, invalid("invalid receipt")
 	}
 	entry, _, err := readState[messageRecord](ctx, s.state, "message."+request.ID)
-	if errors.Is(err, jetstream.ErrKeyNotFound) || (err == nil && entry.Envelope.To != caller) {
+	if errors.Is(err, jetstream.ErrKeyNotFound) {
+		matches, err := s.historyRecords(ctx, caller, "", request.ID)
+		if err != nil {
+			return nil, err
+		}
+		if len(matches) == 1 && matches[0].To == caller {
+			return nil, forbidden("message has not reached the inbox")
+		}
 		return nil, missing("message unavailable")
 	}
 	if err != nil {
 		return nil, err
+	}
+	if entry.Envelope.To != caller {
+		return nil, missing("message unavailable")
 	}
 	if entry.Sequence == 0 {
 		return nil, forbidden("message has not reached the inbox")

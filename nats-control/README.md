@@ -107,3 +107,24 @@ that token to revoke current agent credentials and purge its message, file
 and state stores. Reprovisioning restores the original quotas and re-enables
 registration. The operation is disabled for `vi`. Export and erasure are
 audited without logging payloads or the token.
+
+### Importing settled Hub history
+
+Run `python scripts/import_hub_history.py --hub-db PATH --pair agent-a,agent-b`
+for a count-only preflight. Repeat `--pair` to select more approved pairs. The
+tool reads the last 200 Hub rows per pair in a read-only transaction. It stops
+on unsettled envelopes or endpoint machine mismatches.
+
+Apply with `--apply --server tls://WRITER:4222 --tenant TENANT --owner-creds PATH`
+(+ `--ca PATH` for private trust). When the Hub database and owner credential are
+on different hosts, pipe the source tool's `--write-selected` output over SSH
+into the owner tool's `--read-selected --apply` input. The stream contains private
+message bodies. Keep it out of logs and use the owner credential in place.
+
+Before writing, the owner tool reports payload bytes, reserved archive bytes
+and available space. A batch that exceeds available space is refused before
+any row is written. Each append is also subject to the broker's byte limit.
+
+Imports preserve settled state in the separate `CSL_ARCHIVE` stream. History
+reads both streams. Native NATS records take precedence for matching IDs.
+Reapplying the same settled snapshot is safe.
