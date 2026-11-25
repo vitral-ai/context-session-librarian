@@ -237,13 +237,15 @@ class CompletionNoticeTests(unittest.TestCase):
                     self.assertEqual(hub.called, sent)
                     self.assertEqual(nats.called, sent)
 
-    def test_head_lookup_failure_still_posts_hub_only(self):
+    def test_head_lookup_failure_posts_exact_run_to_both(self):
         env = self.nats_environment()
         with patch.dict('os.environ', env, clear=True), patch('csl_ci_notice.post_hub') as hub, patch(
                 'csl_ci_notice.post_nats') as nats, patch('urllib.request.urlopen', side_effect=TimeoutError):
             main()
             hub.assert_called_once()
-            nats.assert_not_called()
+            nats.assert_called_once()
+            self.assertEqual(hub.call_args.args[0]['sha'], 'a' * 40)
+            self.assertEqual(nats.call_args.args[0]['sha'], 'a' * 40)
 
     def test_one_delivery_failure_does_not_suppress_the_other(self):
         env = self.nats_environment()

@@ -84,7 +84,7 @@ def workflow_notice(env):
 
 
 def current_head_allows_notice(notice, env):
-    """Return whether a run is current, or None when GitHub cannot verify it."""
+    """Skip known superseded runs; lookup failures must never lose a completion."""
     try:
         repo = notice['repository']
         if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo):
@@ -100,8 +100,8 @@ def current_head_allows_notice(notice, env):
             raise ValueError('Invalid PR head')
     except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException) as error:
         # Do not log credentials or response bodies. The notice retains run.head_sha.
-        print('Current PR head lookup failed (' + type(error).__name__ + '); sending exact-run hub notice')
-        return None
+        print('Current PR head lookup failed (' + type(error).__name__ + '); sending exact-run notice')
+        return True
     if head != notice['sha']:
         print('superseded by ' + head)
         return False
@@ -151,10 +151,9 @@ def post_nats(notice, env):
 def main():
     env = os.environ
     notice = workflow_notice(env)
-    current = current_head_allows_notice(notice, env)
-    if current is False:
+    if not current_head_allows_notice(notice, env):
         return
-    if current is None or not env.get('CSL_NATS_CI_CREDS'):
+    if not env.get('CSL_NATS_CI_CREDS'):
         post_hub(notice, env)
         return
     failed = []
