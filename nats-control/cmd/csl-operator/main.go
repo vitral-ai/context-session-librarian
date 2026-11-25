@@ -29,6 +29,7 @@ func run() error {
 	broker := flag.String("nats", "", "broker URL")
 	ca := flag.String("ca", "", "broker CA file")
 	operatorFile := flag.String("operator-seed", "", "operator signing seed file")
+	inboxPrefix := flag.String("inbox-prefix", "", "custom SYS request inbox prefix")
 	systemCreds := flag.String("system-credentials", "", "SYS operator credentials file")
 	materialDir := flag.String("material-dir", "", "private tenant provisioning directory")
 	allowedAccount := flag.String("revoke-account", "", "account public key authorized for this revoker")
@@ -59,14 +60,17 @@ func run() error {
 		return errors.New("invalid operator signing seed")
 	}
 	defer operator.Wipe()
-	connect := func(creds string) (*nats.Conn, error) {
+	connect := func(creds, replyPrefix string) (*nats.Conn, error) {
 		opts := []nats.Option{nats.UserCredentials(creds), nats.Timeout(5 * time.Second)}
 		if *ca != "" {
 			opts = append(opts, nats.RootCAs(*ca))
 		}
+		if replyPrefix != "" {
+			opts = append(opts, nats.CustomInboxPrefix(replyPrefix))
+		}
 		return nats.Connect(*broker, opts...)
 	}
-	sys, err := connect(*systemCreds)
+	sys, err := connect(*systemCreds, *inboxPrefix)
 	if err != nil {
 		return errors.New("unable to connect as the operator system user")
 	}
@@ -93,7 +97,8 @@ func run() error {
 	if errStorage != nil || errFile != nil || errRate != nil {
 		return errors.New("invalid tenant quotas")
 	}
-	provision := control.Provisioner{Operator: operator, System: sys, Directory: *materialDir, ConnectTenant: connect}
+	provision := control.Provisioner{Operator: operator, System: sys, Directory: *materialDir,
+		ConnectTenant: func(path string) (*nats.Conn, error) { return connect(path, "") }}
 	info, err := provision.Create(ctx, control.TenantRequest{Tenant: args[0], StorageBytes: storage, FileBytes: file, RatePerMinute: rate})
 	if err != nil {
 		return err

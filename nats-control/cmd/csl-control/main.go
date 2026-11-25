@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	control "github.com/vitral-ai/context-session-librarian/nats-control"
@@ -46,6 +47,9 @@ func run() (string, error) {
 		return *tenant, errors.New("nats, credentials and signer-file are required")
 	}
 	if err := validateBrokerURL(*broker); err != nil {
+		return *tenant, err
+	}
+	if err := verifyCredentialAccount(*creds, *account); err != nil {
 		return *tenant, err
 	}
 	seed, err := os.ReadFile(*signerFile)
@@ -130,6 +134,30 @@ func run() (string, error) {
 		case <-ticker.C:
 		}
 	}
+}
+
+func verifyCredentialAccount(path, account string) error {
+	material, err := os.ReadFile(path)
+	if err != nil {
+		return errors.New("unable to read the control credentials")
+	}
+	defer clear(material)
+	token, err := jwt.ParseDecoratedJWT(material)
+	if err != nil {
+		return errors.New("invalid control credentials")
+	}
+	claims, err := jwt.DecodeUserClaims(token)
+	if err != nil {
+		return errors.New("invalid control user claims")
+	}
+	boundAccount := claims.IssuerAccount
+	if boundAccount == "" {
+		boundAccount = claims.Issuer
+	}
+	if boundAccount != account {
+		return errors.New("control credentials belong to a different tenant account")
+	}
+	return nil
 }
 
 func validateBrokerURL(raw string) error {

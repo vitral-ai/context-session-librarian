@@ -177,9 +177,26 @@ func TestOperatorMode(t *testing.T) {
 	if immediate.ID != urgent.ID {
 		t.Fatal("urgent message did not bypass grouping")
 	}
+	pendingUrgent := func(expected int) {
+		t.Helper()
+		raw := call(sender, "ctl.status.sender", map[string]string{}, "")
+		var status struct {
+			Agents []agentStatus `json:"agents"`
+		}
+		if json.Unmarshal(raw, &status) != nil || len(status.Agents) != 3 ||
+			status.Agents[1].Name != "worker-a" || status.Agents[1].PendingUrgent != expected {
+			t.Fatalf("status did not report %d pending urgent item(s) for worker-a", expected)
+		}
+	}
+	pendingUrgent(1)
+	call(peer, "ctl.receipt.worker-a", sendResult{urgent.ID, "delivered"}, "")
+	pendingUrgent(1)
 	if err := rawUrgent.DoubleAck(ctx); err != nil {
 		t.Fatal(err)
 	}
+	call(peer, "ctl.receipt.worker-a", sendResult{urgent.ID, "acked"}, "")
+	pendingUrgent(0)
+
 	limited := urgent
 	limited.ID = randomID()
 	call(sender, "send.sender", limited, "")
@@ -302,7 +319,7 @@ func TestOperatorMode(t *testing.T) {
 	assertResponseCode(t, fixtureRequest(t, ctx, owner, "csl.vi.ctl.admin.owner",
 		map[string]any{"action": "export", "tenant": "foreign"}), "forbidden")
 
-	testTenantLifecycle(t, ctx, url, owner, js, provisioner)
+	testTenantLifecycle(t, ctx, url, owner, control, js, provisioner, broker.system)
 
 	if contents := admin(map[string]any{"action": "export", "tenant": "vi"}); !bytes.Contains(contents, []byte("file."+id)) {
 		t.Fatal("erasing the disposable tenant changed vi data")
@@ -453,6 +470,30 @@ func TestOperatorMode(t *testing.T) {
 			t.Fatalf("missing system notice: %q", body)
 		}
 	}
+	admin(map[string]any{"action": "quotas", "retention": 1, "urgent_cap": 1})
+	call(peer, "ctl.settings.worker-a", map[string]string{"delivery": "immediate"}, "")
+	unattached := []byte("unattached file")
+	unattachedID := fmt.Sprintf("%x", sha256.Sum256(unattached))
+	call(sender, "ctl.put.sender", fileRequest{ID: unattachedID, Name: "unattached.txt",
+		Size: int64(len(unattached)), Data: unattached}, "")
+	reference := first
+	reference.ID = randomID()
+	reference.Attachments = []attachment{{ID: id, Name: "fixture.txt", Size: int64(len(content))}}
+	call(sender, "send.sender", reference, "")
+	replacement := first
+	replacement.ID = randomID()
+	call(sender, "send.sender", replacement, "")
+	if err := service.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	call(peer, "ctl.fetch.worker-a", fileRequest{ID: id}, "")
+	call(peer, "ctl.receipt.worker-a", sendResult{reference.ID, "acked"}, "")
+	if err := service.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	call(peer, "ctl.fetch.worker-a", fileRequest{ID: id}, "not_found")
+	call(sender, "ctl.fetch.sender", fileRequest{ID: unattachedID}, "")
+
 }
 
 type fixtureBroker struct {

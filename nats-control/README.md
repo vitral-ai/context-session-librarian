@@ -10,7 +10,7 @@ With Go 1.27.4, install the pinned NATS server in a user-owned bin directory and
 point the test at that binary.
 
 ```sh
-go install github.com/nats-io/nats-server/v2@v2.12.3
+go install github.com/nats-io/nats-server/v2@v2.15.3
 cd nats-control
 CSL_TEST_NATS="$(go env GOPATH)/bin/nats-server" go test -race ./...
 ```
@@ -38,7 +38,9 @@ to `_INBOX.csl.<tenant>.owner.>`. Agent and owner clients use their own
 
 The account revocation helper is called with the tenant ID, tenant public
 account key, UTC RFC3339 time and public user keys as positional arguments.
-It must update the broker's operator-signed account JWT. The control service
+It updates the broker's operator-signed JWT through that account's exact
+CLAIMS.LOOKUP and CLAIMS.UPDATE subjects. The helper can use a scoped SYS
+reply prefix via `--inbox-prefix`. The control service
 denies further calls from a revoked agent even while the broker is updating.
 Only start control beside the active primary. During planned promotion, stop
 the old control instance before starting the same build and tenant
@@ -67,5 +69,6 @@ account and set `--allow-erase-tenant` to the exact tenant ID. The owner's
 `{"action":"erase-tenant","tenant":"zt-test"}` request returns a confirmation
 token valid for ten minutes. Submit the same request with `confirm` set to
 that token to revoke current agent credentials and purge its message, file
-and state stores. The operation is disabled for `vi`. Export and erasure are
+and state stores. Reprovisioning restores the original quotas and re-enables
+registration. The operation is disabled for `vi`. Export and erasure are
 audited without logging payloads or the token.

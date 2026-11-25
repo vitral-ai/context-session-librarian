@@ -280,3 +280,69 @@ func (s *Service) authorizeAttachments(ctx context.Context, envelope Envelope) e
 	}
 	return nil
 }
+
+// Keep a file if any retained or unacknowledged message references it. An
+// upload with no references still uses the Object Store's normal TTL.
+func (s *Service) pruneFiles(ctx context.Context, entries []messageEntry) error {
+	if !slices.ContainsFunc(entries, func(entry messageEntry) bool {
+		return len(entry.record.Envelope.Attachments) != 0
+	}) {
+		return nil
+	}
+	retention, err := s.retention(ctx)
+	if err != nil {
+		return err
+	}
+	counts := map[string]int{}
+	retained := map[string]bool{}
+	expired := map[string]time.Time{}
+	for i := len(entries) - 1; i >= 0; i-- {
+		record := entries[i].record
+		env := record.Envelope
+		if env.Kind != "message" && env.Kind != "reply" {
+			continue
+		}
+		pair, _ := pairKey(env.From, env.To)
+		counts[pair]++
+		if len(env.Attachments) == 0 {
+			continue
+		}
+		keep := counts[pair] <= retention
+		if !keep {
+			state, _, err := readState[messageState](ctx, s.state, "msg."+env.ID)
+			if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
+				return err
+			}
+			keep = state.State != "acked" && state.State != "dropped"
+		}
+		for _, attachment := range env.Attachments {
+			if keep {
+				retained[attachment.ID] = true
+			} else if _, ok := expired[attachment.ID]; !ok {
+				expired[attachment.ID] = record.AcceptedAt
+			}
+		}
+	}
+	for id, reference := range expired {
+		if retained[id] {
+			continue
+		}
+		object, err := s.files.GetInfo(ctx, id)
+		if errors.Is(err, jetstream.ErrObjectNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		file, err := readFileInfo(object)
+		if err != nil {
+			return err
+		}
+		if !file.Created.After(reference) {
+			if err := s.files.Delete(ctx, id); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}

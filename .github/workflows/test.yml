@@ -78,5 +78,5 @@ jobs:
         with:
           go-version: '1.27.4'
           cache-dependency-path: nats-control/go.sum
-      - run: go install github.com/nats-io/nats-server/v2@v2.12.3
+      - run: go install github.com/nats-io/nats-server/v2@v2.15.3
       - run: CSL_TEST_NATS="$(go env GOPATH)/bin/nats-server" go test -race ./...

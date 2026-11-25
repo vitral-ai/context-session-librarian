@@ -51,6 +51,14 @@ func (s *Service) eraseTenant(ctx context.Context, tenant, confirm string) (any,
 	if s.config.RevokeUsers == nil {
 		return nil, forbidden("account revocation is required before erasure")
 	}
+	info, err := s.stream.Info(ctx)
+	if err != nil {
+		return nil, err
+	}
+	subjects := info.Config.Subjects
+	if len(subjects) != 1 || subjects[0] != s.subject("agent.*.inbox") || info.Config.Mirror != nil {
+		return nil, forbidden("the broker store does not match the erase tenant")
+	}
 	const key = "admin.erasure"
 	previous, revision, err := readState[[32]byte](ctx, s.state, key)
 	if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {

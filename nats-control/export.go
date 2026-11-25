@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 
@@ -23,7 +24,7 @@ func (s *Service) export(ctx context.Context, tenant, after string) (any, error)
 		return nil, err
 	}
 	objects, err := s.files.List(ctx)
-	if err != nil {
+	if err != nil && !errors.Is(err, jetstream.ErrNoObjectsFound) {
 		return nil, err
 	}
 	byKey := map[string]*jetstream.ObjectInfo{}

@@ -379,6 +379,13 @@ func (s *Service) fleet(ctx context.Context, verb string, body []byte) (any, err
 			}
 		}
 	}
+	pending, err := s.pendingUrgent(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range agents {
+		agents[i].PendingUrgent = pending[agents[i].Name]
+	}
 	return struct {
 		Agents []agentStatus `json:"agents"`
 	}{agents}, nil

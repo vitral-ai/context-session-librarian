@@ -92,6 +92,9 @@ func (s *Service) admin(ctx context.Context, body []byte) (response any, err err
 			}{request.Action == "allow"},
 			writeState(ctx, s.state, key, request.Action == "allow", revision)
 	case "quotas":
+		if _, err := s.deliveryPolicy(ctx); err != nil {
+			return nil, err
+		}
 		if request.Retention < 1 || request.Retention > 10000 || request.UrgentCap < 1 {
 			return nil, invalid("positive retention and urgent cap are required")
 		}
@@ -124,6 +127,9 @@ func (s *Service) admin(ctx context.Context, body []byte) (response any, err err
 }
 
 func (s *Service) register(ctx context.Context, request adminRequest) (any, error) {
+	if _, err := s.deliveryPolicy(ctx); err != nil {
+		return nil, err
+	}
 	agent := Agent{Role: request.Role, CLI: request.CLI, Machine: request.Machine,
 		Delivery: defaultDelivery(request.Role), Status: "idle"}
 	if !isRegisteredName(request.Name) || !validAgent(agent) {

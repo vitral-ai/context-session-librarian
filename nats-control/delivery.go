@@ -43,6 +43,31 @@ func (s *Service) messages(ctx context.Context) ([]messageEntry, error) {
 	return entries, nil
 }
 
+func (s *Service) pendingUrgent(ctx context.Context) (map[string]int, error) {
+	entries, err := s.messages(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pending := make(map[string]int)
+	for _, entry := range entries {
+		envelope := entry.record.Envelope
+		if envelope.Urgency != "urgent" {
+			continue
+		}
+		state, _, err := readState[messageState](ctx, s.state, "msg."+envelope.ID)
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if state.State == "queued" || state.State == "delivered" {
+			pending[envelope.To]++
+		}
+	}
+	return pending, nil
+}
+
 var messagePrefix = regexp.MustCompile(`^[a-f0-9]{8,12}$`)
 
 type historyEntry struct {
@@ -195,6 +220,9 @@ type tenantPolicy struct {
 func (s *Service) deliveryPolicy(ctx context.Context) (tenantPolicy, error) {
 	policy, _, err := readState[tenantPolicy](ctx, s.state, "policy.delivery")
 	if errors.Is(err, jetstream.ErrKeyNotFound) {
+		if s.config.Tenant != "vi" {
+			return tenantPolicy{}, forbidden("tenant must be provisioned before use")
+		}
 		return tenantPolicy{Retention: defaultRetain, UrgentCap: 10, FileBytes: maxFile, RatePerMinute: 600}, nil
 	}
 	if policy.FileBytes == 0 {
@@ -411,7 +439,10 @@ func (s *Service) Tick(ctx context.Context) error {
 			return err
 		}
 	}
-	return s.sendReminders(ctx, now)
+	if err := s.sendReminders(ctx, now); err != nil {
+		return err
+	}
+	return s.pruneFiles(ctx, entries)
 }
 
 // The publish intent records the earliest possible stream sequence. A

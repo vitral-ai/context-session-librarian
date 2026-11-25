@@ -71,7 +71,7 @@ func (p Provisioner) Create(ctx context.Context, request TenantRequest) (TenantI
 		accountClaims.Limits.Streams = 3
 		accountClaims.Limits.Consumer = -1
 		accountClaims.Limits.Payload = 1024 * 1024
-		if err := pushAccount(ctx, p.System, p.Operator, accountClaims); err != nil {
+		if err := pushAccount(ctx, p.System, p.Operator, "$SYS.REQ.CLAIMS.UPDATE", accountClaims); err != nil {
 			return TenantInfo{}, err
 		}
 	} else if accountClaims.Name != request.Tenant {
@@ -131,15 +131,15 @@ func RevokeAccountUsers(ctx context.Context, system *nats.Conn, operator nkeys.K
 		}
 		claims.RevokeAt(key, at)
 	}
-	return pushAccount(ctx, system, operator, claims)
+	return pushAccount(ctx, system, operator, "$SYS.REQ.ACCOUNT."+account+".CLAIMS.UPDATE", claims)
 }
 
-func pushAccount(ctx context.Context, system *nats.Conn, signer nkeys.KeyPair, account *jwt.AccountClaims) error {
+func pushAccount(ctx context.Context, system *nats.Conn, signer nkeys.KeyPair, subject string, account *jwt.AccountClaims) error {
 	token, err := account.Encode(signer)
 	if err != nil {
 		return err
 	}
-	reply, err := system.RequestWithContext(ctx, "$SYS.REQ.CLAIMS.UPDATE", []byte(token))
+	reply, err := system.RequestWithContext(ctx, subject, []byte(token))
 	if err != nil {
 		return err
 	}
@@ -216,15 +216,32 @@ func writeTenantUser(path string, account nkeys.KeyPair, name string, pub, sub [
 }
 
 func createPrivateFile(path string, data []byte) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	dir := filepath.Dir(path)
+	file, err := os.CreateTemp(dir, ".csl-provision-*")
 	if err != nil {
 		return err
 	}
+	defer os.Remove(file.Name())
 	defer file.Close()
 	if _, err := file.Write(data); err != nil {
 		return err
 	}
-	return file.Sync()
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	// Publish complete files atomically without replacing another writer.
+	if err := os.Link(file.Name(), path); err != nil {
+		return err
+	}
+	directory, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
 
 func provisionStores(ctx context.Context, conn *nats.Conn, request TenantRequest) error {
