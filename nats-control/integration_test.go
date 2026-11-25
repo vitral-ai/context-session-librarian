@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -129,7 +130,7 @@ func TestOperatorMode(t *testing.T) {
 
 	t.Run("HubHistoryImport", func(t *testing.T) {
 		stamp := time.Now().UTC().Add(-time.Hour)
-		row := hubHistoryRow{ID: randomID(), From: "worker-a", To: "worker-b",
+		row := hubHistoryRow{ID: "f0000000-0000-4000-8000-000000000001", From: "worker-a", To: "worker-b",
 			FromMachine: "fixture", ToMachine: "fixture", CreatedAt: stamp, State: "delivered", Body: "old Hub body"}
 		req := map[string]any{"action": "import-hub-history", "history": &row}
 		call(peer, "ctl.admin.worker-a", req, "forbidden")
@@ -219,8 +220,8 @@ func TestOperatorMode(t *testing.T) {
 		duplicate.ID, duplicate.Kind, duplicate.ReplyTo = randomID(), "reply", &row.ID
 		call(peer, "send.worker-a", duplicate, "not_found")
 
-		reply := Envelope{V: 1, ID: randomID(), To: "worker-a", Kind: "reply",
-			Urgency: "normal", CreatedAt: time.Now().UTC(), Body: "reply to imported Hub message",
+		reply := Envelope{V: 1, ID: "f0000000-0000-4000-8000-000000000002", To: "worker-a", Kind: "reply",
+			Urgency: "normal", CreatedAt: stamp, Body: "reply to imported Hub message",
 			ReplyTo: &row.ID, ClientVersion: "1.3.0+abc"}
 		call(third, "send.worker-b", reply, "forbidden")
 		admin(map[string]any{"action": "allow", "from": "worker-b", "to": "worker-a"})
@@ -242,7 +243,7 @@ func TestOperatorMode(t *testing.T) {
 			t.Fatal(err)
 		}
 		refused := row
-		refused.ID, refused.State = randomID(), "refused"
+		refused.ID, refused.State = "10000000-0000-4000-8000-000000000001", "refused"
 		admin(map[string]any{"action": "import-hub-history", "history": &refused})
 		reply.ReplyTo = &refused.ID
 		call(third, "send.worker-b", reply, "not_found")
@@ -253,6 +254,41 @@ func TestOperatorMode(t *testing.T) {
 			t.Fatalf("reply to archive did not reach the live stream: %#v, %v", saved, err)
 		}
 		call(peer, "ctl.receipt.worker-a", sendResult{reply.ID, "acked"}, "")
+		tied := duplicate
+		tied.ID, tied.Kind, tied.ReplyTo = "10000000-0000-4000-8000-000000000002", "message", nil
+		earlier := tied
+		earlier.ID, earlier.CreatedAt = randomID(), stamp.Add(-time.Minute)
+		for _, message := range []Envelope{tied, earlier} {
+			call(peer, "send.worker-a", message, "")
+			record, _, err := readState[messageRecord](ctx, service.state, "message."+message.ID)
+			if err != nil || record.Sequence == 0 {
+				t.Fatalf("fixture did not reach live stream: %#v, %v", record, err)
+			}
+			call(third, "ctl.receipt.worker-b", sendResult{message.ID, "acked"}, "")
+			if err := service.stream.DeleteMsg(ctx, record.Sequence); err != nil {
+				t.Fatal(err)
+			}
+		}
+		checkPage := func(before string, last int, next string, want ...string) {
+			t.Helper()
+			var page struct {
+				Messages   []historyEntry
+				NextBefore string `json:"next_before"`
+			}
+			body := call(peer, "ctl.history.worker-a", map[string]any{"with": "worker-b", "last": last, "before": before}, "")
+			if err := json.Unmarshal(body, &page); err != nil {
+				t.Fatal(err)
+			}
+			var ids []string
+			for _, message := range page.Messages {
+				ids = append(ids, message.ID)
+			}
+			if !slices.Equal(ids, want) || page.NextBefore != next {
+				t.Fatalf("history before %q: got %v (next %q), want %v (next %q)", before, ids, page.NextBefore, want, next)
+			}
+		}
+		checkPage("", 2, reply.ID, reply.ID, tied.ID)
+		checkPage(reply.ID, 3, "", earlier.ID, row.ID, refused.ID)
 		call(peer, "ctl.complete.worker-a", map[string]string{"with": "worker-b"}, "")
 		call(third, "ctl.complete.worker-b", map[string]string{"with": "worker-a"}, "")
 		if err := service.stream.DeleteMsg(ctx, saved.Sequence); err != nil {
@@ -532,8 +568,9 @@ func TestOperatorMode(t *testing.T) {
 	call(peer, "ctl.settings.worker-a", map[string]string{"delivery": "grouped:15"}, "")
 	big := first
 	big.Body = strings.Repeat("\x01", maxBody)
-	for range 2 {
+	for i := range 2 {
 		big.ID = randomID()
+		big.CreatedAt = future.Add(time.Duration(i+1) * time.Second)
 		call(sender, "send.sender", big, "")
 	}
 	history := call(peer, "ctl.history.worker-a", map[string]any{"with": "sender", "last": 2}, "")

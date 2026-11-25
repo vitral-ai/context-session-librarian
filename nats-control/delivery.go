@@ -1,6 +1,7 @@
 package control
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -77,8 +78,24 @@ type historyEntry struct {
 
 type historyRecord struct {
 	historyEntry
-	acceptedAt      time.Time
-	archiveSequence uint64
+	archived bool
+	sequence uint64
+}
+
+func compareHistoryRecords(a, b historyRecord) int {
+	if order := a.CreatedAt.Compare(b.CreatedAt); order != 0 {
+		return order
+	}
+	if a.archived != b.archived {
+		if a.archived {
+			return -1
+		}
+		return 1
+	}
+	if order := cmp.Compare(a.sequence, b.sequence); order != 0 {
+		return order
+	}
+	return strings.Compare(a.ID, b.ID)
 }
 
 func (s *Service) history(ctx context.Context, caller string, body []byte) (any, error) {
@@ -131,6 +148,7 @@ func (s *Service) history(ctx context.Context, caller string, body []byte) (any,
 			return nil, err
 		}
 	}
+	slices.SortFunc(matches, compareHistoryRecords)
 	matches = matches[max(0, len(matches)-retention):]
 	if request.Before != "" {
 		index := slices.IndexFunc(matches, func(entry historyRecord) bool {
@@ -206,7 +224,7 @@ func (s *Service) historyRecords(ctx context.Context, caller, peer, id string) (
 		if historyMatches(record.Envelope, caller, peer, id) {
 			matches = append(matches, historyRecord{
 				historyEntry: historyEntry{Envelope: record.Envelope},
-				acceptedAt:   record.AcceptedAt,
+				sequence:     record.Sequence,
 			})
 		}
 	}
@@ -255,7 +273,7 @@ func (s *Service) historyRecords(ctx context.Context, caller, peer, id string) (
 			return err
 		}
 		if from != "" && to != "" && from == entry.FromMachine && to == entry.ToMachine {
-			matches = append(matches, historyRecord{entry.historyEntry, entry.CreatedAt, raw.Sequence})
+			matches = append(matches, historyRecord{historyEntry: entry.historyEntry, archived: true, sequence: raw.Sequence})
 		}
 		return nil
 	}
@@ -295,18 +313,6 @@ func (s *Service) historyRecords(ctx context.Context, caller, peer, id string) (
 			}
 		}
 	}
-	slices.SortFunc(matches, func(a, b historyRecord) int {
-		if order := a.acceptedAt.Compare(b.acceptedAt); order != 0 {
-			return order
-		}
-		if a.archiveSequence != b.archiveSequence {
-			if a.archiveSequence == 0 || (b.archiveSequence != 0 && a.archiveSequence > b.archiveSequence) {
-				return 1
-			}
-			return -1
-		}
-		return strings.Compare(a.ID, b.ID)
-	})
 	return matches, nil
 }
 
