@@ -28,7 +28,14 @@ MAX_DIGEST = 512 * 1024
 WAKE_RETRY_SECONDS = 30
 MESSAGE_KINDS = ('message', 'reply', 'ci', 'system', 'reminder')
 STREAM = 'CSL_MSG'
+OUTBOX_SECONDS = 15 * 60
 LOG = logging.getLogger(__name__)
+
+
+class ControlRejected(BridgeError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.uncertain = code == 'invalid' and message == 'control operation unavailable'
 
 
 def agent_name(value, *, registration=False):
@@ -213,15 +220,16 @@ class ClaudeInbox:
 
 
 class Client:
-    def __init__(self, connection, tenant, agent):
+    def __init__(self, connection, tenant, agent, broker=None):
         self.connection = connection
         self.root = f'csl.{tenant}'
         self.agent = agent
         self.inbox = f'_INBOX.csl.{tenant}.{agent}'
         self.consumer = f'agent-{agent}'
+        self.broker = broker
 
     @classmethod
-    async def connect(cls, settings, agent):
+    async def connect(cls, settings, agent, *, server=None):
         try:
             import nats
         except ImportError:
@@ -232,20 +240,44 @@ class Client:
         tls = ssl.create_default_context(cafile=str(Path(settings['cafile']).expanduser()))
         inbox = f"_INBOX.csl.{settings['tenant']}.{agent}"
         connection = await nats.connect(
-            servers=settings['servers'], tls=tls, user_credentials=str(endpoint['credentials']),
-            inbox_prefix=inbox, connect_timeout=3, max_reconnect_attempts=2,
+            servers=[server] if server else settings['servers'], tls=tls, user_credentials=str(endpoint['credentials']),
+            inbox_prefix=inbox, connect_timeout=3, max_reconnect_attempts=2, allow_reconnect=server is None,
         )
-        return cls(connection, settings['tenant'], agent)
+        server_id = getattr(connection, '_server_info', {}).get('server_id')
+        broker = f'{server} {server_id}' if server and server_id else None
+        return cls(connection, settings['tenant'], agent, broker)
 
-    async def request(self, operation, body, *, headers=None):
+    @classmethod
+    async def connect_active(cls, settings, agent):
+        try:
+            from nats.errors import Error
+        except ImportError:
+            raise BridgeError('Install nats-py[nkeys] in the CSL Python environment') from None
+
+        for server in settings['servers']:
+            client = None
+            try:
+                client = await cls.connect(settings, agent, server=server)
+                await client.request('ctl.hello', {'client_version': build_version()}, timeout=3)
+                return client
+            except (Error, OSError):
+                if client:
+                    await client.connection.close()
+            except BaseException:
+                if client:
+                    await client.connection.close()
+                raise
+        raise OSError('No configured NATS broker answered the control hello')
+
+    async def request(self, operation, body, *, headers=None, timeout=12):
         message = await self.connection.request(
-            f'{self.root}.{operation}.{self.agent}', encode(body).encode('utf-8'), headers=headers, timeout=12,
+            f'{self.root}.{operation}.{self.agent}', encode(body).encode('utf-8'), headers=headers, timeout=timeout,
         )
         result = json.loads(message.data)
         if not isinstance(result, dict):
             raise BridgeError('Invalid response from NATS control')
         if 'error' in result:
-            raise BridgeError(str(result.get('message') or result['error']))
+            raise ControlRejected(result['error'], str(result.get('message') or result['error']))
         return result
 
     async def pull(self):
@@ -259,8 +291,8 @@ class Client:
             raise BridgeError('Unexpected NATS delivery receipt')
         return result['state']
 
-    async def send(self, envelope):
-        return await self.request('send', envelope, headers={'Nats-Msg-Id': envelope['id']})
+    async def send(self, envelope, *, timeout=12):
+        return await self.request('send', envelope, headers={'Nats-Msg-Id': envelope['id']}, timeout=timeout)
 
 
 class Ledger:
@@ -277,6 +309,8 @@ class Ledger:
             db.execute('''CREATE TABLE IF NOT EXISTS nats_digest_members (
                 tenant TEXT NOT NULL, agent TEXT NOT NULL, digest_id TEXT NOT NULL, member_id TEXT NOT NULL,
                 PRIMARY KEY (tenant, agent, digest_id, member_id))''')
+            if 'ack_broker' not in {row['name'] for row in db.execute('PRAGMA table_info(nats_delivered)')}:
+                db.execute('ALTER TABLE nats_delivered ADD COLUMN ack_broker TEXT')
 
     def get(self, message_id, fingerprint):
         rows = self.store.rows('SELECT * FROM nats_delivered WHERE tenant=? AND agent=? AND id=?',
@@ -301,16 +335,16 @@ class Ledger:
             WHERE tenant=? AND agent=? AND digest_id=?''', (*self.key, message_id))
         return [*(row['member_id'] for row in rows), message_id]
 
-    def mark(self, message_id, state, subject=None):
+    def mark(self, message_id, state, broker, subject=None):
         with self.store.transaction() as db:
-            db.execute('''UPDATE nats_delivered SET ack_state=?,ack_subject=?
+            db.execute('''UPDATE nats_delivered SET ack_state=?,ack_subject=?,ack_broker=?
                 WHERE tenant=? AND agent=? AND id=? AND thread=?''',
-                       (state, subject, *self.key, message_id, self.thread))
+                       (state, subject, broker, *self.key, message_id, self.thread))
 
-    def pending(self):
+    def pending(self, broker):
         return self.store.rows('''SELECT id,ack_state,ack_subject FROM nats_delivered
             WHERE tenant=? AND agent=? AND thread=? AND ack_state IN ('ack_intent','broker_acked')
-            ORDER BY delivered_at LIMIT 32''', (*self.key, self.thread))
+            AND ack_broker=? ORDER BY delivered_at LIMIT 32''', (*self.key, self.thread, broker))
 
 
 def ci_completion_fingerprint(source, target, body):
@@ -457,16 +491,16 @@ def validate_ack_subject(subject, consumer):
 async def confirm_acked(client, ledger, message_id):
     for receipt_id in ledger.receipt_ids(message_id):
         await client.receipt(receipt_id, 'acked')
-    ledger.mark(message_id, 'acked')
+    ledger.mark(message_id, 'acked', client.broker)
 
 
 async def recover_acks(client, ledger, expected_errors):
-    for row in ledger.pending():
+    for row in ledger.pending(client.broker):
         try:
             if row['ack_state'] == 'ack_intent':
                 subject = validate_ack_subject(row['ack_subject'], client.consumer)
                 await client.connection.request(subject, b'+ACK', timeout=1)
-                ledger.mark(row['id'], 'broker_acked')
+                ledger.mark(row['id'], 'broker_acked', client.broker)
             await confirm_acked(client, ledger, row['id'])
         except expected_errors:
             LOG.debug('NATS acknowledgment still pending for %s', row['id'])
@@ -487,12 +521,12 @@ async def receive_one(client, ledger, message, deliver, *, retry_delay=60):
             await message.nak(delay=retry_delay)
             return False
         ledger.delivered(message_id, fingerprint, turn, members)
-    if row is None or row['ack_state'] != 'acked':
+    if row is None or row['ack_state'] != 'acked' or row['ack_broker'] != client.broker or client.broker is None:
         for receipt_id in ledger.receipt_ids(message_id):
             await client.receipt(receipt_id, 'delivered')
-        ledger.mark(message_id, 'ack_intent', subject)
+        ledger.mark(message_id, 'ack_intent', client.broker, subject)
         await message.ack_sync(timeout=3)
-        ledger.mark(message_id, 'broker_acked')
+        ledger.mark(message_id, 'broker_acked', client.broker)
         await confirm_acked(client, ledger, message_id)
     else:
         await message.ack_sync(timeout=3)
@@ -502,22 +536,34 @@ async def receive_one(client, ledger, message, deliver, *, retry_delay=60):
 async def receive_loop(connector, settings, agent, thread, config_path, claude=None):
     from functools import partial
     from nats.errors import Error, TimeoutError as NatsTimeout
+    from csl_nats_renewal import renew_if_due
+
     errors = (Error, OSError, ValueError, RuntimeRejected, RuntimeUnavailable, sqlite3.Error)
     wake_errors = errors + (KeyError, TypeError)
     ledger = Ledger(connector.store, settings['tenant'], agent, thread)
     delivery = claude.stage if claude else partial(deliver_codex, connector, thread)
     deliver = partial(delivery, config_path=config_path)
     batch_size, retry_delay = (16, 5) if claude else (1, 60)
+    credentials = settings['agents'][agent]['credentials']
+    next_renewal = 0
+    prepare_outbox(connector.store)
     while not connector.stop.is_set():
         client = None
         try:
-            client = await Client.connect(settings, agent)
-            await client.request('ctl.hello', {'client_version': build_version()})
+            client = await Client.connect_active(settings, agent)
             inbox = await client.pull()
             next_recovery = next_wake = 0
             while not connector.stop.is_set() and not client.connection.is_closed:
+                if time.monotonic() >= next_renewal:
+                    next_renewal = time.monotonic() + 300
+                    try:
+                        if await renew_if_due(client, credentials):
+                            break
+                    except errors as error:
+                        LOG.warning('NATS renewal for %s deferred (%s)', agent, type(error).__name__)
                 if time.monotonic() >= next_recovery:
                     await recover_acks(client, ledger, errors)
+                    await replay_outbox(client, ledger, errors)
                     next_recovery = time.monotonic() + 15
                 try:
                     messages = await inbox.fetch(batch_size, timeout=2)
@@ -577,22 +623,76 @@ def start(connector, config_path):
         connector.spawn(run, agent, endpoint)
 
 
-def remember_send(store, tenant, envelope):
-    """Preserve creation time and build identity when an uncertain send is retried."""
+def prepare_outbox(store):
     with store.transaction() as db:
         db.execute('''CREATE TABLE IF NOT EXISTS nats_outbox (
             tenant TEXT, agent TEXT, id TEXT, envelope TEXT NOT NULL,
             PRIMARY KEY (tenant, agent, id))''')
+        columns = {row['name'] for row in db.execute('PRAGMA table_info(nats_outbox)')}
+        for name, definition in (('thread', 'TEXT'), ('saved_at', 'INTEGER'), ('retry_after', 'INTEGER NOT NULL DEFAULT 0'),
+                                 ('broker', 'TEXT'), ('state', 'TEXT')):
+            if name not in columns:
+                db.execute(f'ALTER TABLE nats_outbox ADD COLUMN {name} {definition}')
+        db.execute('UPDATE nats_outbox SET saved_at=COALESCE(unixepoch(json_extract(envelope, \'$.created_at\')), ?) '
+                   'WHERE saved_at IS NULL', (int(time.time()),))
+
+
+def remember_send(store, tenant, envelope, thread=None):
+    """Preserve creation time and build identity when an uncertain send is retried."""
+    prepare_outbox(store)
+    now = int(time.time())
+    with store.transaction() as db:
+        db.execute('DELETE FROM nats_outbox WHERE saved_at <= ?', (now - OUTBOX_SECONDS,))
         key = (tenant, envelope['from'], envelope['id'])
-        row = db.execute('SELECT envelope FROM nats_outbox WHERE tenant=? AND agent=? AND id=?', key).fetchone()
+        row = db.execute('SELECT envelope,thread FROM nats_outbox WHERE tenant=? AND agent=? AND id=?', key).fetchone()
         if row:
-            old = json.loads(row[0])
+            old = json.loads(row['envelope'])
             envelope.update(created_at=old['created_at'], client_version=old['client_version'])
-            if old != envelope:
-                raise BridgeError('NATS send ID collision; reuse the original target and body')
+            if old != envelope or row['thread'] not in (None, thread):
+                raise BridgeError('NATS send ID collision; reuse the original thread, target and body')
+            if row['thread'] is None and thread is not None:
+                db.execute('UPDATE nats_outbox SET thread=? WHERE tenant=? AND agent=? AND id=?', (thread, *key))
             return old
-        db.execute('INSERT INTO nats_outbox VALUES (?,?,?,?)', (*key, encode(envelope)))
+        db.execute('INSERT INTO nats_outbox (tenant,agent,id,envelope,thread,saved_at,retry_after) VALUES (?,?,?,?,?,?,?)',
+                   (*key, encode(envelope), thread, now, now + 30))
         return envelope
+
+
+async def post_saved(client, store, key, thread, envelope, *, replay=False):
+    message_id = envelope['id']
+    args = (*key, message_id, thread)
+    try:
+        result = await client.send(envelope, timeout=3 if replay else 12)
+        state = result.get('state')
+        if result.get('id') != message_id or state not in ('queued', 'delivered', 'acked', 'refused', 'dropped'):
+            raise BridgeError(f'Unexpected NATS send receipt; retry with --id {message_id}')
+    except ControlRejected as error:
+        if not error.uncertain and not replay:
+            with store.transaction() as db:
+                db.execute('UPDATE nats_outbox SET state=\'refused\' WHERE tenant=? AND agent=? AND id=? AND thread=?', args)
+        raise
+    with store.transaction() as db:
+        db.execute('UPDATE nats_outbox SET broker=?,state=? WHERE tenant=? AND agent=? AND id=? AND thread=?',
+                   (client.broker, state, *args))
+    return result
+
+
+async def replay_outbox(client, ledger, expected_errors):
+    if not client.broker:
+        return
+    now = int(time.time())
+    with ledger.store.transaction() as db:
+        db.execute('DELETE FROM nats_outbox WHERE saved_at <= ?', (now - OUTBOX_SECONDS,))
+        rows = db.execute('''SELECT id,envelope FROM nats_outbox WHERE tenant=? AND agent=? AND thread=?
+            AND COALESCE(state,'') NOT IN ('refused','dropped') AND broker IS NOT ? AND retry_after<=?
+            ORDER BY saved_at,id LIMIT 4''', (*ledger.key, ledger.thread, client.broker, now)).fetchall()
+        db.executemany('UPDATE nats_outbox SET retry_after=? WHERE tenant=? AND agent=? AND id=?',
+                       ((now + 60, *ledger.key, row['id']) for row in rows))
+    for row in rows:
+        try:
+            await post_saved(client, ledger.store, ledger.key, ledger.thread, json.loads(row['envelope']), replay=True)
+        except expected_errors as error:
+            LOG.debug('NATS outbox %s still pending (%s)', row['id'], type(error).__name__)
 
 
 def send_command(args):
@@ -630,18 +730,14 @@ def send_command(args):
                 'client_version': build_version(), 'attachments': [], 'items': []}
     if reason:
         envelope['reason'] = reason
+    thread = settings['agents'][source]['session']
     store = Store(settings['connector_home'])
-    try:
-        envelope = remember_send(store, settings['tenant'], envelope)
-    finally:
-        store.close()
     print('message_id=' + message_id, file=sys.stderr)
 
     async def send():
-        client = await Client.connect(settings, source)
+        client = await Client.connect_active(settings, source)
         try:
-            await client.request('ctl.hello', {'client_version': build_version()})
-            return await client.send(envelope)
+            return await post_saved(client, store, (settings['tenant'], source), thread, envelope)
         finally:
             await client.connection.close()
 
@@ -653,6 +749,7 @@ def send_command(args):
     asyncio_log = logging.getLogger('asyncio')
     asyncio_log.addFilter(keep_tls_log)
     try:
+        envelope = remember_send(store, settings['tenant'], envelope, thread)
         result = asyncio.run(send())
     except BridgeError:
         raise
@@ -661,6 +758,5 @@ def send_command(args):
         raise BridgeError(f'NATS send unconfirmed ({type(error).__name__}); retry with --id {message_id}') from None
     finally:
         asyncio_log.removeFilter(keep_tls_log)
-    if result.get('id') != message_id or result.get('state') not in ('queued', 'delivered', 'acked', 'refused', 'dropped'):
-        raise BridgeError(f'Unexpected NATS send receipt; retry with --id {message_id}')
+        store.close()
     print(encode(result))

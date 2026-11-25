@@ -18,8 +18,8 @@ from csl_bridge_hooks import surface_nats
 from csl_bridge_store import BridgeError, Store, encode, neutralize_headers
 from csl_ci_notice import notice_request
 from codex_sessions import main
-from csl_nats import (MAX_DIGEST, ClaudeInbox, Client, Ledger, agent_name, body_text, deliver_codex, delivery_parts,
-                      receive_one, recover_acks, remember_send)
+from csl_nats import (MAX_DIGEST, ClaudeInbox, Client, ControlRejected, Ledger, agent_name, body_text, deliver_codex,
+                      delivery_parts, post_saved, receive_one, recover_acks, remember_send, replay_outbox)
 
 
 class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
@@ -36,7 +36,7 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.id = str(uuid.uuid4())
         self.ledger = Ledger(self.store, 'vi', 'alice', self.thread)
         self.connection = SimpleNamespace(request=AsyncMock())
-        self.client = Client(self.connection, 'vi', 'alice')
+        self.client = Client(self.connection, 'vi', 'alice', broker='primary')
         self.calls = []
 
         async def receipt(message_id, state):
@@ -164,6 +164,21 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rows()[0]['ack_state'], 'acked')
         self.deliver.assert_called_once()
 
+    async def test_failover_needs_a_fresh_broker_delivery_for_ack(self):
+        self.message.ack_sync.side_effect = TimeoutError
+        with self.assertRaises(TimeoutError):
+            await receive_one(self.client, self.ledger, self.message, self.deliver)
+        self.client.broker = 'promoted'
+        await recover_acks(self.client, self.ledger, (TimeoutError,))
+        self.connection.request.assert_not_awaited()
+        self.message.reply = '$JS.ACK.CSL_MSG.agent-alice.1.99.3.1234.0'
+        self.message.ack_sync.side_effect = None
+        self.calls.clear()
+        self.assertTrue(await receive_one(self.client, self.ledger, self.message, self.deliver))
+        self.assertEqual(self.calls, ['delivered', 'acked'])
+        self.assertEqual(self.rows()[0]['ack_broker'], 'promoted')
+        self.deliver.assert_called_once()
+
     def test_unsurfaced_claude_batch_retries_one_successful_wake_after_reopen(self):
         with self.store.transaction() as db:
             db.execute('INSERT INTO agents VALUES (?,?)', ('alice', self.thread))
@@ -258,7 +273,7 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.connection.request.side_effect = response
         with (self.assertLogs(asyncio_log, level='WARNING') as logs,
-              patch.object(Client, 'connect', new=AsyncMock(return_value=self.client)),
+              patch.object(Client, 'connect_active', new=AsyncMock(return_value=self.client)),
               patch('csl_agents.call', side_effect=AssertionError('unexpected Hub request')) as hub,
               patch('sys.stdout', new_callable=io.StringIO), patch('sys.stderr', new_callable=io.StringIO)):
             self.assertEqual(main(args), 0)
@@ -467,6 +482,58 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(remember_send(self.store, 'vi', retry), env)
         with self.assertRaises(BridgeError):
             remember_send(self.store, 'vi', {**env, 'to': 'charlie'})
+
+    async def test_outbox_replays_original_envelope_to_promoted_broker(self):
+        env = json.loads(self.message.data) | {'from': 'alice', 'to': 'bob', 'created_at': 'original',
+                                               'client_version': '0.5.0+original'}
+        self.client.send = AsyncMock(return_value={'id': self.id, 'state': 'queued'})
+        with patch('csl_nats.time.time', return_value=100) as clock:
+            remember_send(self.store, 'vi', env, self.thread)
+            await post_saved(self.client, self.store, self.ledger.key, self.thread, env)
+            self.client.send.reset_mock()
+            clock.return_value = 150
+            await replay_outbox(self.client, self.ledger, (BridgeError,))
+            self.client.send.assert_not_awaited()
+            self.client.broker = 'promoted'
+            await replay_outbox(self.client, self.ledger, (BridgeError,))
+            self.client.send.assert_awaited_once_with(env, timeout=3)
+            clock.return_value = 220
+            await replay_outbox(self.client, self.ledger, (BridgeError,))
+            self.assertEqual(self.client.send.await_count, 1)
+            clock.return_value = 1000
+            self.client.broker = 'rebuilt'
+            await replay_outbox(self.client, self.ledger, (BridgeError,))
+            self.assertEqual(self.client.send.await_count, 1)
+            self.assertEqual(self.store.rows('SELECT id FROM nats_outbox'), [])
+
+    async def test_outbox_skips_refusals_and_different_threads(self):
+        env = json.loads(self.message.data) | {'from': 'alice', 'to': 'bob'}
+        self.client.send = AsyncMock(side_effect=ControlRejected('forbidden', 'pair permission is required'))
+        with patch('csl_nats.time.time', return_value=100) as clock:
+            remember_send(self.store, 'vi', env, self.thread)
+            remember_send(self.store, 'vi', dict(env, id=str(uuid.uuid4())), str(uuid.uuid4()))
+            with self.assertRaises(ControlRejected):
+                await post_saved(self.client, self.store, self.ledger.key, self.thread, env)
+            self.client.send.reset_mock()
+            self.client.broker = 'promoted'
+            clock.return_value = 150
+            await replay_outbox(self.client, self.ledger, (BridgeError,))
+            self.client.send.assert_not_awaited()
+
+    async def test_active_selection_requires_a_control_hello(self):
+        try:
+            from nats.errors import NoRespondersError
+        except ImportError:
+            self.skipTest('nats-py is not installed')
+        inactive = SimpleNamespace(request=AsyncMock(side_effect=NoRespondersError),
+                                   connection=SimpleNamespace(close=AsyncMock()))
+        active = SimpleNamespace(request=AsyncMock(), connection=SimpleNamespace(close=AsyncMock()))
+        settings = {'servers': ['inactive', 'active']}
+        with patch.object(Client, 'connect', new=AsyncMock(side_effect=[inactive, active])) as connect:
+            self.assertIs(await Client.connect_active(settings, 'alice'), active)
+        self.assertEqual([entry.kwargs['server'] for entry in connect.await_args_list], settings['servers'])
+        inactive.connection.close.assert_awaited_once()
+        active.connection.close.assert_not_awaited()
 
     def test_byte_limit(self):
         self.assertEqual(body_text('é' * 24576), 'é' * 24576)
