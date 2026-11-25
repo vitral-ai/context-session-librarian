@@ -11,7 +11,10 @@ class NoticeWorkflowTests(unittest.TestCase):
         self.assertNotIn('pull_request.head.sha', workflow)
         self.assertIn('persist-credentials: false', workflow)
         self.assertIn('runs-on: ubuntu-latest', workflow)
-        self.assertEqual(re.findall(r'run: (.*)', workflow), ['python3 csl_ci_notice.py'])
+        self.assertEqual(re.findall(r'run: (.*)', workflow), [
+            'go build -mod=readonly -trimpath -o "$RUNNER_TEMP/csl-ci-notice" ./cmd/csl-ci-notice',
+            'python3 csl_ci_notice.py',
+        ])
         self.assertIn('environment: csl-ci-notices', workflow)
         self.assertIn('pull-requests: read', workflow)
         self.assertIn('CSL_GITHUB_TOKEN: ${{ github.token }}', workflow)
@@ -22,10 +25,24 @@ class NoticeWorkflowTests(unittest.TestCase):
         self.assertNotIn('inputs:', workflow)
         self.assertNotIn('download-artifact', workflow)
 
+    def test_nats_build_has_no_credentials_and_uses_pinned_tools(self):
+        workflow = Path('.github/workflows/pr-completion-notice.yml').read_text()
+        self.assertIn('CSL_NATS_CI_CREDS:\n        required: false', workflow)
+        self.assertRegex(workflow, r'actions/setup-go@[0-9a-f]{40}')
+        self.assertIn('CSL_NATS_CI_PUBLISHER: ${{ runner.temp }}/csl-ci-notice', workflow)
+        self.assertEqual(workflow.count("if: ${{ vars.CSL_NATS_CI_URL != '' }}"), 2)
+        build, publish = workflow.split('      - name: Post completion once per configured transport')
+        self.assertIn('working-directory: nats-control', build)
+        self.assertNotIn('secrets.CSL_NATS_CI_CREDS', build)
+        self.assertNotIn('github.event', publish.split('        run:')[1])
+        self.assertIn("!cancelled() && steps.trusted-checkout.outcome == 'success'", publish)
+        self.assertIn('CSL_NATS_CI_CREDS: ${{ secrets.CSL_NATS_CI_CREDS }}', publish)
+
     def test_unprivileged_producers_have_no_notice_credentials(self):
         for filename in ('test.yml', 'workload-image.yml'):
             workflow = Path('.github/workflows', filename).read_text()
             self.assertNotIn('CSL_HUB_NOTICE_TOKEN', workflow)
+            self.assertNotIn('CSL_NATS_CI_CREDS', workflow)
             self.assertNotIn('csl-completion-notice:', workflow)
 
     def test_default_branch_completed_handler_pins_reviewed_workflow(self):

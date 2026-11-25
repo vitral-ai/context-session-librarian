@@ -4,6 +4,8 @@ on:
     secrets:
       CSL_HUB_NOTICE_TOKEN:
         required: true
+      CSL_NATS_CI_CREDS:
+        required: false
 permissions:
   contents: read
   pull-requests: read
@@ -12,19 +14,34 @@ jobs:
     if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.status == 'completed' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     environment: csl-ci-notices
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 4
     steps:
       - name: Load trusted notice client
+        id: trusted-checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: vitral-ai/context-session-librarian
-          ref: 8598979b30c81eb0a87ab1990cd8159fb914e1d8
+          ref: 0d8a4d7da04f70d1396168b7af9e162d5d78b41d
           persist-credentials: false
           sparse-checkout: |
             csl_ci_notice.py
             csl_bridge_store.py
+            nats-control
           sparse-checkout-cone-mode: false
-      - name: Post completion once
+      - name: Set up the pinned Go toolchain
+        if: ${{ vars.CSL_NATS_CI_URL != '' }}
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Build trusted NATS publisher
+        if: ${{ vars.CSL_NATS_CI_URL != '' }}
+        working-directory: nats-control
+        env:
+          CGO_ENABLED: '0'
+        run: go build -mod=readonly -trimpath -o "$RUNNER_TEMP/csl-ci-notice" ./cmd/csl-ci-notice
+      - name: Post completion once per configured transport
+        if: ${{ !cancelled() && steps.trusted-checkout.outcome == 'success' }}
         env:
           CSL_GITHUB_TOKEN: ${{ github.token }}
           CSL_EVENT: ${{ toJSON(github.event) }}
@@ -33,4 +50,9 @@ jobs:
           CSL_HUB_URL: ${{ vars.CSL_HUB_URL }}
           CSL_HUB_CA_PEM: ${{ vars.CSL_HUB_CA_PEM }}
           CSL_HUB_NOTICE_TOKEN: ${{ secrets.CSL_HUB_NOTICE_TOKEN }}
+          CSL_NATS_CI_CREDS: ${{ secrets.CSL_NATS_CI_CREDS }}
+          CSL_NATS_CI_URL: ${{ vars.CSL_NATS_CI_URL }}
+          CSL_NATS_CI_CA_PEM: ${{ vars.CSL_NATS_CI_CA_PEM }}
+          CSL_NATS_CI_ROUTES: ${{ vars.CSL_NATS_CI_ROUTES }}
+          CSL_NATS_CI_PUBLISHER: ${{ runner.temp }}/csl-ci-notice
         run: python3 csl_ci_notice.py
