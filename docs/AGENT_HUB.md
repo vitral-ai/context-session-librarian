@@ -33,6 +33,8 @@ csl agents register --name client --session UUID --cli codex --machine threadrip
 csl agents register --name coordinator --session UUID --cli claude --machine laptop
 csl agents allow coordinator client --both
 csl agents list
+csl agents list --owner coordinator
+csl agents status --owner coordinator   # current Hub (unfiltered status is the NATS command)
 csl agents show client
 csl agents permissions
 printf '%s\n' 'Your message' | csl send --from coordinator --to client --text-file -
@@ -241,3 +243,18 @@ Set `--nats-config PATH` on the existing `csl-bridge-mcp` invocation to enable
 NATS history, status, versions, close, and complete for its bound agent.
 To enable `put_file` and `fetch_file`, also set `--transfer-dir PATH` to a private,
 owned staging directory. File tools accept names relative to that directory.
+
+### Coordinator ownership on the current Hub
+
+The owner machine can set or change a registered agent's coordinator with
+`csl agents register --name AGENT --session UUID --cli codex --machine MACHINE --owner COORDINATOR`.
+Register coordinators with themselves as owner. Services `ci-notices` and
+`hub-notifier` have no owner. `agents show AGENT` includes ownership; show,
+list and status accept `--owner COORDINATOR`. Ownership is routing metadata,
+not a grant: updates preserve session bindings, queued packets and pair approvals.
+An omitted owner preserves the existing value (the API accepts null to clear it).
+
+Refusals notify the sender and its coordinator once each, or only once when
+both are the same agent. Service refusals notify only a known target's owner;
+unknown CI-notice targets remain quiet drops. No unrelated coordinator receives
+the refusal. Removing a coordinator clears its ownership references.
