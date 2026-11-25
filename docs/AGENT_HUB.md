@@ -214,3 +214,30 @@ member or acknowledging the digest before its last part is emitted.
 During dual delivery, matching CI completion notices reuse the confirmed
 native turn for the same message ID, recipient thread and body, including
 notices delivered inside a digest.
+
+### NATS history and files
+
+Set `CSL_NATS_CONFIG` to the private adapter configuration for these commands,
+or pass `--nats-config PATH`. Use `--from NAME` or set `CSL_AGENT`.
+
+```sh
+csl history --with coordinator --last 10 --from alice
+csl history --id MESSAGE_ID --from alice
+csl agents status --from coordinator
+csl agents versions --from alice
+csl agents close --with coordinator --from alice
+csl agents complete --with coordinator --from alice
+csl put report.txt --to coordinator --from alice
+csl fetch FILE_SHA256 --out received.txt --from coordinator
+csl send --nats-config PATH --from alice --to coordinator --attach FILE_SHA256 --text "Report attached"
+```
+
+`put` returns the SHA-256 file ID. Repeat `--to` for each permitted reader and
+`--attach` for each file in a message. `fetch` verifies the digest before
+publishing the file and refuses to overwrite an existing path. Fleet status
+requires the broker's orchestrator role.
+
+Set `--nats-config PATH` on the existing `csl-bridge-mcp` invocation to enable
+NATS history, status, versions, close, and complete for its bound agent.
+To enable `put_file` and `fetch_file`, also set `--transfer-dir PATH` to a private,
+owned staging directory. File tools accept names relative to that directory.
