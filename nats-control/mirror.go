@@ -38,6 +38,7 @@ func mirrorLag(body []byte, server, account string) (map[string]uint64, error) {
 			Accounts []struct {
 				ID      string `json:"id"`
 				Streams []struct {
+					Name   string `json:"name"`
 					Mirror *struct {
 						Name   string           `json:"name"`
 						Lag    *uint64          `json:"lag"`
@@ -59,6 +60,9 @@ func mirrorLag(body []byte, server, account string) (map[string]uint64, error) {
 		for _, stream := range item.Streams {
 			mirror := stream.Mirror
 			if mirror == nil || !slices.Contains(monitoredStreams, mirror.Name) {
+				continue
+			}
+			if (mirror.Name == hubArchiveName || stream.Name == hubArchiveName) && stream.Name != mirror.Name {
 				continue
 			}
 			if _, exists := lag[mirror.Name]; exists || mirror.Error != nil ||

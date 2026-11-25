@@ -18,9 +18,18 @@ func TestDecodeMirrorLag(t *testing.T) {
 		t.Fatalf("tenant mirror response was not decoded: %v", err)
 	}
 	withArchive := strings.Replace(body, `{"mirror":{"name":"OBJ_CSL_FILES","lag":1,"active":12}}`,
-		`{"mirror":{"name":"OBJ_CSL_FILES","lag":1,"active":12}},{"mirror":{"name":"CSL_ARCHIVE","lag":3,"active":12}}`, 1)
+		`{"mirror":{"name":"OBJ_CSL_FILES","lag":1,"active":12}},{"name":"CSL_ARCHIVE","mirror":{"name":"CSL_ARCHIVE","lag":3,"active":12}}`, 1)
 	if lag, err := mirrorLag([]byte(withArchive), "standby", "tenant"); err != nil || lag[hubArchiveName] != 3 {
 		t.Fatalf("archive mirror response was not decoded: %v", err)
+	}
+	wrongDestination := strings.Replace(withArchive, `"name":"CSL_ARCHIVE","mirror":`, `"name":"OLD_ARCHIVE_COPY","mirror":`, 1)
+	wrongDestination = strings.Replace(wrongDestination, `"lag":3`, `"lag":0`, 1)
+	wrongSource := strings.Replace(withArchive, `"mirror":{"name":"CSL_ARCHIVE"`, `"mirror":{"name":"CSL_MSG"`, 1)
+	for _, response := range []string{wrongDestination, wrongSource} {
+		lag, err := mirrorLag([]byte(response), "standby", "tenant")
+		if _, present := lag[hubArchiveName]; err != nil || present || lag["CSL_MSG"] != 5 {
+			t.Fatalf("wrong archive destination or source affected mirror health: %v, %v", lag, err)
+		}
 	}
 	for _, invalid := range []string{
 		strings.Replace(body, "standby", "unexpected", 1),
