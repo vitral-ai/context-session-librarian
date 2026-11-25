@@ -155,6 +155,11 @@ def loop(connector):
 
 
 def _execute(args):
+    if getattr(args, 'nats_config', None):
+        from csl_nats import send_command
+        return send_command(args)
+    if getattr(args, 'urgent', False) or getattr(args, 'reason', None):
+        raise BridgeError('Urgency options require --nats-config')
     settings = config(args.hub_config)
     request = {'action': args.hub_action}
     if args.hub_action == 'register':
@@ -234,6 +239,10 @@ def add_commands(subparsers, _):
         body.add_argument('--text-file', type=Path, default=Path('-'))
         body.add_argument('--text')
         send.add_argument('--id')
+        if action == 'send':
+            send.add_argument('--nats-config', type=Path)
+            send.add_argument('--urgent', action='store_true')
+            send.add_argument('--reason', choices=('blocked', 'needs_approval', 'security', 'operation_failed'))
         if action == 'reply':
             send.add_argument('message_id', nargs='?', help='Full message UUID or a unique prefix (8+ characters).')
             send.add_argument('--in-reply-to')
