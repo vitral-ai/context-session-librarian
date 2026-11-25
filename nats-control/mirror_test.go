@@ -2,7 +2,6 @@ package control
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +17,11 @@ func TestDecodeMirrorLag(t *testing.T) {
 	if err != nil || got["CSL_MSG"] != 5 || got["KV_CSL_STATE"] != 0 || got["OBJ_CSL_FILES"] != 1 {
 		t.Fatalf("tenant mirror response was not decoded: %v", err)
 	}
+	withArchive := strings.Replace(body, `{"mirror":{"name":"OBJ_CSL_FILES","lag":1,"active":12}}`,
+		`{"mirror":{"name":"OBJ_CSL_FILES","lag":1,"active":12}},{"mirror":{"name":"CSL_ARCHIVE","lag":3,"active":12}}`, 1)
+	if lag, err := mirrorLag([]byte(withArchive), "standby", "tenant"); err != nil || lag[hubArchiveName] != 3 {
+		t.Fatalf("archive mirror response was not decoded: %v", err)
+	}
 	for _, invalid := range []string{
 		strings.Replace(body, "standby", "unexpected", 1),
 		strings.Replace(body, "OBJ_CSL_FILES", "irrelevant", 1),
@@ -28,6 +32,8 @@ func TestDecodeMirrorLag(t *testing.T) {
 		strings.Replace(body, `"active":0`, `"active":null`, 1),
 		strings.Replace(body, `"active":0`, `"active":-1`, 1),
 		strings.Replace(body, `"active":0`, `"active":61000000000`, 1),
+		strings.Replace(withArchive, `"OBJ_CSL_FILES"`, `"irrelevant"`, 1),
+		strings.Replace(withArchive, `"lag":3`, `"lag":null`, 1),
 	} {
 		if _, err := mirrorLag([]byte(invalid), "standby", "tenant"); err == nil {
 			t.Fatal("invalid or unavailable mirror response was treated as healthy")
@@ -39,12 +45,16 @@ func verifyMirrorNotices(t *testing.T, ctx context.Context, service *Service) {
 	t.Helper()
 	now := time.Now().UTC()
 	var lag uint64
-	var failure error
+	hasArchive := true
 	service.mu.Lock()
 	originalClock := service.clock
 	service.clock = func() time.Time { return now }
 	service.config.MirrorProbe = func(ctx context.Context) (map[string]uint64, error) {
-		return map[string]uint64{"CSL_MSG": lag, "KV_CSL_STATE": 0, "OBJ_CSL_FILES": 0}, failure
+		result := map[string]uint64{"CSL_MSG": 0, "KV_CSL_STATE": 0, "OBJ_CSL_FILES": 0}
+		if hasArchive {
+			result[hubArchiveName] = lag
+		}
+		return result, nil
 	}
 	service.mu.Unlock()
 	tick := func(delay time.Duration) {
@@ -72,7 +82,7 @@ func verifyMirrorNotices(t *testing.T, ctx context.Context, service *Service) {
 		for _, entry := range entries {
 			env := entry.record.Envelope
 			switch env.Body {
-			case "Mirror replication has lagged more than 60 seconds: CSL_MSG.":
+			case "Mirror replication has lagged more than 60 seconds: CSL_ARCHIVE.":
 				lagNotices++
 			case "Mirror monitoring unavailable.":
 				errors++
@@ -98,14 +108,14 @@ func verifyMirrorNotices(t *testing.T, ctx context.Context, service *Service) {
 	assertNotices(1, 0, 0)
 	tick(14 * time.Minute)
 	assertNotices(2, 0, 0)
-	failure = errors.New("unavailable fixture")
+	hasArchive = false
 	tick(time.Minute)
 	tick(5 * time.Minute)
 	assertNotices(2, 0, 0)
 	tick(time.Second)
 	tick(15 * time.Minute)
 	assertNotices(2, 1, 0)
-	failure, lag = nil, 0
+	hasArchive, lag = true, 0
 	tick(time.Minute)
 	tick(time.Minute)
 	assertNotices(2, 1, 1)

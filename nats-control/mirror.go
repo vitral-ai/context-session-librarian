@@ -16,6 +16,7 @@ const mirrorJSZ = "$SYS.REQ.SERVER.PING.JSZ"
 const mirrorContactLimit = time.Minute
 
 var mirroredStreams = []string{"CSL_MSG", "KV_CSL_STATE", "OBJ_CSL_FILES"}
+var monitoredStreams = append(slices.Clone(mirroredStreams), hubArchiveName)
 
 func MirrorProbe(conn *nats.Conn, server, account string) func(context.Context) (map[string]uint64, error) {
 	body, _ := json.Marshal(map[string]any{"accounts": true, "streams": true, "account": account})
@@ -50,14 +51,14 @@ func mirrorLag(body []byte, server, account string) (map[string]uint64, error) {
 	if err := json.Unmarshal(body, &response); err != nil || response.Server.Name != server {
 		return nil, errors.New("unexpected mirror JSZ response")
 	}
-	lag := make(map[string]uint64, len(mirroredStreams))
+	lag := make(map[string]uint64, len(monitoredStreams))
 	for _, item := range response.Data.Accounts {
 		if item.ID != account {
 			continue
 		}
 		for _, stream := range item.Streams {
 			mirror := stream.Mirror
-			if mirror == nil || !slices.Contains(mirroredStreams, mirror.Name) {
+			if mirror == nil || !slices.Contains(monitoredStreams, mirror.Name) {
 				continue
 			}
 			if _, exists := lag[mirror.Name]; exists || mirror.Error != nil ||
@@ -68,8 +69,10 @@ func mirrorLag(body []byte, server, account string) (map[string]uint64, error) {
 			lag[mirror.Name] = *mirror.Lag
 		}
 	}
-	if len(lag) != len(mirroredStreams) {
-		return nil, errors.New("mirror JSZ did not report the tenant's expected mirrors")
+	for _, name := range mirroredStreams {
+		if _, ok := lag[name]; !ok {
+			return nil, errors.New("mirror JSZ did not report the tenant's expected mirrors")
+		}
 	}
 	return lag, nil
 }
@@ -87,6 +90,15 @@ func (s *Service) monitorMirrors(ctx context.Context) error {
 	}
 	probe, cancel := context.WithTimeout(ctx, 3*time.Second)
 	lag, probeErr := s.config.MirrorProbe(probe)
+	if _, hasArchiveMirror := lag[hubArchiveName]; probeErr == nil && !hasArchiveMirror {
+		_, err := s.archiveStream(probe)
+		switch {
+		case err == nil:
+			probeErr = errors.New("mirror JSZ did not report the archive mirror")
+		case !errors.Is(err, jetstream.ErrStreamNotFound):
+			probeErr = err
+		}
+	}
 	cancel()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -116,7 +128,7 @@ func (s *Service) monitorMirrors(ctx context.Context) error {
 	state.UnavailableNotified = false
 	lagSince := make(map[string]time.Time)
 	var overdue []string
-	for _, name := range mirroredStreams {
+	for _, name := range monitoredStreams {
 		if lag[name] == 0 {
 			continue
 		}
