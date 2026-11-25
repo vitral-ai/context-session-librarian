@@ -158,6 +158,30 @@ class CacheTests(unittest.TestCase):
         self.assertEqual((result['synced'], result['pending']), (2, 0))
         self.assertIsNone(self.state.session('codex', bad_id)['last_error'])
 
+    def test_malformed_tool_id_isolated_and_repaired_old_session_stays_unselected(self):
+        self.state.select('codex', self.sid, True)
+        bad_id = str(uuid.uuid4())
+        bad = self.path.with_name('rollout-' + bad_id + '.jsonl')
+        rows = json.loads(json.dumps(self.rows))
+        rows[0]['payload']['id'] = bad_id
+        for row in rows:
+            row['timestamp'] = '2001-01-01T00:00:00Z'
+        rows[2]['payload']['call_id'] = ['invalid', 'id']
+        bad.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        result = self.collector.run(days=30, providers=['codex'])
+        self.assertEqual((result['synced'], result['pending']), (1, 1))
+        self.assertEqual([r['error'] for r in result['sessions'] if r['status'] == 'error'],
+                         ['invalid_tool_identity'])
+        self.assertNotIn(('codex', bad_id), self.state.tracked())
+        rows[2]['payload']['call_id'] = 'valid-id'
+        bad.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        result = self.collector.run(days=30, providers=['codex'])
+        self.assertEqual((result['synced'], result['pending']), (1, 0))
+        self.assertNotIn(('codex', bad_id), self.state.tracked())
+        self.state.select('codex', bad_id, True)
+        result = self.collector.run(days=30, providers=['codex'])
+        self.assertEqual((result['synced'], result['pending']), (2, 0))
+
     def test_duplicate_claude_skips_both_copies_and_uploads_healthy_session(self):
         home = self.root / 'claude'
         duplicate_id, healthy_id = str(uuid.uuid4()), str(uuid.uuid4())

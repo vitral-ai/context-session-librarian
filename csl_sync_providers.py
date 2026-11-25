@@ -347,9 +347,13 @@ def _view(provider, path, text_limit, max_bytes=None, records=None, tools=None, 
                 kind='text'; text=_text(block.get('text'))
             elif kind=='tool_use':
                 b=block; kind='tool_call';tool=b.get('name');call=b.get('id');text=_text(b.get('input'))
+                if any(value is not None and not isinstance(value, str) for value in (call, tool)):
+                    raise ProviderError('invalid_tool_identity')
                 if call and tool:tools[call]=tool
             elif kind=='tool_result':
                 b=block;kind='tool_result';tool=b.get('name');call=b.get('tool_use_id',b.get('id'));text=_text(b.get('content'))
+                if any(value is not None and not isinstance(value, str) for value in (call, tool)):
+                    raise ProviderError('invalid_tool_identity')
                 tool=tool or tools.get(call)
             elif kind in ('image','input_image'):
                 data=block.get('source',{});mime=data.get('media_type','image') if isinstance(data,dict) else 'image'
