@@ -348,6 +348,28 @@ class SenderRoutingTests(unittest.TestCase):
                 self.assertEqual(self.hub.call_args.args[1]['in_reply_to'], self.parent)
         self.nats_send.assert_not_called()
 
+    def test_exact_hub_parent_does_not_require_nats_for_an_enrolled_peer(self):
+        self.hub.side_effect = [{'messages': [{'id': self.parent, 'source': 'worker', 'target': 'client'}]},
+                                {'state': 'queued'}]
+        self.nats_history.side_effect = OSError('offline')
+        self.assertIn('transport=hub', self.execute('reply', self.parent, '--to', 'worker'))
+        self.nats_history.assert_not_called()
+        self.nats_send.assert_not_called()
+
+    def test_nats_only_sender_can_resolve_parent_without_hub_config(self):
+        self.config.side_effect = FileNotFoundError
+        self.nats_history.return_value = {'messages': [{'id': self.parent, 'from': 'worker', 'to': 'client'}]}
+        self.assertIn('transport=nats', self.execute('reply', self.parent, '--to', 'worker'))
+        self.hub.assert_not_called()
+        self.nats_send.assert_called_once()
+
+    def test_legacy_hub_ledger_reply_survives_history_eviction(self):
+        self.hub.side_effect = [{'messages': []}, {'state': 'queued'}]
+        self.assertIn('transport=hub', self.execute('reply', '--to', 'legacy', '--in-reply-to', self.parent))
+        self.assertEqual(self.hub.call_args.args[1]['in_reply_to'], self.parent)
+        self.nats_history.assert_not_called()
+        self.nats_send.assert_not_called()
+
     def test_nats_parent_keeps_nats_route_for_peer_removed_from_enrollment(self):
         self.routes['nats_recipients'] = []
         self.nats_history.return_value = {'messages': [{'id': self.parent, 'from': 'worker', 'to': 'client'}]}

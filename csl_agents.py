@@ -206,15 +206,23 @@ def incoming_parent(matches, source, target):
     return sender, identifier(reply)
 
 
-def reply_route(hub, nats_config, source, selector, target, enrolled):
-    hub_rows = call(hub, {'action': 'history', 'source': source, 'id': selector})['messages']
+def reply_route(nats_config, source, selector, target, hub_ledger):
+    try:
+        hub = config()
+    except FileNotFoundError:
+        hub = None
+    hub_rows = call(hub, {'action': 'history', 'source': source, 'id': selector})['messages'] if hub is not None else []
     matches = {(row['id'], row['source'], row['target']) for row in hub_rows}
-    # Exact Hub parents remain usable for Hub-only peers even if NATS is unavailable.
-    if len(selector) != 36 or len(hub_rows) != 1 or hub_rows[0]['source'] in enrolled:
-        rows = nats_reply_history(nats_config, source, selector)
-        matches.update((row['id'], row['from'], row['to']) for row in rows)
+    if hub_rows and len(selector) == 36:
+        # The retained Hub parent is authoritative, including for archived copies.
+        sender, parent = incoming_parent(matches, source, target)
+        return sender, parent, 'hub'
+    if hub is not None and not hub_rows and hub_ledger:
+        # Explicit Hub-only replies still work after retained history is evicted.
+        return target, selector, 'hub'
+    rows = nats_reply_history(nats_config, source, selector)
+    matches.update((row['id'], row['from'], row['to']) for row in rows)
     sender, parent = incoming_parent(matches, source, target)
-    # An exact Hub match may also appear in NATS as imported history.
     return sender, parent, 'hub' if hub_rows else 'nats'
 
 
@@ -244,8 +252,9 @@ def select_sender_route(args):
     enrolled = routes['nats_recipients']
     transport = 'nats' if args.to in enrolled else 'hub'
     if args.is_reply:
-        args.to, selector, transport = reply_route(config(), nats_config, source, reply_parent(args),
-                                                    args.to, enrolled)
+        hub_ledger = bool(args.in_reply_to and args.to and args.to not in enrolled)
+        args.to, selector, transport = reply_route(nats_config, source, reply_parent(args),
+                                                  args.to, hub_ledger)
         args.message_id, args.in_reply_to = selector, None
     if transport == 'nats':
         args.nats_config = nats_config
