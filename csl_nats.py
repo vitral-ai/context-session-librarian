@@ -36,6 +36,7 @@ LOG = logging.getLogger(__name__)
 class ControlRejected(BridgeError):
     def __init__(self, code, message):
         super().__init__(message)
+        self.code = code
         self.uncertain = code == 'invalid' and message == 'control operation unavailable'
         self.reply_parent_missing = code == 'not_found' and message == 'reply target does not belong to this pair'
 

@@ -3,8 +3,10 @@ import uuid
 import argparse
 import contextlib
 import io
+from pathlib import Path
 from unittest.mock import patch
 import csl_agents
+from csl_nats import ControlRejected
 import test_agent_hub
 import unittest
 from csl_agent_hub import Hub
@@ -189,3 +191,84 @@ class ReplyCLITests(HistoryCLITests):
             csl_agents._execute(args)
         self.assertEqual(call.call_args.args[1]['in_reply_to'], '12345678')
         self.assertEqual(call.call_args.args[1]['text'], 'file reply')
+
+
+class SenderRoutingTests(unittest.TestCase):
+    parse = HistoryCLITests.parse
+    parent = '12345678-1111-4111-8111-111111111111'
+
+    def setUp(self):
+        self.routes = {'senders': {'client': '/private/vi.json'}, 'nats_recipients': ['worker']}
+        for target, key in [('csl_bridge_claude_notify.owned_json', 'read_routes'),
+                            ('csl_agents.config', 'config'), ('csl_agents.call', 'hub'),
+                            ('csl_nats_tools.call', 'nats_history'), ('csl_nats.send_command', 'nats_send')]:
+            mock = patch(target)
+            setattr(self, key, mock.start())
+            self.addCleanup(mock.stop)
+        self.read_routes.side_effect = lambda path: self.routes
+        self.config.return_value = {}
+        self.hub.return_value = {'state': 'queued', 'messages': []}
+        self.nats_history.return_value = {'messages': []}
+
+    def execute(self, *args, source='client'):
+        parsed = self.parse(*args, '--from', source, '--text', 'test body')
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as stderr:
+            csl_agents._execute(parsed)
+        return stderr.getvalue()
+
+    def test_default_send_uses_nats_for_enrolled_target(self):
+        self.assertIn('transport=nats', self.execute('send', '--to', 'worker'))
+        self.assertEqual(self.nats_send.call_args.args[0].nats_config, Path('/private/vi.json'))
+        self.hub.assert_not_called()
+
+    def test_hub_only_and_unopted_source_still_use_hub(self):
+        message_id = str(uuid.uuid4())
+        self.assertIn('transport=hub', self.execute('send', '--to', 'legacy', '--id', message_id))
+        self.assertEqual(self.hub.call_args.args[1]['id'], message_id)
+        self.assertNotIn('transport=', self.execute('send', '--to', 'worker', source='other'))
+        self.assertEqual(self.hub.call_args.args[1]['source'], 'other')
+        self.nats_send.assert_not_called()
+
+    def test_explicit_pins_override_default(self):
+        self.execute('send', '--to', 'worker', '--hub-config', '/private/hub.json')
+        self.config.assert_called_once_with(Path('/private/hub.json'))
+        self.execute('send', '--to', 'legacy', '--nats-config', '/private/alternate.json')
+        self.assertEqual(self.nats_send.call_args.args[0].nats_config, Path('/private/alternate.json'))
+        self.read_routes.assert_not_called()
+
+    def test_nats_unconfirmed_never_posts_to_hub(self):
+        self.nats_send.side_effect = BridgeError('NATS send unconfirmed')
+        with self.assertRaisesRegex(BridgeError, 'NATS send unconfirmed'):
+            self.execute('send', '--to', 'worker')
+        self.hub.assert_not_called()
+
+    def test_full_id_hub_only_reply_does_not_depend_on_nats(self):
+        self.hub.side_effect = [{'messages': [{'id': self.parent, 'source': 'legacy', 'target': 'client'}]},
+                                {'state': 'queued'}]
+        self.assertIn('transport=hub', self.execute('reply', self.parent))
+        sent = self.hub.call_args.args[1]
+        self.assertEqual((sent['target'], sent['in_reply_to']), ('legacy', self.parent))
+        self.nats_history.assert_not_called()
+
+    def test_short_nats_reply_uses_canonical_parent(self):
+        self.nats_history.return_value = {'messages': [{'id': self.parent, 'from': 'worker', 'to': 'client'}]}
+        self.assertIn('transport=nats', self.execute('reply', self.parent[:8]))
+        args = self.nats_send.call_args.args[0]
+        self.assertEqual((args.to, args.message_id), ('worker', self.parent))
+        self.hub.assert_called_once()
+
+    def test_short_hub_reply_with_missing_nats_parent(self):
+        self.hub.side_effect = [{'messages': [{'id': self.parent, 'source': 'legacy', 'target': 'client'}]},
+                                {'state': 'queued'}]
+        self.nats_history.side_effect = ControlRejected('not_found', 'message unavailable')
+        self.assertIn('transport=hub', self.execute('reply', self.parent[:8]))
+        self.assertEqual(self.hub.call_args.args[1]['in_reply_to'], self.parent)
+
+    def test_cross_transport_prefix_collision_refuses_to_send(self):
+        self.hub.return_value = {'messages': [{'id': self.parent, 'source': 'legacy', 'target': 'client'}]}
+        other = '12345678-2222-4222-8222-222222222222'
+        self.nats_history.return_value = {'messages': [{'id': other, 'from': 'worker', 'to': 'client'}]}
+        with self.assertRaisesRegex(BridgeError, 'one matching message'):
+            self.execute('reply', self.parent[:8])
+        self.nats_send.assert_not_called()
+        self.hub.assert_called_once()
