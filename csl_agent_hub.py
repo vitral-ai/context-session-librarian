@@ -20,7 +20,7 @@ from csl_bridge_store import BridgeError, decode, encode, identifier, message_se
 
 NOTICE_SOURCE = {'name': 'hub-notifier', 'session': 'a38597e0-058a-5a72-9f71-50340e8242d3',
                  'cli': 'hub', 'machine': 'hub'}
-COORDINATOR = 'laptop-orchestrator'
+SERVICE_AGENTS = {'ci-notices', 'hub-notifier'}
 
 
 class Hub:
@@ -38,6 +38,7 @@ class Hub:
                 CREATE TABLE IF NOT EXISTS history_migrations(version INTEGER PRIMARY KEY);
                 CREATE TABLE IF NOT EXISTS hub_notices(id TEXT PRIMARY KEY);
                 CREATE TABLE IF NOT EXISTS agents(name TEXT PRIMARY KEY, record TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS agent_owners(agent TEXT PRIMARY KEY, owner TEXT);
                 CREATE TABLE IF NOT EXISTS approvals(source TEXT, target TEXT, PRIMARY KEY(source,target));
                 CREATE TABLE IF NOT EXISTS envelopes(id TEXT PRIMARY KEY, source TEXT, target TEXT,
                     machine TEXT, packet TEXT NOT NULL, state TEXT NOT NULL, receipt TEXT, created REAL);
@@ -87,27 +88,45 @@ class Hub:
             except BridgeError:
                 pass  # A refused ID collision must not overwrite the original history.
             db.commit()
-        coordinator = db.execute('SELECT record FROM agents WHERE name=?', (COORDINATOR,)).fetchone()
-        if coordinator:
-            recipient = decode(coordinator['record'])
-            # Retries of the same refusal never generate duplicate coordinator turns.
+        def registered(key):
+            row = db.execute('SELECT record FROM agents WHERE name=?', (key,)).fetchone()
+            return decode(row['record']) if row else None
+        def owner(key):
+            row = db.execute('SELECT owner FROM agent_owners WHERE agent=?', (key,)).fetchone()
+            return row['owner'] if row else None
+        recipients = ([owner(target)] if source in SERVICE_AGENTS and registered(target)
+                      else [] if source in SERVICE_AGENTS else [source, owner(source)])
+        notified = []
+        for key in dict.fromkeys(recipients):
+            recipient = registered(key) if key else None
+            if not recipient:
+                continue
+            # Deduplicate per recipient, including when the sender owns itself.
             notice_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
-                encode([machine, source, target, mid, reason])))
+                encode([machine, source, target, mid, reason, key])))
+            if db.execute('SELECT 1 FROM hub_notices WHERE id=?', (notice_id,)).fetchone():
+                notified.append(key)
+                continue
             created = datetime.now(timezone.utc).isoformat()
-            packet = {'id': notice_id, 'source': NOTICE_SOURCE, 'target': recipient,
+            notice = {'id': notice_id, 'source': NOTICE_SOURCE, 'target': recipient,
                       'text': f'refused: {source} -> {target}, {reason}, {created}, message id {mid}',
                       'in_reply_to': None, 'created_at': created}
             db.execute('INSERT OR IGNORE INTO envelopes VALUES(?,?,?,?,?,?,NULL,?)',
-                       (notice_id, NOTICE_SOURCE['name'], COORDINATOR, recipient['machine'],
-                        encode(packet), 'queued', time.time()))
+                       (notice_id, NOTICE_SOURCE['name'], key, recipient['machine'],
+                        encode(notice), 'queued', time.time()))
             db.execute('INSERT OR IGNORE INTO hub_notices VALUES(?)', (notice_id,))
-            self.remember(db, packet, 'queued')
-            # Raising inside connect() normally rolls back; the durable notice must survive.
-            db.commit()
-            suffix = 'Coordinator laptop-orchestrator has been notified (notice queued).'
-        else:
-            suffix = 'Coordinator notification unavailable: laptop-orchestrator is not registered.'
+            self.remember(db, notice, 'queued')
+            notified.append(key)
+        # Raising inside connect() normally rolls back; durable notices must survive.
+        db.commit()
+        suffix = ('Notified (notice queued): ' + ', '.join(notified) + '.' if notified
+                  else 'No registered notification recipient.')
         raise BridgeError(reason + '. ' + suffix + ' Do not retry through another channel.')
+
+    @staticmethod
+    def agent_owner(db, key):
+        row = db.execute('SELECT owner FROM agent_owners WHERE agent=?', (key,)).fetchone()
+        return row['owner'] if row else None
 
     def authenticate(self, token):
         digest = hashlib.sha256(token.encode()).hexdigest()
@@ -141,23 +160,41 @@ class Hub:
                 record = {k: request[k] for k in ('name', 'session', 'cli', 'machine')}
                 if record['name'] == NOTICE_SOURCE['name']:
                     raise BridgeError('Reserved hub notification identity')
+                if record['name'] in SERVICE_AGENTS and not admin:
+                    raise BridgeError('Service registration requires the owner machine')
                 name(record['name']); identifier(record['session']); name(record['machine'])
                 if record['cli'] not in ('codex', 'claude') or record['machine'] not in self.machines:
                     raise BridgeError('Unknown CLI or machine')
                 old = db.execute('SELECT record FROM agents WHERE name=?', (record['name'],)).fetchone()
                 if (record['machine'] != machine or old and decode(old['record'])['machine'] != machine) and not admin:
                     raise BridgeError('Cannot register another machine\'s agent')
+                if 'owner' in request:
+                    proposed = request['owner']
+                    if proposed is not None:
+                        name(proposed)
+                    prior = db.execute('SELECT owner FROM agent_owners WHERE agent=?', (record['name'],)).fetchone()
+                    if proposed != (prior['owner'] if prior else None) and not admin:
+                        raise BridgeError('Coordinator ownership requires the owner machine')
+                    if record['name'] in SERVICE_AGENTS and proposed is not None:
+                        raise BridgeError('Service agents have no coordinator owner')
+                    if proposed in SERVICE_AGENTS:
+                        raise BridgeError('Service agents cannot own agents')
+                    if proposed is not None and proposed != record['name']:
+                        agent(proposed)
+                    db.execute('INSERT OR REPLACE INTO agent_owners VALUES(?,?)', (record['name'], proposed))
                 # A changed binding must be approved again; old queued envelopes keep old pins.
                 if old and decode(old['record']) != record:
                     db.execute('DELETE FROM approvals WHERE source=? OR target=?', (record['name'], record['name']))
                 db.execute('INSERT OR REPLACE INTO agents VALUES(?,?)', (record['name'], encode(record)))
-                return record
+                return dict(record, owner=self.agent_owner(db, record['name']))
             if action in ('allow', 'deny', 'remove'):
                 if not admin:
                     raise BridgeError('Registry approvals require the owner machine')
                 if action == 'remove':
                     key = name(request['name'])
                     db.execute('DELETE FROM agents WHERE name=?', (key,))
+                    db.execute('DELETE FROM agent_owners WHERE agent=?', (key,))
+                    db.execute('UPDATE agent_owners SET owner=NULL WHERE owner=?', (key,))
                     db.execute('DELETE FROM approvals WHERE source=? OR target=?', (key, key))
                 else:
                     source, target = agent(request['source'])['name'], agent(request['target'])['name']
@@ -166,10 +203,20 @@ class Hub:
                         db.execute(('INSERT OR IGNORE INTO approvals VALUES(?,?)' if action == 'allow'
                                     else 'DELETE FROM approvals WHERE source=? AND target=?'), pair)
                 return {'state': action + 'ed'}
-            if action == 'list':
-                return {'agents': [decode(r[0]) for r in db.execute('SELECT record FROM agents ORDER BY name')]}
-            if action == 'show':
-                return agent(request['name'])
+            if action in ('list', 'status', 'show'):
+                selected_owner = request.get('owner')
+                if selected_owner is not None:
+                    name(selected_owner)
+                records = ([agent(request['name'])] if action == 'show' else
+                           [decode(r[0]) for r in db.execute('SELECT record FROM agents ORDER BY name')])
+                records = [dict(r, owner=self.agent_owner(db, r['name'])) for r in records]
+                if selected_owner is not None:
+                    records = [r for r in records if r['owner'] == selected_owner]
+                if action == 'show':
+                    if not records:
+                        raise BridgeError('Agent does not belong to selected owner')
+                    return records[0]
+                return {'agents': records}
             if action == 'permissions':
                 return {'approvals': [dict(r) for r in db.execute('SELECT * FROM approvals ORDER BY source,target')]}
             if action == 'history':

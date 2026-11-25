@@ -174,7 +174,7 @@ def loop(connector):
 
 
 def _execute(args):
-    if args.hub_action in ('status', 'versions', 'close', 'complete', 'put', 'fetch') or (
+    if (args.hub_action == 'status' and getattr(args, 'owner', None) is None) or args.hub_action in ('versions', 'close', 'complete', 'put', 'fetch') or (
             args.hub_action == 'history' and args.nats_config):
         from csl_nats_tools import command
         return command(args)
@@ -189,6 +189,8 @@ def _execute(args):
     request = {'action': args.hub_action}
     if args.hub_action == 'register':
         request.update({key: getattr(args, key) for key in ('name', 'session', 'cli', 'machine')})
+        if args.owner is not None:
+            request['owner'] = args.owner
     elif args.hub_action in ('allow', 'deny'):
         request.update(source=args.source, target=args.target, both=args.both)
     elif args.hub_action in ('show', 'remove'):
@@ -231,6 +233,8 @@ def _execute(args):
         request['id' if args.message_id else 'with'] = args.message_id or args.partner
     elif args.hub_action == 'receipt':
         request['id'] = args.id
+    if args.hub_action in ('show', 'list', 'status') and args.owner is not None:
+        request['owner'] = args.owner
     print(encode(call(settings, request)))
 
 
@@ -250,9 +254,14 @@ def add_commands(subparsers, _):
     for key in ('name', 'session', 'machine'):
         register.add_argument('--' + key, required=True)
     register.add_argument('--cli', choices=('codex', 'claude'), required=True)
+    register.add_argument('--owner', help='Coordinator agent name (admin machine only).')
     for action in ('show', 'remove'):
-        sub.add_parser(action).add_argument('name')
-    sub.add_parser('list'); sub.add_parser('permissions')
+        command = sub.add_parser(action)
+        command.add_argument('name')
+        if action == 'show':
+            command.add_argument('--owner')
+    sub.add_parser('list').add_argument('--owner')
+    sub.add_parser('permissions')
     for action in ('allow', 'deny'):
         pair = sub.add_parser(action)
         pair.add_argument('source'); pair.add_argument('target'); pair.add_argument('--both', action='store_true')
@@ -287,6 +296,8 @@ def add_commands(subparsers, _):
     for action in ('status', 'versions', 'close', 'complete'):
         control = sub.add_parser(action)
         add_options(control)
+        if action == 'status':
+            control.add_argument('--owner', help='Filter current Hub agents by coordinator.')
         if action in ('close', 'complete'):
             control.add_argument('--with', dest='partner', required=action == 'close')
         if action == 'complete':
