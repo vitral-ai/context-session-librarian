@@ -140,6 +140,23 @@ The hub constructs the text and the UUID from repository/run/attempt, so retries
 cannot duplicate a completion. An intentional GitHub rerun gets a new notice.
 A notice failure is visible in its job log but does not change the CI verdict.
 
+
+During the NATS migration a protected notifier may also publish the same
+completion ID and text. The NATS path accepts success and failure outcomes.
+Both paths skip a known superseded run. On a head lookup failure they send
+the exact run head and URL. The NATS copy uses the repo's exact
+`CSL_NATS_CI_ROUTES` branch overrides, then the normal `codex/<agent>/...`
+route. Missing routes are skipped and the control service quietly drops an
+unregistered recipient.
+
+The NATS credential belongs in `csl-ci-notices` as `CSL_NATS_CI_CREDS`
+under the same default-branch policy. It may only publish to the tenant's CI
+subjects and has no subscriptions. The trusted notifier builds
+`nats-control/cmd/csl-ci-notice` from the same reviewed checkout and provides
+its path, public TLS URL and pinned CA as `CSL_NATS_CI_PUBLISHER`,
+`CSL_NATS_CI_URL` and `CSL_NATS_CI_CA_PEM`. With the NATS credential absent,
+the notifier keeps the original hub-only path.
+
 To revoke a credential, remove its entry from the hub machines file, reload the
 existing hub service, then `gh secret delete CSL_HUB_NOTICE_TOKEN --env csl-ci-notices -R owner/repo`.
 No machine login token is used by GitHub Actions. There is no polling job or new

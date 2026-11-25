@@ -11,17 +11,43 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
+type ciNotice struct {
+	ID   string `json:"id"`
+	Body string `json:"body"`
+}
+
+func parseCINotice(body []byte) (ciNotice, error) {
+	var notice ciNotice
+	if !utf8.Valid(body) || decode(body, &notice) != nil ||
+		!messageID.MatchString(notice.ID) || notice.Body == "" || len(notice.Body) > maxBody {
+		return ciNotice{}, invalid("invalid CI completion notice")
+	}
+	return notice, nil
+}
+
+func PublishCINotice(ctx context.Context, conn *nats.Conn, tenant, agent string, body []byte) error {
+	if !tenantID.MatchString(tenant) || !isRegisteredName(agent) {
+		return invalid("invalid CI notification route")
+	}
+	if _, err := parseCINotice(body); err != nil {
+		return err
+	}
+	if err := conn.Publish("csl."+tenant+".ci."+agent, body); err != nil {
+		return err
+	}
+	if err := conn.FlushWithContext(ctx); err != nil {
+		return err
+	}
+	return conn.LastError()
+}
+
 func (s *Service) handleCI(msg *nats.Msg) {
 	recipient := strings.TrimPrefix(msg.Subject, s.subject("ci."))
 	if !isRegisteredName(recipient) {
 		return
 	}
-	var notice struct {
-		ID   string `json:"id"`
-		Body string `json:"body"`
-	}
-	if !utf8.Valid(msg.Data) || decode(msg.Data, &notice) != nil ||
-		!messageID.MatchString(notice.ID) || notice.Body == "" || len(notice.Body) > maxBody {
+	notice, err := parseCINotice(msg.Data)
+	if err != nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
