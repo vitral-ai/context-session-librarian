@@ -123,7 +123,7 @@ class NativeDeliveryTests(unittest.TestCase):
         connector=SimpleNamespace(agents={'client':target['session']},peers={},
             locks={'client':threading.RLock()},client_only=False,
             store=SimpleNamespace(agents=lambda: {'client': target['session']},
-                                  native_operation=Mock(return_value=None)),
+                                  native_operation=Mock(return_value=None), rows=Mock(return_value=[])),
             current=Mock(return_value={'status':state}),
             incoming=Mock(return_value={'state':'delivered','turn_id':'actual'}))
         return connector, {'id':str(uuid.uuid4()),'source':source,'target':target,'text':'hello'}

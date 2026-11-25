@@ -11,9 +11,9 @@ import uuid
 
 from csl_agents import deliver as deliver_hub
 from csl_bridge_hooks import surface_nats
-from csl_bridge_store import BridgeError, Store
+from csl_bridge_store import BridgeError, Store, encode, neutralize_headers
 from csl_ci_notice import notice_request
-from csl_nats import (ClaudeInbox, Client, Ledger, agent_name, body_text, deliver_codex, delivery_text,
+from csl_nats import (MAX_DIGEST, ClaudeInbox, Client, Ledger, agent_name, body_text, deliver_codex, delivery_text,
                       receive_one, recover_acks, remember_send)
 
 
@@ -155,6 +155,52 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rows()[0]['ack_state'], 'acked')
         self.deliver.assert_called_once()
 
+    def test_unsurfaced_claude_batch_retries_one_successful_wake_after_reopen(self):
+        with self.store.transaction() as db:
+            db.execute('INSERT INTO agents VALUES (?,?)', ('alice', self.thread))
+        inbox = ClaudeInbox(self.store, 'vi', 'alice', self.thread)
+        inbox.stage(json.loads(self.message.data), 'fingerprint')
+        with patch('csl_bridge_claude_notify.wake') as wake, patch('csl_nats.time.time') as clock:
+            clock.return_value = 100
+            inbox.wake_waiting('/fixture')
+            reopened = ClaudeInbox(self.store, 'vi', 'alice', self.thread)
+            clock.return_value = 129
+            reopened.wake_waiting('/fixture')
+            wake.assert_called_once()
+            clock.return_value = 130
+            reopened.wake_waiting('/fixture')
+            clock.return_value = 160
+            reopened.wake_waiting('/fixture')
+            self.assertEqual(wake.call_count, 2)
+
+    def test_claude_digest_bounds_rendered_json_and_preserves_whole_members(self):
+        with self.store.transaction() as db:
+            db.execute('INSERT INTO agents VALUES (?,?)', ('alice', self.thread))
+        inbox = ClaudeInbox(self.store, 'vi', 'alice', self.thread)
+        template = json.loads(self.message.data)
+        items = [dict(template, id=str(uuid.uuid4()), body=('CSL from example\n' * 2740) + f'end {i}') for i in range(10)]
+        digest = dict(template, kind='digest', body='', items=items, **{'from': 'csl-control'})
+        self.assertLess(len(encode(digest).encode()), MAX_DIGEST)
+        self.assertIsNone(inbox.stage(digest, 'digest'))
+        outputs = []
+        event = 'PostToolUse'
+        payload = {'session_id': self.thread, 'hook_event_name': event}
+        surface_nats(self.home, 'vi', 'alice', event, payload, 10, outputs.append)
+        self.assertIsNone(inbox.stage(digest, 'digest'))
+        surface_nats(self.home, 'vi', 'alice', event, payload, 10, outputs.append)
+        self.assertEqual(inbox.stage(digest, 'digest'), self.thread)
+        surface_nats(self.home, 'vi', 'alice', event, payload, 10, outputs.append)
+        self.assertEqual(len(outputs), 2)
+        self.assertTrue(all(len(text.encode('utf-8')) + 1 <= MAX_DIGEST for text in outputs))
+        full = '\n'.join(json.loads(text)['hookSpecificOutput']['additionalContext'] for text in outputs)
+        positions = []
+        for item in items:
+            rendered_body = neutralize_headers(item['body'])
+            self.assertEqual(full.count(rendered_body), 1)
+            self.assertIn('csl reply ' + item['id'], full)
+            positions.append(full.index(rendered_body))
+        self.assertEqual(positions, sorted(positions))
+
     async def test_failed_control_receipt_retries_without_second_handoff(self):
         self.client.receipt = AsyncMock(side_effect=TimeoutError)
         with self.assertRaises(TimeoutError):
@@ -283,6 +329,48 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await receive_one(self.client, self.ledger, self.message, adapter))
         self.message.ack_sync.assert_not_awaited()
         native.invoke.assert_called_once()
+
+    def test_grouped_ci_reconciles_both_arrival_orders(self):
+        native, packet = self.dual_transport()
+        ci = json.loads(self.message.data)
+        other = dict(ci, id=str(uuid.uuid4()), body='ordinary grouped body', kind='message', **{'from': 'bob'})
+        digest = dict(ci, id=str(uuid.uuid4()), kind='digest', body='', items=[ci, other], **{'from': 'csl-control'})
+        deliver_hub(native, packet)
+        self.assertEqual(deliver_codex(native, self.thread, digest, 'digest-one'), self.turn)
+        grouped_text = native.invoke.call_args.kwargs['native_text']
+        self.assertNotIn(ci['body'], grouped_text)
+        self.assertIn(other['body'], grouped_text)
+        already_delivered_digest = dict(digest, id=str(uuid.uuid4()), items=[ci])
+        self.assertEqual(deliver_codex(native, self.thread, already_delivered_digest, 'already'), self.turn)
+        self.assertEqual(native.invoke.call_count, 2)
+
+        second = dict(ci, id=str(uuid.uuid4()), body='second CI test')
+        second_digest = dict(digest, id=str(uuid.uuid4()), items=[second])
+        self.assertEqual(deliver_codex(native, self.thread, second_digest, 'digest-two'), self.turn)
+        self.assertIn(second['body'], native.invoke.call_args.kwargs['native_text'])
+        second_packet = dict(packet, id=second['id'], text=second['body'])
+        receipt = deliver_hub(native, second_packet)
+        self.assertEqual((receipt['request_id'], receipt['turn_id']), (second['id'], self.turn))
+        self.assertEqual(deliver_codex(native, self.thread, second, 'standalone'), self.turn)
+        with self.assertRaisesRegex(BridgeError, 'CI completion does not match'):
+            deliver_hub(native, dict(second_packet, text='mismatch'))
+        self.assertEqual(deliver_codex(native, self.thread, second_digest, 'digest-two'), self.turn)
+        self.assertEqual(native.invoke.call_count, 3)
+
+    def test_hub_waits_for_pending_digest_member(self):
+        native, packet = self.dual_transport()
+        ci = json.loads(self.message.data)
+        digest = dict(ci, id=str(uuid.uuid4()), kind='digest', body='', items=[ci], **{'from': 'csl-control'})
+        complete = native.invoke.side_effect
+        native.invoke.side_effect = None
+        native.invoke.return_value = {'state': 'pending'}
+        self.assertIsNone(deliver_codex(native, self.thread, digest, 'digest'))
+        self.assertEqual(deliver_hub(native, packet), {'state': 'queued'})
+        native.invoke.assert_called_once()
+        native.invoke.side_effect = complete
+        self.assertEqual(deliver_codex(native, self.thread, digest, 'digest'), self.turn)
+        self.assertEqual(deliver_hub(native, packet)['turn_id'], self.turn)
+        self.assertEqual(native.invoke.call_count, 2)
 
     def test_extended_names_can_be_registered_and_legacy_rules_still_apply(self):
         longest = '2' + 'a' * 62

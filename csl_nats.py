@@ -24,6 +24,7 @@ CI_SOURCE = 'ci-notices'
 RESERVED_AGENTS = {'owner', 'csl-control', 'csl-ci', CI_SOURCE, 'hub-notifier'}
 MAX_BODY = 48 * 1024
 MAX_DIGEST = 512 * 1024
+WAKE_RETRY_SECONDS = 30
 MESSAGE_KINDS = ('message', 'reply', 'ci', 'system', 'reminder')
 STREAM = 'CSL_MSG'
 LOG = logging.getLogger(__name__)
@@ -123,12 +124,15 @@ def delivery_members(envelope, agent, size):
     return members
 
 
+def digest_entry(item):
+    return (frame_message(item['from'], item['id'], None, item['body']) +
+            f"\nReply via hub: csl reply {item['id']} --from {item['to']} --text ...")
+
+
 def delivery_text(envelope):
-    header = frame_message(envelope['from'], envelope['id'], None, envelope['body'])
-    if envelope.get('kind') != 'digest':
-        return header
-    entries = [frame_message(item['from'], item['id'], None, item['body']) for item in envelope['items']]
-    return header + '\n\n'.join(entries)
+    if envelope.get('kind') == 'digest':
+        return '\n\n'.join(map(digest_entry, envelope['items']))
+    return frame_message(envelope['from'], envelope['id'], None, envelope['body'])
 
 
 class ClaudeInbox:
@@ -157,8 +161,10 @@ class ClaudeInbox:
                 if (row['session'], row['fingerprint']) != (self.route[2], fingerprint):
                     raise BridgeError('NATS Claude inbox ID collision')
                 return self.route[2] if row['surfaced'] else None
+            parts = (list(map(digest_entry, envelope['items'])) if envelope.get('kind') == 'digest'
+                     else [delivery_text(envelope)])
             db.execute('INSERT INTO nats_claude_inbox (tenant,agent,session,id,fingerprint,body) VALUES (?,?,?,?,?,?)',
-                       (*self.route, envelope['id'], fingerprint, delivery_text(envelope)))
+                       (*self.route, envelope['id'], fingerprint, encode(parts)))
         return None
 
     def wake_waiting(self, claude_config):
@@ -167,9 +173,11 @@ class ClaudeInbox:
             self.require_session(db)
             first = db.execute('''SELECT seq,woke FROM nats_claude_inbox
                 WHERE tenant=? AND agent=? AND session=? AND surfaced=0 ORDER BY seq LIMIT 1''', self.route).fetchone()
-            if first and not first['woke']:
+            now = int(time.time())
+            if first and (first['woke'] == 0 or 0 < first['woke'] <= now - WAKE_RETRY_SECONDS):
                 wake(self.route[2], claude_config)
-                db.execute('UPDATE nats_claude_inbox SET woke=1 WHERE seq=?', (first['seq'],))
+                db.execute('UPDATE nats_claude_inbox SET woke=? WHERE seq=?',
+                           (-1 if first['woke'] else now, first['seq']))
 
     def surface(self, render, emit, limit):
         with self.store.transaction() as db:
@@ -177,18 +185,27 @@ class ClaudeInbox:
             rows = db.execute('''SELECT seq,body FROM nats_claude_inbox
                 WHERE tenant=? AND agent=? AND session=? AND surfaced=0 ORDER BY seq LIMIT ?''',
                               (*self.route, limit)).fetchall()
-            if not rows:
-                return
-            selected = [rows[0]]
-            size = len(rows[0]['body'].encode('utf-8'))
-            for row in rows[1:]:
-                size += len(row['body'].encode('utf-8')) + 2
-                if size > MAX_DIGEST:
+            updates, parts, output = [], [], None
+            for row in rows:
+                pending = json.loads(row['body']) if row['body'].startswith('[') else [row['body']]
+                count = 0
+                for part in pending:
+                    candidate = render('\n\n'.join([*parts, part]))
+                    if len(candidate.encode('utf-8')) + 1 > MAX_DIGEST:
+                        if output is None:
+                            raise BridgeError('Claude inbox member exceeds the hook output budget')
+                        break
+                    parts.append(part)
+                    output = candidate
+                    count += 1
+                remaining = pending[count:]
+                if count:
+                    updates.append((not remaining, encode(remaining) if remaining else '', row['seq']))
+                if remaining:
                     break
-                selected.append(row)
-            emit(render('\n\n'.join(row['body'] for row in selected)))
-            db.executemany("UPDATE nats_claude_inbox SET surfaced=1,body='' WHERE seq=?",
-                           ((row['seq'],) for row in selected))
+            if output is not None:
+                emit(output)
+                db.executemany('UPDATE nats_claude_inbox SET surfaced=?,body=?,woke=0 WHERE seq=?', updates)
 
 
 class Client:
@@ -311,6 +328,69 @@ def same_ci_completion(operation, expected):
         raise BridgeError('Native operation ID collision; CI completion does not match')
 
 
+def digest_ci_operation(store, message_id, thread, expected):
+    if not store.rows("SELECT 1 FROM sqlite_master WHERE name='nats_digest_ci' AND type='table'"):
+        return None
+    rows = store.rows('SELECT * FROM nats_digest_ci WHERE id=?', (message_id,))
+    if not rows:
+        return None
+    alias = rows[0]
+    if not expected or alias['fingerprint'] != expected:
+        raise BridgeError('Native digest member ID collision; CI completion does not match')
+    parent = store.native_operation(alias['digest_id'], thread)
+    if not parent or message_id not in parent['request'].get('digest_items', []):
+        raise BridgeError('Native digest member is missing its pinned operation')
+    receipt = Store.native_delivery(parent, alias['digest_id'], thread)
+    return dict(receipt, request_id=message_id) if receipt else {'state': 'queued'}
+
+
+def envelope_ci(envelope):
+    if envelope.get('kind') == 'ci' and not envelope.get('reply_to'):
+        return ci_completion_fingerprint(envelope['from'], envelope['to'], envelope['body'])
+    return None
+
+
+def reserve_digest(store, request, thread, items):
+    from csl_bridge_event_state import EventState
+
+    selected, aliases, prior_turn = [], [], None
+    for item in items:
+        item_id = item['id']
+        completion = envelope_ci(item)
+        old = store.native_operation(item_id, thread)
+        if old:
+            same_ci_completion(old, completion)
+            receipt = Store.native_delivery(old, item_id, thread)
+            if receipt is None:
+                return None
+        else:
+            receipt = digest_ci_operation(store, item_id, thread, completion)
+            if receipt and receipt['state'] != 'delivered':
+                return None
+        if receipt:
+            prior_turn = receipt['turn_id']
+            continue
+        selected.append(item_id)
+        if completion:
+            aliases.append((item_id, request['id'], completion))
+    request['digest_items'] = selected
+    with store.transaction() as db:
+        store.reserve(NATIVE_PEER, request, transaction=db)
+        if aliases:
+            db.execute('''CREATE TABLE IF NOT EXISTS nats_digest_ci
+                (id TEXT PRIMARY KEY, digest_id TEXT NOT NULL, fingerprint TEXT NOT NULL)''')
+            digest_binding = hashlib.sha256(encode(request).encode()).hexdigest()
+            for item_id, _, _ in aliases:
+                EventState.reserve_id(db, item_id, 'operation', digest_binding, thread)
+            db.executemany('INSERT INTO nats_digest_ci VALUES (?,?,?)', aliases)
+        if not selected:
+            result = {'state': 'delivered', 'request_id': request['id'],
+                      'thread_id': thread, 'turn_id': prior_turn}
+            db.execute("UPDATE operations SET state='delivered', result=? WHERE id=?",
+                       (encode(result), request['id']))
+    return request
+
+
 def deliver_codex(connector, thread, envelope, fingerprint):
     target = envelope['to']
     if connector.stop.is_set() or connector.client_only or connector.agents.get(target) != thread:
@@ -322,9 +402,7 @@ def deliver_codex(connector, thread, envelope, fingerprint):
             'version': 1, 'op': 'followup', 'id': envelope['id'], 'source': envelope['from'],
             'target': target, 'text': '', 'nats_fingerprint': fingerprint,
         }
-        completion = None
-        if envelope.get('kind') == 'ci' and not envelope.get('reply_to'):
-            completion = ci_completion_fingerprint(envelope['from'], target, envelope['body'])
+        completion = envelope_ci(envelope)
         if completion:
             request['ci_completion'] = completion
         old = connector.store.native_operation(envelope['id'], thread)
@@ -336,6 +414,8 @@ def deliver_codex(connector, thread, envelope, fingerprint):
                 original = old['request']
                 if 'ci_completion' not in original:
                     request.pop('ci_completion', None)
+                if 'digest_items' in original:
+                    request['digest_items'] = original['digest_items']
                 if request != original:
                     raise BridgeError('NATS operation ID collision; envelope differs')
                 request = original
@@ -343,7 +423,20 @@ def deliver_codex(connector, thread, envelope, fingerprint):
                 receipt = Store.native_delivery(old, envelope['id'], thread)
                 return receipt['turn_id'] if receipt else None
         else:
-            connector.store.reserve(NATIVE_PEER, request)
+            member = digest_ci_operation(connector.store, envelope['id'], thread, completion)
+            if member:
+                return member.get('turn_id')
+            if envelope.get('kind') == 'digest':
+                if reserve_digest(connector.store, request, thread, envelope['items']) is None:
+                    return None
+                if not request['digest_items']:
+                    operation = connector.store.native_operation(envelope['id'], thread)
+                    return Store.native_delivery(operation, envelope['id'], thread)['turn_id']
+            else:
+                connector.store.reserve(NATIVE_PEER, request)
+        if 'digest_items' in request:
+            selected = set(request['digest_items'])
+            envelope = dict(envelope, items=[item for item in envelope['items'] if item['id'] in selected])
         text = delivery_text(envelope)
         result = connector.invoke(NATIVE_PEER, request, native_text=text)
         receipt = Store.native_delivery({'state': result['state'], 'result': result}, envelope['id'], thread)

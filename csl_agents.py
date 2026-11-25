@@ -127,6 +127,13 @@ def deliver(connector, packet):
                 raise BridgeError('Request ID collision; content differs')
             if old['state'] != 'pending':
                 return old['result'] or {'state': old['state']}
+        else:
+            from csl_nats import ci_completion_fingerprint, digest_ci_operation
+            completion = (ci_completion_fingerprint(source['name'], agent, packet['text'])
+                          if packet.get('in_reply_to') is None else None)
+            member = digest_ci_operation(connector.store, packet['id'], thread, completion)
+            if member:
+                return member
         state = connector.current(agent)
         # Active Codex turns accept turn/steer at their next input boundary.
         # Waiting for idle starves recipients that keep working in one turn.

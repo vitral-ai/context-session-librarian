@@ -204,9 +204,13 @@ exact Claude session in the mailbox home. Run
 at each tool boundary. Use the actual event name for `SessionStart`,
 `UserPromptSubmit` and `Stop` hooks. The native wake carries a short alert.
 The hook supplies the message text and records delivery after writing it.
+An unsurfaced batch can retry its wake once after 30 seconds.
 
 The local `nats_delivered` table in the connector's private `bridge.sqlite`
 records the pinned session, turn, and acknowledgment state. A text digest
-renders in one delivery and retains the original message IDs and order.
+retains the original message IDs and order. If a Claude digest exceeds the
+rendered hook limit, it continues at the next boundary without splitting a
+member or acknowledging the digest before its last part is emitted.
 During dual delivery, matching CI completion notices reuse the confirmed
-native turn for the same message ID, recipient thread and body.
+native turn for the same message ID, recipient thread and body, including
+notices delivered inside a digest.
