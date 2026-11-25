@@ -28,6 +28,7 @@ MAX_DIGEST = 512 * 1024
 WAKE_RETRY_SECONDS = 30
 MESSAGE_KINDS = ('message', 'reply', 'ci', 'system', 'reminder')
 STREAM = 'CSL_MSG'
+JS_CONSUMER_NOT_FOUND = 10014
 OUTBOX_SECONDS = 15 * 60
 LOG = logging.getLogger(__name__)
 
@@ -332,7 +333,17 @@ class Client:
         return result
 
     async def pull(self):
-        return await self.connection.jetstream().pull_subscribe_bind(
+        from nats.js.errors import NotFoundError
+
+        jetstream = self.connection.jetstream()
+        try:
+            await jetstream.consumer_info(STREAM, self.consumer)
+        except NotFoundError as error:
+            if error.err_code != JS_CONSUMER_NOT_FOUND:
+                raise
+            # The control service derives the durable and filter from our authenticated subject.
+            await self.request('ctl.ensure_consumer', {})
+        return await jetstream.pull_subscribe_bind(
             consumer=self.consumer, stream=STREAM, inbox_prefix=(self.inbox + '.').encode(),
         )
 

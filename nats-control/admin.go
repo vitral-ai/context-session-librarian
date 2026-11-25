@@ -153,10 +153,7 @@ func (s *Service) register(ctx context.Context, request adminRequest) (any, erro
 	if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
 		return nil, err
 	}
-	if _, err := s.stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-		Durable: "agent-" + request.Name, FilterSubject: s.subject("agent." + request.Name + ".inbox"),
-		AckPolicy: jetstream.AckExplicitPolicy, AckWait: 5 * time.Minute, MaxDeliver: 20,
-	}); err != nil {
+	if _, err := s.stream.CreateOrUpdateConsumer(ctx, s.agentConsumerConfig(request.Name)); err != nil {
 		return nil, err
 	}
 	if errors.Is(err, jetstream.ErrKeyNotFound) {
@@ -167,6 +164,23 @@ func (s *Service) register(ctx context.Context, request adminRequest) (any, erro
 		agent = existing
 	}
 	return s.issue(ctx, request.Name, agent)
+}
+
+func (s *Service) ensureConsumer(ctx context.Context, name string) error {
+	config := s.agentConsumerConfig(name)
+	if _, err := s.stream.Consumer(ctx, config.Durable); !errors.Is(err, jetstream.ErrConsumerNotFound) {
+		return err
+	}
+	_, err := s.stream.CreateConsumer(ctx, config)
+	return err
+}
+
+func (s *Service) agentConsumerConfig(name string) jetstream.ConsumerConfig {
+	return jetstream.ConsumerConfig{
+		Durable: "agent-" + name, FilterSubject: s.subject("agent." + name + ".inbox"),
+		DeliverPolicy: jetstream.DeliverAllPolicy, AckPolicy: jetstream.AckExplicitPolicy,
+		AckWait: 5 * time.Minute, MaxDeliver: 20,
+	}
 }
 
 func (s *Service) issue(ctx context.Context, name string, agent Agent) (any, error) {

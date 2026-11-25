@@ -217,6 +217,14 @@ func (s *Service) control(ctx context.Context, caller, verb string, body []byte)
 		return s.file(ctx, caller, verb, body)
 	case "hello", "renew":
 		return s.clientVersion(ctx, caller, verb, body, agent, revision)
+	case "ensure_consumer":
+		if err := decode(body, &struct{}{}); err != nil {
+			return nil, err
+		}
+		if err := s.ensureConsumer(ctx, caller); err != nil {
+			return nil, err
+		}
+		return struct{}{}, nil
 	case "status", "versions":
 		if verb == "status" && agent.Role != "orchestrator" {
 			return nil, forbidden("status requires the orchestrator role")

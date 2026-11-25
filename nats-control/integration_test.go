@@ -129,13 +129,25 @@ func TestOperatorMode(t *testing.T) {
 	message.From = "sender"
 	call(sender, "send.sender", message, "")
 	call(sender, "send.sender", message, "")
+	// A restored stream has retained messages but no durable consumers.
+	if err := service.stream.DeleteConsumer(ctx, "agent-worker-a"); err != nil {
+		t.Fatal(err)
+	}
+	call(third, "ctl.ensure_consumer.worker-b", map[string]string{"name": "worker-a"}, "invalid")
 	peerJS, err := jetstream.New(peer)
 	if err != nil {
 		t.Fatal(err)
 	}
+	call(peer, "ctl.ensure_consumer.worker-a", struct{}{}, "")
 	consumer, err := peerJS.Consumer(ctx, "CSL_MSG", "agent-worker-a")
 	if err != nil {
 		t.Fatal(err)
+	}
+	config := consumer.CachedInfo().Config
+	if config.Durable != "agent-worker-a" || config.FilterSubject != "csl.vi.agent.worker-a.inbox" ||
+		config.DeliverSubject != "" || config.AckPolicy != jetstream.AckExplicitPolicy ||
+		config.DeliverPolicy != jetstream.DeliverAllPolicy || config.AckWait != 5*time.Minute || config.MaxDeliver != 20 {
+		t.Fatalf("unexpected restored consumer config: %+v", config)
 	}
 	receive := func(kind string) (Envelope, jetstream.Msg) {
 		t.Helper()
@@ -159,6 +171,14 @@ func TestOperatorMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	call(peer, "ctl.receipt.worker-a", sendResult{message.ID, "acked"}, "")
+	call(peer, "ctl.ensure_consumer.worker-a", struct{}{}, "")
+	info, err := consumer.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.AckFloor.Stream == 0 {
+		t.Fatal("repeated ensure reset the consumer's acknowledged position")
+	}
 	call(third, "ctl.history.worker-b", map[string]string{"id": message.ID}, "not_found")
 	call(peer, "ctl.history.worker-a", map[string]string{"id": message.ID[:8]}, "")
 
