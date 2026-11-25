@@ -211,6 +211,8 @@ func (s *Service) control(ctx context.Context, caller, verb string, body []byte)
 	switch verb {
 	case "history":
 		return s.history(ctx, caller, body)
+	case "unread":
+		return s.unread(ctx, caller, body)
 	case "receipt":
 		return s.receipt(ctx, caller, body)
 	case "put", "fetch", "file-acl":

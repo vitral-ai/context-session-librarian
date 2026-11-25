@@ -106,6 +106,52 @@ func compareHistoryRecords(a, b historyRecord) int {
 	return strings.Compare(a.ID, b.ID)
 }
 
+const maxUnreadIDs = 1000
+
+type unreadResult struct {
+	IDs   []string `json:"ids"`
+	Count int      `json:"count"`
+}
+
+func (s *Service) unread(ctx context.Context, caller string, body []byte) (any, error) {
+	var request struct {
+		With string `json:"with"`
+	}
+	if err := decode(body, &request); err != nil {
+		return nil, err
+	}
+	if !isRegisteredName(request.With) || request.With == caller {
+		return nil, invalid("unread requires a distinct peer")
+	}
+	entries, err := s.messages(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var unread []historyRecord
+	for _, entry := range entries {
+		envelope := entry.record.Envelope
+		if envelope.From != request.With || envelope.To != caller {
+			continue
+		}
+		state, _, err := readState[messageState](ctx, s.state, "msg."+envelope.ID)
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if state.State == "queued" || state.State == "delivered" {
+			unread = append(unread, historyRecord{historyEntry: historyEntry{Envelope: envelope}, acceptedAt: entry.record.AcceptedAt})
+		}
+	}
+	slices.SortFunc(unread, compareHistoryRecords)
+	ids := make([]string, min(maxUnreadIDs, len(unread)))
+	for i := range ids {
+		ids[i] = unread[i].ID
+	}
+	return unreadResult{IDs: ids, Count: len(unread)}, nil
+}
+
 func (s *Service) history(ctx context.Context, caller string, body []byte) (any, error) {
 	var request struct {
 		With   string `json:"with,omitempty"`
