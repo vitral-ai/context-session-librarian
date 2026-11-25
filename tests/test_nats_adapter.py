@@ -19,7 +19,7 @@ from csl_bridge_store import BridgeError, Store, encode, neutralize_headers
 from csl_ci_notice import notice_request
 from codex_sessions import main
 from csl_nats import (MAX_DIGEST, ClaudeInbox, Client, ControlRejected, Ledger, agent_name, body_text, deliver_codex,
-                      delivery_fingerprint, delivery_parts, post_saved, receive_one, recover_acks, remember_send,
+                      delivery_fingerprint, delivery_parts, post_saved, raw_fingerprint, receive_one, recover_acks, remember_send,
                       replay_outbox)
 
 
@@ -90,6 +90,36 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         await receive_one(self.client, self.ledger, self.message, self.deliver)
         self.deliver.assert_called_once()
         self.assertEqual(self.rows()[0]['ack_broker'], 'secondary')
+
+    async def test_legacy_digest_member_is_never_submitted_again_after_regrouping(self):
+        old = dict(json.loads(self.message.data), id=str(uuid.uuid4()), body='seen before upgrade')
+        digest = dict(old, id=str(uuid.uuid4()), kind='digest', body='', items=[old],
+                      **{'from': 'csl-control'})
+        with self.store.transaction() as db:
+            # The shipped ledger saved an outer hash, native receipt and member
+            # IDs, with no separate historical member fingerprint.
+            db.execute('''INSERT INTO nats_delivered
+                (tenant,agent,id,thread,fingerprint,turn,ack_state,delivered_at)
+                VALUES (?,?,?,?,?,?,'acked',1)''', ('vi', 'alice', digest['id'], self.thread,
+                                                 raw_fingerprint(digest), self.turn))
+            db.execute('INSERT INTO nats_digest_members VALUES (?,?,?,?)', ('vi', 'alice', digest['id'], old['id']))
+
+        self.client.broker = 'secondary'
+        self.client.receipt = AsyncMock()
+        self.message.ack_sync.side_effect = None
+        self.message.data = encode(dict(digest, created_at='2026-11-25T09:00:00Z')).encode()
+        await receive_one(self.client, self.ledger, self.message, self.deliver)
+        self.message.data = encode(old).encode()
+        await receive_one(self.client, self.ledger, self.message, self.deliver)
+        self.deliver.assert_not_called()
+
+        fresh = dict(old, id=str(uuid.uuid4()), body='new after upgrade')
+        regrouped = dict(digest, id=str(uuid.uuid4()), items=[old, fresh])
+        self.message.data = encode(regrouped).encode()
+        await receive_one(self.client, self.ledger, self.message, self.deliver)
+        self.deliver.assert_called_once_with(dict(regrouped, items=[fresh]), delivery_fingerprint(regrouped))
+        self.client.receipt.assert_any_await(old['id'], 'acked')
+        self.client.receipt.assert_any_await(fresh['id'], 'acked')
 
     async def test_digest_keeps_member_order_and_recovers_every_receipt(self):
         items = [dict(json.loads(self.message.data), id=str(uuid.uuid4()), body=body)
@@ -571,6 +601,30 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
             clock.return_value = 150
             await replay_outbox(self.client, self.ledger, (BridgeError,))
             self.client.send.assert_not_awaited()
+
+    async def test_promoted_broker_denials_do_not_starve_newer_messages(self):
+        envelope = json.loads(self.message.data) | {'from': 'alice', 'to': 'bob'}
+        denied = [dict(envelope, id=str(uuid.uuid4()), to='unavailable') for _ in range(16)]
+
+        async def send(item, **_):
+            if item['to'] == 'unavailable':
+                raise ControlRejected('forbidden', 'pair permission is required')
+            return {'id': item['id'], 'state': 'queued'}
+
+        self.client.broker = 'promoted'
+        self.client.send = AsyncMock(side_effect=send)
+        with patch('csl_nats.time.time', return_value=100) as clock:
+            for item in denied:
+                remember_send(self.store, 'vi', item, self.thread)
+            clock.return_value = 101
+            remember_send(self.store, 'vi', envelope, self.thread)
+            for now in range(150, 400, 60):
+                clock.return_value = now
+                await replay_outbox(self.client, self.ledger, (BridgeError,))
+        self.assertEqual(self.client.send.await_count, 17)
+        self.client.send.assert_awaited_with(envelope, timeout=3)
+        self.assertEqual(self.store.rows('SELECT state,count(*) AS count FROM nats_outbox GROUP BY state'),
+                         [{'state': 'queued', 'count': 1}, {'state': 'replay_refused', 'count': 16}])
 
     async def test_active_selection_requires_a_control_hello(self):
         try:

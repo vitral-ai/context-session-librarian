@@ -348,23 +348,41 @@ class Ledger:
             db.execute('''CREATE TABLE IF NOT EXISTS nats_digest_members (
                 tenant TEXT NOT NULL, agent TEXT NOT NULL, digest_id TEXT NOT NULL, member_id TEXT NOT NULL,
                 PRIMARY KEY (tenant, agent, digest_id, member_id))''')
-            if 'ack_broker' not in {row['name'] for row in db.execute('PRAGMA table_info(nats_delivered)')}:
+            columns = {row['name'] for row in db.execute('PRAGMA table_info(nats_delivered)')}
+            if 'ack_broker' not in columns:
                 db.execute('ALTER TABLE nats_delivered ADD COLUMN ack_broker TEXT')
+            if 'member_schema' not in columns:
+                db.execute('ALTER TABLE nats_delivered ADD COLUMN member_schema INTEGER NOT NULL DEFAULT 0')
 
-    def get(self, message_id, fingerprint, legacy=None):
+    def get(self, message_id, fingerprint, legacy=None, members=()):
         rows = self.store.rows('SELECT * FROM nats_delivered WHERE tenant=? AND agent=? AND id=?',
                                (*self.key, message_id))
         if not rows:
             return None
         row = rows[0]
-        if row['thread'] != self.thread or row['fingerprint'] not in (fingerprint, legacy):
+        if row['thread'] != self.thread:
             raise BridgeError('NATS receipt does not match its original thread or envelope')
+        if row['fingerprint'] not in (fingerprint, legacy):
+            # Earlier builds hashed the whole broker-authored digest and retained
+            # only the member IDs. The IDs mark already rendered items on this thread.
+            if row['member_schema'] != 0 or not members or set(self.receipt_ids(message_id)) != {*members, message_id}:
+                raise BridgeError('NATS receipt does not match its original thread or envelope')
         return row
+
+    def legacy_member_turns(self, members):
+        if not members:
+            return {}
+        rows = self.store.rows('''SELECT m.member_id,d.turn FROM nats_digest_members m JOIN nats_delivered d
+            ON (m.tenant,m.agent,m.digest_id)=(d.tenant,d.agent,d.id)
+            WHERE d.tenant=? AND d.agent=? AND d.thread=? AND d.member_schema=0
+            AND m.member_id IN (SELECT value FROM json_each(?)) ORDER BY d.delivered_at''',
+                               (*self.key, self.thread, encode(members)))
+        return {row['member_id']: row['turn'] for row in rows}
 
     def delivered(self, message_id, fingerprint, turn, members=()):
         with self.store.transaction() as db:
             db.execute('''INSERT INTO nats_delivered
-                (tenant,agent,id,thread,fingerprint,turn,delivered_at) VALUES (?,?,?,?,?,?,?)''',
+                (tenant,agent,id,thread,fingerprint,turn,delivered_at,member_schema) VALUES (?,?,?,?,?,?,?,1)''',
                        (*self.key, message_id, self.thread, fingerprint, identifier(turn), int(time.time())))
             db.executemany('INSERT INTO nats_digest_members VALUES (?,?,?,?)',
                            ((*self.key, message_id, member) for member in members))
@@ -579,9 +597,16 @@ async def receive_one(client, ledger, message, deliver, *, retry_delay=60):
     members = delivery_members(envelope, client.agent, len(message.data))
     message_id = envelope['id']
     fingerprint = delivery_fingerprint(envelope)
-    row = ledger.get(message_id, fingerprint, raw_fingerprint(envelope))
+    row = ledger.get(message_id, fingerprint, raw_fingerprint(envelope), members)
     if row is None:
-        turn = await asyncio.to_thread(deliver, envelope, fingerprint)
+        old_members = ledger.legacy_member_turns(members or [message_id])
+        if members and len(old_members) < len(members):
+            remaining = dict(envelope, items=[item for item in envelope['items'] if item['id'] not in old_members])
+            turn = await asyncio.to_thread(deliver, remaining, fingerprint)
+        elif old_members:
+            turn = next(iter(old_members.values()))
+        else:
+            turn = await asyncio.to_thread(deliver, envelope, fingerprint)
         if turn is None:
             await message.nak(delay=retry_delay)
             return False
@@ -732,9 +757,13 @@ async def post_saved(client, store, key, thread, envelope, *, replay=False):
         if result.get('id') != message_id or state not in ('queued', 'delivered', 'acked', 'refused', 'dropped'):
             raise BridgeError(f'Unexpected NATS send receipt; retry with --id {message_id}')
     except ControlRejected as error:
-        if not error.uncertain and not replay:
+        if not error.uncertain:
             with store.transaction() as db:
-                db.execute('UPDATE nats_outbox SET state=\'refused\' WHERE tenant=? AND agent=? AND id=? AND thread=?', args)
+                # Broker-specific denials stop consuming recovery slots on this
+                # broker while allowing a different primary to decide on promotion.
+                state = 'replay_refused' if replay else 'refused'
+                db.execute('UPDATE nats_outbox SET state=?,broker=? WHERE tenant=? AND agent=? AND id=? AND thread=?',
+                           (state, client.broker, *args))
         raise
     with store.transaction() as db:
         db.execute('UPDATE nats_outbox SET broker=?,state=? WHERE tenant=? AND agent=? AND id=? AND thread=?',
@@ -750,7 +779,7 @@ async def replay_outbox(client, ledger, expected_errors):
         db.execute('DELETE FROM nats_outbox WHERE saved_at <= ?', (now - OUTBOX_SECONDS,))
         rows = db.execute('''SELECT id,envelope FROM nats_outbox WHERE tenant=? AND agent=? AND thread=?
             AND COALESCE(state,'') NOT IN ('refused','dropped') AND broker IS NOT ? AND retry_after<=?
-            ORDER BY saved_at,id LIMIT 4''', (*ledger.key, ledger.thread, client.broker, now)).fetchall()
+            ORDER BY retry_after,saved_at,id LIMIT 4''', (*ledger.key, ledger.thread, client.broker, now)).fetchall()
         db.executemany('UPDATE nats_outbox SET retry_after=? WHERE tenant=? AND agent=? AND id=?',
                        ((now + 60, *ledger.key, row['id']) for row in rows))
     for row in rows:
