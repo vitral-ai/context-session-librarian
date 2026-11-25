@@ -78,8 +78,9 @@ type historyEntry struct {
 
 type historyRecord struct {
 	historyEntry
-	archived bool
-	sequence uint64
+	archived   bool
+	sequence   uint64
+	acceptedAt time.Time
 }
 
 func compareHistoryRecords(a, b historyRecord) int {
@@ -92,8 +93,15 @@ func compareHistoryRecords(a, b historyRecord) int {
 		}
 		return 1
 	}
-	if order := cmp.Compare(a.sequence, b.sequence); order != 0 {
-		return order
+	if a.archived {
+		if order := cmp.Compare(a.sequence, b.sequence); order != 0 {
+			return order
+		}
+	} else {
+		// Live publication sequence can change when a queued message is flushed.
+		if order := a.acceptedAt.Compare(b.acceptedAt); order != 0 {
+			return order
+		}
 	}
 	return strings.Compare(a.ID, b.ID)
 }
@@ -224,7 +232,7 @@ func (s *Service) historyRecords(ctx context.Context, caller, peer, id string) (
 		if historyMatches(record.Envelope, caller, peer, id) {
 			matches = append(matches, historyRecord{
 				historyEntry: historyEntry{Envelope: record.Envelope},
-				sequence:     record.Sequence,
+				acceptedAt:   record.AcceptedAt,
 			})
 		}
 	}

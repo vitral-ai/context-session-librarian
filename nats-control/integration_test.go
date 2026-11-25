@@ -256,6 +256,15 @@ func TestOperatorMode(t *testing.T) {
 		call(peer, "ctl.receipt.worker-a", sendResult{reply.ID, "acked"}, "")
 		tied := duplicate
 		tied.ID, tied.Kind, tied.ReplyTo = "10000000-0000-4000-8000-000000000002", "message", nil
+		queued := tied
+		queued.ID = randomID()
+		call(third, "ctl.settings.worker-b", map[string]string{"delivery": "grouped:15"}, "")
+		call(peer, "send.worker-a", queued, "")
+		waiting, _, err := readState[messageRecord](ctx, service.state, "message."+queued.ID)
+		if err != nil || waiting.Sequence != 0 {
+			t.Fatalf("fixture was not queued: %#v, %v", waiting, err)
+		}
+		call(third, "ctl.settings.worker-b", map[string]string{"delivery": "immediate"}, "")
 		earlier := tied
 		earlier.ID, earlier.CreatedAt = randomID(), stamp.Add(-time.Minute)
 		for _, message := range []Envelope{tied, earlier} {
@@ -287,8 +296,28 @@ func TestOperatorMode(t *testing.T) {
 				t.Fatalf("history before %q: got %v (next %q), want %v (next %q)", before, ids, page.NextBefore, want, next)
 			}
 		}
-		checkPage("", 2, reply.ID, reply.ID, tied.ID)
+		checkPage("", 1, tied.ID, tied.ID)
+		service.mu.Lock()
+		clock := service.clock
+		service.clock = func() time.Time { return waiting.ReadyAt }
+		service.mu.Unlock()
+		err = service.deliveryTick(ctx)
+		service.mu.Lock()
+		service.clock = clock
+		service.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		published, _, err := readState[messageRecord](ctx, service.state, "message."+queued.ID)
+		if err != nil || published.Sequence == 0 {
+			t.Fatalf("fixture did not leave the queue: %#v, %v", published, err)
+		}
+		checkPage(tied.ID, 2, reply.ID, reply.ID, queued.ID)
 		checkPage(reply.ID, 3, "", earlier.ID, row.ID, refused.ID)
+		call(third, "ctl.receipt.worker-b", sendResult{queued.ID, "acked"}, "")
+		if err := service.stream.DeleteMsg(ctx, published.Sequence); err != nil {
+			t.Fatal(err)
+		}
 		call(peer, "ctl.complete.worker-a", map[string]string{"with": "worker-b"}, "")
 		call(third, "ctl.complete.worker-b", map[string]string{"with": "worker-a"}, "")
 		if err := service.stream.DeleteMsg(ctx, saved.Sequence); err != nil {
