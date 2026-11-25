@@ -278,7 +278,7 @@ func TestOperatorMode(t *testing.T) {
 	call(peer, "ctl.settings.worker-a", map[string]string{"delivery": "immediate"}, "")
 	ci := fixtureConnect(t, url, "csl-ci", fixtureCredentials(t, account, "csl-ci", []string{"csl.vi.ci.>"}, nil))
 	noticeID := randomID()
-	if err := ci.Publish("csl.vi.ci.worker-a", []byte(`{"id":"`+noticeID+`","body":"fixture CI passed"}`)); err != nil {
+	if err := PublishCINotice(ctx, ci, "vi", "worker-a", []byte(`{"id":"`+noticeID+`","body":"fixture CI passed"}`)); err != nil {
 		t.Fatal(err)
 	}
 	notice, packet := receive("ci")

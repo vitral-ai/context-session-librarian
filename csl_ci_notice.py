@@ -4,10 +4,19 @@ import json
 import os
 import re
 import ssl
+import subprocess
 import urllib.request
 import uuid
 
 from csl_bridge_store import BridgeError, name
+
+
+def notice_target(branch, routes):
+    target = routes.get(branch)
+    if not target:
+        match = re.fullmatch(r'codex/([a-zA-Z0-9][a-zA-Z0-9_.-]*)/.+', branch)
+        target = match.group(1) if match else None
+    return target
 
 
 def notice_request(policy, notice):
@@ -32,10 +41,7 @@ def notice_request(policy, notice):
             not isinstance(k, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', k) or
             v not in ('success', 'failure', 'cancelled', 'skipped') for k, v in results.items()):
         raise BridgeError('Invalid notice job results')
-    target = policy.get('routes', {}).get(branch)
-    if not target:
-        match = re.fullmatch(r'codex/([a-zA-Z0-9][a-zA-Z0-9_.-]*)/.+', branch)
-        target = match.group(1) if match else None
+    target = notice_target(branch, policy.get('routes', {}))
     if not target:
         raise BridgeError('No agent mapping for PR branch; use codex/<agent>/...')
     name(target)
@@ -78,7 +84,7 @@ def workflow_notice(env):
 
 
 def current_head_allows_notice(notice, env):
-    """Skip known superseded runs; lookup failures must never lose a completion."""
+    """Return whether a run is current, or None when GitHub cannot verify it."""
     try:
         repo = notice['repository']
         if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo):
@@ -94,19 +100,15 @@ def current_head_allows_notice(notice, env):
             raise ValueError('Invalid PR head')
     except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException) as error:
         # Do not log credentials or response bodies. The notice retains run.head_sha.
-        print('Current PR head lookup failed (' + type(error).__name__ + '); sending exact-run notice')
-        return True
+        print('Current PR head lookup failed (' + type(error).__name__ + '); sending exact-run hub notice')
+        return None
     if head != notice['sha']:
         print('superseded by ' + head)
         return False
     return True
 
 
-def main():
-    env = os.environ
-    notice = workflow_notice(env)
-    if not current_head_allows_notice(notice, env):
-        return
+def post_hub(notice, env):
     context = ssl.create_default_context(cadata=env['CSL_HUB_CA_PEM'])
     url = env['CSL_HUB_URL']
     if not url.startswith('https://') or not url.endswith('/v1'):
@@ -119,6 +121,52 @@ def main():
     if not result.get('ok'):
         raise BridgeError('Hub refused completion notice')
     print('CSL notice ' + result['data']['id'] + ': ' + result['data']['state'])
+
+
+def post_nats(notice, env):
+    """Publish the same completion ID and text through the scoped NATS route."""
+    if not env.get('CSL_NATS_CI_CREDS') or notice['results'].get('completion') not in ('success', 'failure'):
+        return
+    try:
+        routes = json.loads(env.get('CSL_NATS_CI_ROUTES') or '{}')
+    except ValueError:
+        raise BridgeError('Invalid NATS CI routes') from None
+    if not isinstance(routes, dict) or any(not isinstance(target, str) for target in routes.values()):
+        raise BridgeError('Invalid NATS CI routes')
+    target = notice_target(notice['branch'], routes)
+    if not target or not re.fullmatch(r'[a-z0-9][a-z0-9-]{1,62}', target):
+        return
+    packet = notice_request({'repository': env['CSL_REPOSITORY'],
+                             'source': 'ci-notices', 'routes': routes}, notice)
+    child_env = {key: env[key] for key in ('CSL_NATS_CI_CREDS', 'CSL_NATS_CI_CA_PEM')}
+    command = [env['CSL_NATS_CI_PUBLISHER'], '--nats', env['CSL_NATS_CI_URL'],
+               '--tenant', env.get('CSL_NATS_CI_TENANT') or 'vi', '--agent', target]
+    payload = json.dumps({'id': packet['id'], 'body': packet['text']}).encode()
+    result = subprocess.run(command, input=payload, env=child_env, capture_output=True, timeout=20)
+    if result.returncode:
+        raise BridgeError('NATS refused completion notice')
+    print('CSL NATS notice ' + packet['id'] + ': published')
+
+
+def main():
+    env = os.environ
+    notice = workflow_notice(env)
+    current = current_head_allows_notice(notice, env)
+    if current is False:
+        return
+    if current is None or not env.get('CSL_NATS_CI_CREDS'):
+        post_hub(notice, env)
+        return
+    failed = []
+    for label, send in (('hub', post_hub), ('NATS', post_nats)):
+        try:
+            send(notice, env)
+        except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException,
+                subprocess.SubprocessError, BridgeError):
+            print('CSL ' + label + ' completion notice failed')
+            failed.append(label)
+    if failed:
+        raise BridgeError('Completion notice failed on: ' + ', '.join(failed))
 
 
 if __name__ == '__main__':
