@@ -218,6 +218,10 @@ has yet to be imported, or `--nats-config PATH` with `--to` and the full parent
 ID to pin a NATS reply. A reply with a short ID and no target must resolve
 uniquely across both histories.
 
+Before a NATS send or reply, the CLI reports unread messages from the recipient
+and lists their IDs on stderr. The send still proceeds if the unread lookup
+is unavailable.
+
 For Claude, add `"cli": "claude"`, `"mailbox_home": "/private/bridge/claude"`
 and `"claude_config": "/private/claude"` to the agent entry. Register the
 exact Claude session in the mailbox home. Run
