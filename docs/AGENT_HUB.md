@@ -124,8 +124,9 @@ Use `codex/<agent>/<topic>` for agent branches. Use exact branch overrides in
 `CSL_NATS_CI_ROUTES` for established branch names. The notifier skips an unmapped
 branch, and the control service quietly ignores an unregistered recipient.
 
-Store the scoped `CSL_NATS_CI_CREDS` credential in the `csl-ci-notices` environment,
-with the deployment branch restricted to the repository default. The credential
+Store `CSL_NATS_CI_CREDS` only in the `csl-ci-notices` environment. Keep no
+repository-level or organization-level copy. Allow only the single exact
+default branch as a deployment branch, without tags or wildcard rules. The credential
 can publish only to tenant CI subjects and has no subscriptions. The environment
 also holds `CSL_NATS_CI_URL`, `CSL_NATS_CI_CA_PEM` and `CSL_NATS_CI_ROUTES`.
 Configure the protected environment before setting credentials. The trusted job
