@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.error
 
 from csl_sync_state import SyncError, exclusive
-from csl_workload_auth import DEVICE_GRANT, MANAGED_AUDIENCE, WorkloadTokens
+from csl_workload_auth import CONNECT_ISSUER, DEVICE_GRANT, MANAGED_AUDIENCE, WorkloadTokens
 from csl_sync_http import HTTP
 from csl_workload_http import Origin, WorkloadHTTP
 from csl_workload_identity import AUDIENCE, CLIENT_ID, SCOPES, WorkloadKey, b64, canonical, metadata, public_key
@@ -152,6 +152,38 @@ class WorkloadAuthTests(unittest.TestCase):
         self.client().access_token(force_refresh=True)
         self.assertEqual(self.journal()['managed_assignment']['generation'], 4)
         self.assertEqual([kind for kind, _ in self.issuer.effects], ['managed', 'refresh'])
+
+    def test_connect_assignment_uses_same_form_with_distinct_issuer_binding(self):
+        client = self.client()
+        assertion = self.assignment(iss=CONNECT_ISSUER)
+        identity = client.connect_identity()
+        self.assertEqual(identity['public_jwk'], self.key.public()[0])
+        self.assertEqual(identity['workload_jkt'], b64(self.key.public()[1]))
+        self.assertEqual(identity['state'], 'signed_out')
+        with self.assertRaisesRegex(SyncError, 'workload_assignment_refused'):
+            client.enroll_managed(assertion)
+        with self.assertRaisesRegex(SyncError, 'workload_assignment_refused'):
+            client.enroll_connect(self.assignment())
+        self.assertEqual(self.issuer.calls, [])
+        client.enroll_connect(assertion)
+        self.client().enroll_connect(assertion)
+        self.assertEqual([kind for kind, _ in self.issuer.effects], ['managed'])
+        with self.assertRaisesRegex(SyncError, 'workload_identity_binding_changed'):
+            client.enroll_managed(self.assignment())
+        self.assertEqual(client.connect_identity()['state'], 'ready')
+        self.client().access_token(force_refresh=True)
+        self.assertEqual(self.journal()['managed_issuer'], CONNECT_ISSUER)
+        self.assertEqual([kind for kind, _ in self.issuer.effects], ['managed', 'refresh'])
+
+    def test_connect_identity_refuses_an_existing_pool_grant(self):
+        client = self.client()
+        client.enroll_managed(self.assignment())
+        self.assertNotIn('managed_issuer', self.journal())
+        with self.assertRaisesRegex(SyncError, 'workload_identity_binding_changed'):
+            client.connect_identity()
+        with self.assertRaisesRegex(SyncError, 'workload_identity_binding_changed'):
+            client.enroll_connect(self.assignment(iss=CONNECT_ISSUER))
+        self.assertEqual([kind for kind, _ in self.issuer.effects], ['managed'])
 
     def test_managed_enrollment_rejects_wrong_key_owner_and_other_generation(self):
         client = self.client()
