@@ -29,17 +29,17 @@ Use `csl light` for persistent pool communication: one reconnecting SSH stream p
 running environment, durable message IDs, and native Codex followup delivery.
 New bridge peers default to light; old per-request transports remain explicit,
 deprecated fallbacks. See the [one-page runbook](docs/LIGHT_RUNBOOK.md).
-This feature is in the development checkout, not the v0.4.2 tag below.
+This feature is included in v0.5.0; existing configured transports remain supported.
 
 ## Install
 
 Requires Linux and Python 3.11+. The core CLI uses only the Python standard
 library; no virtualenv or pip installation is needed. Confirm tag availability in
-the [v0.4.2 Release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.4.2)
+the [v0.5.0 Release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.5.0)
 before using the tagged installation below.
 
 ```bash
-git clone --branch v0.4.2 https://github.com/vitral-ai/context-session-librarian.git context-session-librarian
+git clone --branch v0.5.0 https://github.com/vitral-ai/context-session-librarian.git context-session-librarian
 cd context-session-librarian
 ./install.sh
 csl --version
@@ -55,7 +55,7 @@ Context Session Librarian was previously named Codex Session Librarian; the
 Opening a conversation requires its native CLI and your own authentication.
 Local search and ZIP transfers need no GitHub account or paid model calls.
 Team exchange additionally requires [GitHub CLI](https://cli.github.com/).
-For development, clone without `--branch v0.4.2` in a separate directory;
+For development, clone without `--branch v0.5.0` in a separate directory;
 see [release history](CHANGELOG.md) for published changes.
 
 ## Find And Reopen A Conversation
