@@ -8,9 +8,24 @@ The version records below refer to their original published tags, which are unch
 
 ## Version records
 
-### v0.5.0 — collector release candidate
+### v0.5.1 — collector UX release candidate
 
-Luis's B4 release commission selects the reviewed main containing collector #132.
+This patch selects reviewed main including #134: first-run upload choices,
+short/verbose/JSON status, progress with background-service guidance, and explicit
+sign-in recovery including headless callback settings. Existing authentication,
+selections and uploaded sessions remain intact. It also includes reviewed native
+validation and private FD9 fixture corrections (#135–#137).
+
+Publish only after independent release review, exact-head hosted checks and
+isolated native validation pass. Record the final commit, immutable source archive
+URL, byte count and SHA-256 in the GitHub Release, then verify a fresh tagged
+installation. Source distribution still requires Python 3.11+ and starts no service.
+No Mac missing-session fix or new native continuation claim is included.
+
+### v0.5.0 — published collector release
+
+Published from fa6f8c7232ec6f7970d72a9cbdcd2d56ec52b8cf with collector #132.
+The later #134 UX is included in v0.5.1, not this fixed v0.5.0 source.
 The source version is 0.5.0. Publish an annotated tag only after exact-head hosted
 checks and independent review pass. Record the final source SHA, immutable archive
 URL, byte count and SHA-256 in the GitHub Release for the guided installer.
