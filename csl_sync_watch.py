@@ -16,6 +16,66 @@ LOCK_ENV = 'CSL_SYNC_PASS_LOCK_FD'
 AUTH_ERRORS = {'sign_in_required', 'credential_revoked', 'session_revoked', 'refresh_outcome_unknown'}
 
 
+def process_birth(pid):
+    """Exact OS process incarnation, or None; never fall back to kill(pid, 0)."""
+    if type(pid) is not int or pid <= 0: return None
+    try:
+        if sys.platform.startswith('linux'):
+            fields = Path('/proc', str(pid), 'stat').read_text().rsplit(')', 1)[1].split()
+            if fields[0] in ('Z', 'X'): return None
+            boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+            return ['linux', boot, fields[19]]
+        if WINDOWS:
+            import ctypes
+            from ctypes import wintypes
+            kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+            kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel.OpenProcess.restype = wintypes.HANDLE
+            kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+            kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            handle = kernel.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+            if not handle: return None
+            try:
+                created, exited, system, user = (wintypes.FILETIME() for _ in range(4))
+                code = wintypes.DWORD()
+                if (not kernel.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != 259 or
+                        not kernel.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited),
+                                                   ctypes.byref(system), ctypes.byref(user))):
+                    return None
+                return ['windows', (created.dwHighDateTime << 32) | created.dwLowDateTime]
+            finally:
+                kernel.CloseHandle(handle)
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+@contextmanager
+def watch_owner(state):
+    """Publish and clear before the enclosing installation lock is released."""
+    record = {'pid': os.getpid(), 'birth': process_birth(os.getpid())}
+    state.set('watch_owner', record)
+    try:
+        yield
+    finally:
+        state.set('watch_owner', None)
+
+
+def watch_pid(state):
+    record = state.get('watch_owner')
+    if not isinstance(record, dict) or not record.get('birth'): return None
+    pid = record.get('pid')
+    if process_birth(pid) != record['birth']: return None
+    try:
+        with exclusive(state.root): return None
+    except SyncError as error:
+        if error.code != 'collector_busy': raise
+    # Do not combine an earlier lock observation with a replacement owner.
+    if state.get('watch_owner') != record or process_birth(pid) != record['birth']: return None
+    return pid
+
+
 def history_notification(provider, filename):
     parts = PureWindowsPath(filename.casefold()).parts
     if not parts:
@@ -117,7 +177,7 @@ def watch(args, state, hints):
         notifications = DirectoryChanges(roots, lambda root, filename:
                                          any(history_notification(p, filename) for p in roots[root]))
     try:
-        with exclusive(state.root) as fd, notifications as changes:
+        with exclusive(state.root) as fd, watch_owner(state), notifications as changes:
             state.set('lock_action', 'watch')
             while True:
                 started = time.monotonic()

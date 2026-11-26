@@ -116,6 +116,14 @@ include explicit opt-outs not yet scanned. Status does no network or transcript
 reads. When a collector holds its installation lock, the status view says you
 can close it; closing a foreground **watch** still stops that collector.
 
+`collector.watch_pid` is optional: it identifies the foreground watch supervisor,
+not its pass worker or a platform service by name. It is emitted only with a busy
+installation lock and a matching live OS process creation identity. Linux uses
+boot ID plus process start ticks; Windows uses process creation time. Unsupported
+or inaccessible process identity (currently including macOS) omits the field.
+Installers must compare it to their actual service PID, not infer service ownership
+from `running`. Status is a point-in-time observation, not a process lease.
+
 Explicit native titles are preserved. Otherwise session titles use the first real
 user text, skipping known native bootstrap, instruction and tool-result records,
 with the native ID as the fallback. Raw transcripts are never changed.
