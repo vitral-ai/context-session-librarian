@@ -1,4 +1,4 @@
-"""Release identity, independent of bundle and canonical format versions."""
+"""Release identity for CSL 0.5.1, independent of bundle and canonical formats."""
 
 import re
 import subprocess
