@@ -238,3 +238,12 @@ clave pública JWK y su huella. Pasa la aserción firmada de Vitral Connect a
 `--enroll-connect` por la entrada estándar. Usa el estado privado del mismo
 entorno para ambos comandos. Los comandos del pool siguen validando su propio
 emisor.
+### Dos agentes en un entorno administrado
+
+La configuración normal de Codex puede definir también
+`VITRAL_COLLECTOR_CLAUDE_TRANSCRIPT_ROOT` con el directorio absoluto de
+transcripciones de Claude. Monta solo los directorios de transcripciones, cada
+uno por separado y en modo de solo lectura. Ambas fuentes usan el mismo registro
+administrado y conservan sus versiones y filtros de formato individuales.
+La opción requiere un estado nuevo del supervisor cuando se activa por primera
+vez. No copies el estado de registro de otro entorno.
