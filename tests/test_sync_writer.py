@@ -388,3 +388,32 @@ class WriterTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 2)
         with self.assertRaisesRegex(SyncError, 'writer_request_conflict'):
             self.writer.acquire('codex', 'native', **dict(returned, request_id=str(uuid.uuid4())))
+
+    def test_return_acquire_sqlite_failure_keeps_released_fence_and_retries(self):
+        from csl_sync_writer import save_fence, profile_binding
+        self.writer.acquire('codex', 'native', **self.binding)
+        self.writer.published('codex', 'native')
+        local = self.state.session('codex', 'native')
+        local['writer']['state'] = 'released'
+        self.state.save_session('codex', 'native', local)
+        save_fence('codex', 'native', 'released', profile_binding(self.state))
+        returned = dict(self.binding, generation=2, snapshot='later-snapshot', request_id=str(uuid.uuid4()))
+        self.response = dict(state='active', device_id=self.device, generation=3)
+        with patch.object(self.state, 'save_session', side_effect=OSError('synthetic SQLite failure')), self.assertRaises(OSError):
+            self.writer.acquire('codex', 'native', **returned)
+        self.assertEqual(self.state.session('codex', 'native')['writer']['state'], 'released')
+        self.assertEqual(read_fence('codex', 'native')['state'], 'released')
+        self.assertEqual(len(self.calls), 1)
+        # A crash after the journal commit but before fence replacement is
+        # also recoverable, and the committed request cannot be substituted.
+        with patch('csl_sync_writer.save_fence', side_effect=OSError('synthetic fence failure')), self.assertRaises(OSError):
+            self.writer.acquire('codex', 'native', **returned)
+        self.assertEqual(self.state.session('codex', 'native')['writer']['state'], 'pending')
+        self.assertEqual(read_fence('codex', 'native')['state'], 'released')
+        with self.assertRaisesRegex(SyncError, 'writer_request_conflict'):
+            self.writer.acquire('codex', 'native', **dict(returned, request_id=str(uuid.uuid4())))
+        with self.assertRaisesRegex(SyncError, 'writer_fenced'):
+            write_headers(self.state, 'codex', 'native', self.api)
+        result = self.writer.acquire('codex', 'native', **returned)
+        self.assertEqual(result['generation'], 3)
+        self.assertEqual(len(self.calls), 2)

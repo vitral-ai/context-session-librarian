@@ -151,7 +151,12 @@ class Writer:
                     type(previous.get('generation')) is not int or generation < previous['generation'] or
                     self.attest(expected_device) != account_id):
                 raise SyncError('writer_fenced')
-            previous = None
+            # The old released fence already forbids launch. Commit the new
+            # exact request before replacing it, so a failed SQLite write
+            # cannot leave a pending fence beside the old released journal.
+            local['writer'] = dict(binding, state='pending')
+            self.state.save_session(provider, identifier, local)
+            previous = local['writer']
         if previous and any(previous.get(key) != value for key, value in binding.items()):
             raise SyncError('writer_request_conflict')
         if previous and previous.get('state') in ('publishing', 'active'):
