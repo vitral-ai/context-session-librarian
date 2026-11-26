@@ -47,6 +47,8 @@ def recovery_action(state, settings, authentication):
         argv.append('--manual-browser')
     if type(settings.get('callback_port')) is int:
         argv.extend(['--callback-port', str(settings['callback_port'])])
+    if type(settings.get('refresh_replay_grace_seconds')) is int:
+        argv.extend(['--refresh-replay-grace-seconds', str(settings['refresh_replay_grace_seconds'])])
     instructions = None
     if 'manual_browser' not in settings or 'callback_port' not in settings:
         instructions = 'On a headless host, add --manual-browser --callback-port PORT and forward that loopback port to your browser.'
@@ -197,6 +199,11 @@ def command(args, csl):
                             'callback_port': getattr(args, 'callback_port', 0)}
                 state.set('settings', settings)
                 settings.update(discover(settings['discovery_url']))
+                requested_grace = args.refresh_replay_grace_seconds
+                advertised_grace = settings.get('refresh_replay_grace_seconds')
+                settings['refresh_replay_grace_seconds'] = (
+                    min(requested_grace, advertised_grace) if requested_grace is not None and advertised_grace is not None
+                    else requested_grace if requested_grace is not None else advertised_grace or 0)
                 state.set('settings', settings)
                 options = {'device_id': state.get('device_id'), 'device_label': args.label,
                            'callback_port': getattr(args, 'callback_port', 0),
@@ -354,8 +361,8 @@ def add_commands(subparsers, csl):
     signin.add_argument('--client-id', required=True, help='Registered public PKCE client; no client secret.')
     signin.add_argument('--scope', default='session_sync offline_access')
     signin.add_argument('--audience')
-    signin.add_argument('--refresh-replay-grace-seconds', type=grace, default=0,
-                        help='Default 0: never replay an uncertain rotating refresh. Opt in only to a documented issuer grace policy.')
+    signin.add_argument('--refresh-replay-grace-seconds', type=grace, default=None,
+                        help='Limit issuer-advertised successor replay; 0 opts out. If omitted, use discovery (otherwise 0). Set a nonzero value only for a documented issuer policy.')
     signin.add_argument('--label', default='CSL device')
     signin.add_argument('--kind', choices=['local','environment'], default='local')
     signin.add_argument('--environment-name')

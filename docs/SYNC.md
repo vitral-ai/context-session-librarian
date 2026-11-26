@@ -52,6 +52,8 @@ configured at sign-in with `--refresh-replay-grace-seconds 30` (maximum 30; defa
 That recovery is bounded to one replay within the recorded window. Otherwise
 `refresh_outcome_unknown` requires a new browser sign-in. `invalid_grant` or
 revocation clears stored credentials and stops collection.
+An explicit replay limit takes the smaller of the flag and advertised policy;
+`--refresh-replay-grace-seconds 0` always opts out, including in sign-in recovery.
 
 ## Budgeted collector passes
 

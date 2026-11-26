@@ -183,6 +183,27 @@ class CLITests(unittest.TestCase):
             providers.assert_not_called()
         self.assertIn('including any secrets',err.getvalue());self.assertFalse(json.loads(out.getvalue())['sync_started'])
 
+    def test_real_parser_signin_preserves_explicit_replay_limits(self):
+        from codex_sessions import build_parser
+        for index, (flag, advertised, expected) in enumerate([
+                (None, 30, 30), (0, 30, 0), (10, 30, 10), (30, 10, 10),
+                (None, None, 0), (10, None, 10)]):
+            with self.subTest(flag=flag, advertised=advertised):
+                home=self.root/str(index)
+                argv=['sync','--home',str(home),'sign-in','--endpoint','https://registry.example.test/v1',
+                      '--discovery-url','https://identity.example.test/discovery','--client-id','fixture']
+                if flag is not None: argv+=['--refresh-replay-grace-seconds',str(flag)]
+                args=build_parser().parse_args(argv)
+                discovered={'authorization_endpoint':'https://identity.example.test/authorize',
+                            'token_endpoint':'https://identity.example.test/token'}
+                if advertised is not None: discovered['refresh_replay_grace_seconds']=advertised
+                with patch('csl_sync.discover',return_value=discovered), patch('csl_sync.Tokens.sign_in',return_value={'signed_in':True}), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    command(args,None)
+                state=State(home)
+                try:
+                    self.assertEqual(state.get('settings')['refresh_replay_grace_seconds'],expected)
+                finally: state.close()
+
     def test_manual_browser_url_is_private_not_logged_and_removed_after_flow(self):
         args=argparse.Namespace(sync_home=self.home,sync_action='sign-in',endpoint='http://127.0.0.1:1/v1',
             client_id='public-client',discovery_url='http://127.0.0.1:1/discovery',scope='session_sync offline_access',
