@@ -115,56 +115,27 @@ CLI-specific authorization. Existing SSH routes may remain as an opt-in fallback
 ## PR completion notices
 
 A default-branch `workflow_run` handler calls the pinned reusable
-`pr-completion-notice.yml` job after a reviewed CI workflow completes. It runs on
-GitHub-hosted runners without executing PR code or consuming its artifacts. Each
-completion posts once using GitHub's PR/run metadata and overall conclusion.
-The notice identifies the workflow, PR head and run link, rather than claiming
-that unrelated workflows have finished. Forks receive no notice secret.
+`pr-completion-notice.yml` job after a reviewed PR workflow completes. The job
+uses GitHub PR/run metadata and the overall success or failure. It builds the
+publisher from a trusted checkout pinned to a full SHA. The notice identifies
+the workflow, exact PR head and run attempt URL. A rerun has its own notice ID.
 
-Use `codex/<hub-agent-name>/<topic>` for agent branches. For existing branches,
-the hub owner can add an exact `routes: {"branch": "agent"}` mapping to that
-repository's notice credential. The destination must be registered and allowed
-from `ci-notices`. Unknown branches refuse clearly; they never default to the
-coordinator or another agent.
+Use `codex/<agent>/<topic>` for agent branches. Use exact branch overrides in
+`CSL_NATS_CI_ROUTES` for established branch names. The notifier skips an unmapped
+branch, and the control service quietly ignores an unregistered recipient.
 
-Each repository stores `CSL_HUB_NOTICE_TOKEN` ONLY in environment
-`csl-ci-notices`, with custom deployment branches allowing only the default
-branch (`main`, or `development` for vitral_landing). No repository-level copy, PR refs, tags or wildcard policies are
-allowed. A candidate workflow naming this environment is rejected by GitHub, not
-merely by an editable YAML condition. Configure this policy before storing the
-secret, and verify it on readback. Each repository also has public variables
-`CSL_HUB_URL` (HTTPS `/v1`) and `CSL_HUB_CA_PEM` (pinned certificate). Its token hash
-is a hub machines entry with `scope: notices`, `repository: owner/repo`,
-`source: ci-notices`, `source_machine: laptop` and optional `routes`. This token
-can only post structured completion metadata for that repository: no arbitrary
-text, mailbox reads, agent registration, approvals or delivery acknowledgments.
-The hub constructs the text and the UUID from repository/run/attempt, so retries
-cannot duplicate a completion. An intentional GitHub rerun gets a new notice.
-A notice failure is visible in its job log but does not change the CI verdict.
+Store the scoped `CSL_NATS_CI_CREDS` credential in the `csl-ci-notices` environment,
+with the deployment branch restricted to the repository default. The credential
+can publish only to tenant CI subjects and has no subscriptions. The environment
+also holds `CSL_NATS_CI_URL`, `CSL_NATS_CI_CA_PEM` and `CSL_NATS_CI_ROUTES`.
+Configure the protected environment before setting credentials. The trusted job
+uses a separate read-only GitHub token to check the current PR head once.
+It skips a superseded head and keeps the exact run head if the lookup fails.
 
-
-During the NATS migration a protected notifier may also publish the same
-completion ID and text. The NATS path accepts success and failure outcomes.
-Both paths skip a known superseded run. On a head lookup failure they send
-the exact run head and URL. The NATS copy uses the repo's exact
-`CSL_NATS_CI_ROUTES` branch overrides, then the normal `codex/<agent>/...`
-route. Missing routes are skipped and the control service quietly drops an
-unregistered recipient.
-
-The NATS credential belongs in `csl-ci-notices` as `CSL_NATS_CI_CREDS`
-under the same default-branch policy. It may only publish to the tenant's CI
-subjects and has no subscriptions. The trusted notifier builds
-`nats-control/cmd/csl-ci-notice` from the same reviewed checkout and provides
-its path, public TLS URL and pinned CA as `CSL_NATS_CI_PUBLISHER`,
-`CSL_NATS_CI_URL` and `CSL_NATS_CI_CA_PEM`. With the NATS credential absent,
-the notifier keeps the original hub-only path.
-
-To revoke a credential, remove its entry from the hub machines file, reload the
-existing hub service, then `gh secret delete CSL_HUB_NOTICE_TOKEN --env csl-ci-notices -R owner/repo`.
-No machine login token is used by GitHub Actions. There is no polling job or new
-service. Pin reusable workflow references and its trusted client to full SHAs.
-
-Completion notices read the current PR head once before posting. A different head skips the superseded notice; a failed lookup still posts the exact completed run head. The lookup uses GitHub read-only PR metadata access; notice credentials and hub delivery stay unchanged.
+The NATS-only pin publishes through `nats-control/cmd/csl-ci-notice`. Publication
+failure fails the notifier job. Repositories still on the older dual-delivery
+pin can publish to NATS after a failed Hub request, but the obsolete request can
+fail the notifier run until the caller is repinned.
 
 Direct bridge tasks retain their full bodies because they have no hub-history fallback. Hub Codex messages use previews; Claude durable mail retains its legacy full-body fingerprint across upgrades. An unavailable native wake does not unset durable mailbox delivery; the hook remains eligible.
 
