@@ -36,6 +36,27 @@ class HistoryTests(unittest.TestCase):
         self.assertTrue(rows[0]['time'])
         self.assertEqual(self.history(partner=None, id=first), rows[:1])
 
+    def test_compact_delivery_full_uuid_resolves_through_history_cli(self):
+        from csl_bridge_store import compact_message
+        self.allow()
+        mid = self.send(text='full history body')['id']
+        preview = compact_message('claude', mid, 'full history body')
+        self.assertIn('(' + mid[:8] + '):', preview)
+        self.assertNotIn(mid, preview)
+        parser = argparse.ArgumentParser()
+        csl_agents.add_commands(parser.add_subparsers(), None)
+        args = parser.parse_args(['agents', 'history', '--id', mid, '--from', 'client'])
+        output = io.StringIO()
+        def call(_settings, request):
+            return self.do('remote', **request)
+        with patch('csl_agents.config', return_value={}), \
+             patch('csl_agents.call', side_effect=call), \
+             contextlib.redirect_stdout(output):
+            csl_agents._execute(args)
+        rows = __import__('json').loads(output.getvalue())['messages']
+        self.assertEqual(rows[0]['id'], mid)
+        self.assertEqual(rows[0]['body'], 'full history body')
+
     def test_private_pair_and_owner(self):
         self.allow(); mid = self.send()['id']
         with self.assertRaises(BridgeError):

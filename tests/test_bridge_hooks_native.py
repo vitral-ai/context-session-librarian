@@ -73,7 +73,7 @@ if output:
                      'Set CSL_RUN_CODEX_NATIVE_TESTS=1 for the isolated native hook gate')
 @unittest.skipUnless(os.name == 'posix', 'Native hook fixture uses POSIX commands')
 class NativeHookTests(unittest.TestCase):
-    def test_native_four_boundaries_headers_stop_guard_without_ack_or_task(self):
+    def test_native_four_boundaries_compact_stop_guard_without_ack_or_task(self):
         executable = shutil.which('codex')
         if executable is None:
             self.skipTest('Codex CLI is not installed')
@@ -200,16 +200,19 @@ request_max_retries=0
                 for event, index in [('SessionStart', 0), ('UserPromptSubmit', 0),
                                      ('PostToolUse', 1), ('Stop', 2)]:
                     call = next(c for c in calls if c['event'] == event)
-                    self.assertIn(call['message_id'], encoded[index], (event, detail))
+                    self.assertIn('CSL from sender (' + call['message_id'][:8] + '):', encoded[index], (event, detail))
+                    self.assertIn('SYNTHETIC_BODY_' + event, encoded[index], (event, detail))
+                    self.assertNotIn(call['message_id'], encoded[index], (event, detail))
                 stops = [c for c in calls if c['event'] == 'Stop']
                 self.assertIs(stops[0]['payload']['stop_hook_active'], False)
                 self.assertIs(stops[1]['payload']['stop_hook_active'], True)
                 self.assertEqual(stops[1]['output'], '')
-                self.assertTrue(all('SYNTHETIC_BODY_' not in value for value in encoded))
                 self.assertIn('CSL_SYNTHETIC_TOOL', encoded[1])
                 with sqlite3.connect(root / 'bridge/bridge.sqlite') as db:
                     self.assertEqual(db.execute('SELECT count(*) FROM mail_messages WHERE acknowledged_at IS NOT NULL').fetchone()[0], 0)
                     self.assertEqual(db.execute('SELECT count(*) FROM tasks').fetchone()[0], 0)
+                    stored_ids = {row[0] for row in db.execute('SELECT id FROM mail_messages')}
+                    self.assertEqual(stored_ids, {call['message_id'] for call in calls})
             finally:
                 server.shutdown()
                 server.server_close()
