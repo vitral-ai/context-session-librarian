@@ -786,7 +786,7 @@ def main(argv=None):
             print(json.dumps(tokens.connect_identity(), separators=(',', ':')))
             return 0
         if argv == ['--connect-runtime']:
-            from csl_workload_connect import enroll_runtime
+            from csl_workload_connect import enroll_runtime, reservation_from_environment
             config = Configuration.from_environment(os.environ)
             try:
                 report = enroll_runtime(
@@ -795,6 +795,7 @@ def main(argv=None):
                     host_state=Path(os.environ['VITRAL_TUNNEL_HOME']),
                     host_binary=os.environ.get('VITRAL_HOST_BINARY', 'vitral-host'),
                     host_kind=os.environ.get('VITRAL_TUNNEL_KIND', 'ssh'),
+                    expected=reservation_from_environment(os.environ),
                 )
             except SyncError as error:
                 report = {'enrolled': False, 'error': error.code}
