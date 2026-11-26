@@ -739,6 +739,12 @@ def main(argv=None):
                 tokens.enroll_managed(sys.stdin.buffer.read(8193).decode('ascii'))
             print(json.dumps(tokens.managed_identity(), separators=(',', ':')))
             return 0
+        if argv in (['--connect-identity'], ['--enroll-connect']):
+            tokens = enrollment_tokens(Configuration.from_environment(os.environ))
+            if argv == ['--enroll-connect']:
+                tokens.enroll_connect(sys.stdin.buffer.read(8193).decode('ascii'))
+            print(json.dumps(tokens.connect_identity(), separators=(',', ':')))
+            return 0
         if len(argv) in (4, 5) and argv[0] == '--worker':
             worker_main(argv[1], int(argv[2]), float(argv[3]), int(argv[4]) if len(argv) == 5 else None); return 0
         if argv and argv[0] != '--': raise SyncError('workload_command_refused')

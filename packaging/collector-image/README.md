@@ -232,3 +232,9 @@ signed collector assertion on standard input to `--enroll-managed`. Both
 commands print only the workload thumbprint and local enrollment state. The
 collector keeps the resulting registry credential in its private state and uses
 the regular runner for collection and refresh.
+
+Para un entorno de Vitral Connect usa `--connect-identity` para obtener la
+clave pública JWK y su huella. Pasa la aserción firmada de Vitral Connect a
+`--enroll-connect` por la entrada estándar. Usa el estado privado del mismo
+entorno para ambos comandos. Los comandos del pool siguen validando su propio
+emisor.
