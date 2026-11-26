@@ -118,6 +118,7 @@ def watch(args, state, hints):
                                          any(history_notification(p, filename) for p in roots[root]))
     try:
         with exclusive(state.root) as fd, notifications as changes:
+            state.set('lock_action', 'watch')
             while True:
                 started = time.monotonic()
                 try:

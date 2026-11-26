@@ -131,6 +131,21 @@ def _repository(cwd):
     return {'remote_url': remote, 'branch': git('symbolic-ref', '--short', 'HEAD')}
 
 
+def _user_title(record, content):
+    """Ignore known native bootstrap records, not arbitrary words in user prose."""
+    if record.get('isMeta') or record.get('isCompactSummary'):
+        return None
+    if isinstance(content, list):
+        content = [part for part in content if isinstance(part, dict) and part.get('type') in ('text', 'input_text')]
+    text = _text(content).strip()
+    bootstrap = ('# AGENTS.md instructions', '<environment_context>',
+                 '<INSTRUCTIONS>', '<system-reminder>', '<local-command-caveat>',
+                 '<command-name>', '<local-command-stdout>')
+    if not text or text.startswith(bootstrap):
+        return None
+    return text[:200]
+
+
 def _metadata(provider, path, root, active_seconds, files=None, *, evidence=None):
     if provider == 'antigravity':
         try:
@@ -142,7 +157,7 @@ def _metadata(provider, path, root, active_seconds, files=None, *, evidence=None
                     'state':'active' if datetime.now(timezone.utc).timestamp()-modified<=active_seconds else 'idle'}
         except (csl_antigravity.FormatError,OSError) as error:
             raise ProviderError(str(error) if isinstance(error,csl_antigravity.FormatError) else 'source_unavailable') from None
-    sid = title = cwd = created = updated = model = parent = None
+    sid = title = first_user_title = cwd = created = updated = model = parent = None
     if provider=='claude':sid=path.stem
     if provider=='codex':
         ids=csl_codex_history.identity(path)
@@ -167,8 +182,8 @@ def _metadata(provider, path, root, active_seconds, files=None, *, evidence=None
                 model = payload.get('model') or model
             if record.get('type') == 'event_msg' and payload.get('type') == 'thread_name_updated':
                 title = payload.get('thread_name') or title
-            if not title and payload.get('type') == 'message' and payload.get('role') == 'user':
-                title = _text(payload.get('content'))[:200]
+            if not first_user_title and payload.get('type') == 'message' and payload.get('role') == 'user':
+                first_user_title = _user_title(record, payload.get('content'))
             source = record.get('csl_source_session_id') or payload.get('csl_source_session_id')
         else:
             candidate = record.get('sessionId') or record.get('session_id')
@@ -178,8 +193,8 @@ def _metadata(provider, path, root, active_seconds, files=None, *, evidence=None
             message = record.get('message', {})
             if isinstance(message, dict):
                 model = message.get('model') or model
-                if not title and record.get('type') == 'user':
-                    title = _text(message.get('content'))[:200]
+                if not first_user_title and record.get('type') == 'user':
+                    first_user_title = _user_title(record, message.get('content'))
             source = record.get('csl_source_session_id')
             fork = record.get('forkedFrom')
             if isinstance(fork, dict):
@@ -199,7 +214,7 @@ def _metadata(provider, path, root, active_seconds, files=None, *, evidence=None
     modified = max((Path(f['path']).stat().st_mtime for f in files), default=path.stat().st_mtime)
     state = 'archived' if 'archived_sessions' in path.relative_to(root).parts else (
         'active' if datetime.now(timezone.utc).timestamp() - modified <= active_seconds else 'idle')
-    return {'provider': provider, 'native_id': sid, 'title': (title or sid)[:200], 'cwd': cwd,
+    return {'provider': provider, 'native_id': sid, 'title': (first_user_title or title or sid)[:200], 'cwd': cwd,
             'repository': _repository(cwd), 'created_at': created, 'updated_at': updated,
             'model': model, 'record_count': count,
             'byte_count': sum(f['complete_length'] for f in files),

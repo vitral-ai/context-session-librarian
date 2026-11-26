@@ -165,12 +165,15 @@ class State:
 
     def status(self):
         rows = []
+        selected = self.get('selected_sessions')
         for provider, native_id, raw in self.db.execute('SELECT provider,native_id,data FROM sessions ORDER BY provider,native_id'):
             item = json.loads(raw)
             rows.append({'provider': provider, 'native_id': display_id(native_id), 'status': item.get('status'),
                          'synced_bytes': sum(f.get('offset', 0) for f in item.get('files', {}).values()),
                          'planned_bytes': sum(f.get('length', 0) for f in item.get('files', {}).values()),
                          'last_synced_at': item.get('last_synced_at'), 'last_error': item.get('last_error'),
-                         'included': self.selection(provider, native_id)})
+                         'included': self.selection(provider, native_id),
+                         'selected': (self.selection(provider, native_id) if self.selection(provider, native_id) is not None else
+                                      selected is None or [provider, native_id] in selected)})
         return {'device_id': self.get('device_id'), 'last_error': self.get('last_error'),
                 'last_pass_at': self.get('last_pass_at'), 'sessions': rows}
