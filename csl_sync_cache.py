@@ -12,7 +12,8 @@ import shutil
 import sqlite3
 import time
 
-from csl_sync_fs import change_time, check_work, open_read, open_stream, protect_fd, protect_path, reparse
+from csl_sync_fs import (PassYield, WorkBudget, work_budget, change_time, check_work,
+                         open_read, open_stream, protect_fd, protect_path, reparse)
 from csl_sync_state import SyncError, private_directory, private_json, read_private_json
 
 EMPTY = hashlib.sha256(b'').hexdigest()
@@ -125,6 +126,43 @@ class CachedProviders:
                 for row in copies[1:]: rows.remove(row)
         return rows
 
+    def legacy_identity(self, path, home):
+        """Read just through session_meta, billed to this file, not its peer.
+
+        Unchanged verified IDs survive collector processes. Long preambles keep
+        their last complete record position so a bounded preflight can resume.
+        The last record may be re-read; individual records remain capped at 8 MiB.
+        """
+        stamp = self.fingerprint([path], home)
+        key = hashlib.sha256(encoded(['legacy-identity', str(home), str(path)])).hexdigest()
+        cache_path = self.root / (key + '.identity.json')
+        saved = read_private_json(cache_path) or {}
+        if saved.get('fingerprint') != stamp:
+            saved = {'fingerprint': stamp, 'offset': 0, 'seconds': 1}
+        if saved.get('complete'):
+            return saved.get('native_id')
+        sid = None
+        try:
+            # Two maximum-size records permit progress even when the resumed
+            # record is repeated. Never consume the caller's upload allowance.
+            with work_budget(WorkBudget(saved['seconds'], 16*1024*1024 + 2)):
+                for record, offset in self.module._lines(path, start_offset=saved['offset']):
+                    saved['offset'] = offset
+                    payload = record.get('payload')
+                    if record.get('type') == 'session_meta' and isinstance(payload, dict):
+                        sid = payload.get('id') or payload.get('session_id')
+                        if sid: break
+        except PassYield:
+            saved['seconds'] = min(30, saved['seconds'] * 2)
+            if self.fingerprint([path], home) == stamp:
+                private_json(cache_path, saved)
+            raise
+        if self.fingerprint([path], home) != stamp:
+            raise SyncError('source_changed')
+        saved.update(complete=True, native_id=sid if isinstance(sid, str) else None)
+        private_json(cache_path, saved)
+        return saved['native_id']
+
     def unique_identity(self, provider, candidate, native_id):
         """Resolve legacy filename hints before any upload, including aliases.
 
@@ -142,11 +180,7 @@ class CachedProviders:
                     match = re.search(r'([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$', path.stem)
                     sid = path.stem if provider != 'codex' else ids[0] if ids else match.group(1) if match else None
                     if sid is None:
-                        for record, _ in self.module._lines(path):
-                            payload = record.get('payload')
-                            if record.get('type') == 'session_meta' and isinstance(payload, dict):
-                                sid = payload.get('id') or payload.get('session_id')
-                                if sid: break
+                        sid = self.legacy_identity(path, home)
                     if isinstance(sid, str): identities.setdefault(sid, []).append(path)
                 except (OSError, self.module.ProviderError):
                     # A malformed peer is isolated, never treated as this session.

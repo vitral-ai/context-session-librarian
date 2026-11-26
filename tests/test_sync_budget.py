@@ -138,6 +138,86 @@ class BudgetTests(unittest.TestCase):
                 self.assertNotIn(('codex',sid),self.state.tracked())
                 first.unlink(); second.unlink()
 
+    def test_large_legacy_metadata_does_not_spend_small_upload_budget(self):
+        legacy, path = self.transcript(created='2001-01-01T00:00:00Z')
+        old = path.with_name('old-format.jsonl'); path.rename(old)
+        records = old.read_text().splitlines()
+        header = json.loads(records[0]); header['payload']['padding'] = 'x' * 131072
+        old.write_text(json.dumps(header) + '\n' + records[1] + '\n')
+        small, _ = self.transcript()
+        result = self.collector.run(days=None, providers=('codex',), budget_bytes=32768)
+        rows = {row['native_id']: row for row in result['sessions']}
+        self.assertEqual(rows[small]['status'], 'synced', result)
+        self.assertEqual(result['errors'], 0, result)
+        self.assertEqual(result['deferred'], 1, result)
+        self.assertNotIn(('codex', legacy), self.state.tracked())
+
+    def test_legacy_identity_cached_by_file_fingerprint_and_own_budget(self):
+        sid, path = self.transcript()
+        old = path.with_name('old-format.jsonl'); path.rename(old)
+        records = old.read_text().splitlines()
+        header = json.loads(records[0]); header['payload']['padding'] = 'x' * 131072
+        old.write_text(json.dumps(header) + '\n' + records[1] + '\n')
+        original = native._lines
+        seen = []
+        def lines(*args, **kwargs):
+            for record in original(*args, **kwargs):
+                seen.append(record)
+                yield record
+        budget = WorkBudget(10, 32768)
+        with work_budget(budget), patch.object(native, '_lines', side_effect=lines):
+            self.assertEqual(self.providers.cache.legacy_identity(old, self.home), sid)
+        self.assertEqual(budget.used, 0)
+        self.assertEqual(len(seen), 1, 'stop after metadata, not the transcript body')
+        fresh = Providers(self.state.root)
+        with patch.object(native, '_lines', side_effect=AssertionError('cached header re-read')):
+            self.assertEqual(fresh.cache.legacy_identity(old, self.home), sid)
+        # A changed source invalidates the persisted identity even across passes.
+        replacement = str(uuid.uuid4())
+        header['payload']['id'] = replacement
+        old.write_text(json.dumps(header) + '\n' + records[1] + '\n')
+        self.assertEqual(fresh.cache.legacy_identity(old, self.home), replacement)
+
+    def test_legacy_identity_preamble_resumes_without_spending_peer_budget(self):
+        sid, path = self.transcript()
+        old = path.with_name('old-preamble.jsonl'); path.rename(old)
+        old.write_text((json.dumps({'type': 'event_msg', 'payload': {'text': 'x'*100}})
+                        + '\n') * 40 + old.read_text())
+        peer_budget = WorkBudget(10, 32768)
+        starts = []
+        original = native._lines
+        def lines(*args, **kwargs):
+            starts.append(kwargs.get('start_offset', 0))
+            return original(*args, **kwargs)
+        # A small independent allowance exercises resumable identity preflight.
+        with work_budget(peer_budget), \
+             patch('csl_sync_cache.WorkBudget', side_effect=lambda *_: WorkBudget(10, 1024)), \
+             patch.object(native, '_lines', side_effect=lines):
+            for _ in range(20):
+                cache = Providers(self.state.root).cache
+                try:
+                    actual = cache.legacy_identity(old, self.home)
+                    break
+                except PassYield:
+                    continue
+            else:
+                self.fail('identity preflight did not progress across passes')
+        self.assertEqual(actual, sid)
+        self.assertGreater(starts[-1], starts[0])
+        self.assertEqual(peer_budget.used, 0)
+
+    def test_large_legacy_header_still_refuses_alias_before_small_upload(self):
+        sid, path = self.transcript()
+        old = path.with_name('old-alias.jsonl')
+        header = json.loads(path.read_text().splitlines()[0])
+        header['payload']['padding'] = 'x' * 131072
+        old.write_text(json.dumps(header) + '\n')
+        result = self.collector.run(days=None, providers=('codex',), budget_bytes=32768)
+        self.assertEqual(result['synced'], 0, result)
+        self.assertTrue(any(row.get('error') == 'ambiguous_native_id'
+                            for row in result['sessions']), result)
+        self.assertNotIn(('codex', sid), self.state.tracked())
+
     def test_budget_yield_does_not_grant_unknown_age_tracking(self):
         sid,_=self.transcript()
         result=self.collector.run(providers=('codex',),budget_bytes=1)

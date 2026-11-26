@@ -75,6 +75,14 @@ these automatic dedicated retries. JSONL records above 8 MiB
 are rejected per session (`record_size_limit`); a bad session does not abort
 healthy peers. These limits do not modify the original transcripts.
 
+Legacy Codex filenames need a metadata identity check before duplicate-safe
+uploads. That check stops at `session_meta` and caches the verified ID by path,
+size, timestamps and file identity. It has its own per-file 16 MiB read allowance
+and initial one-second cooperative deadline, separate from a small session's
+upload budget. Long preambles save a record position for the next pass; their
+time allowance doubles up to 30 seconds. A changed file invalidates the cache.
+Unresolved identities defer upload rather than allowing a possible duplicate.
+
 The time limit is cooperative between file operations and HTTP requests; an
 in-flight request retains its existing network timeout. Directory discovery
 memory scales with file count, while transcript processing uses bounded records,
