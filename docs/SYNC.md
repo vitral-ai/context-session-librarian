@@ -116,7 +116,12 @@ A device-code sign-in is not available yet.
 
 ## Upload choice and installer contract
 
-Before enabling the platform service, configure the local selection once:
+Before enabling the platform service, configure the local selection once. In a
+terminal, `csl sync --home STATE configure` opens a four-choice prompt, defaulting
+to **New only**. A first sign-in on a fresh profile offers the same choice;
+non-interactive first sign-in defaults to `new`. Existing profiles keep their
+policy. End-of-input cancels without changing the selection. Installers and
+scripts use one explicit command:
 
 ```sh
 csl sync --home STATE configure --selection new
@@ -152,6 +157,22 @@ Totals cover cached sessions and the latest completed selection scan; exclusions
 include explicit opt-outs not yet scanned. Status does no network or transcript
 reads. When a collector holds its installation lock, the status view says you
 can close it; closing a foreground **watch** still stops that collector.
+
+For a read-only progress view, run `csl sync --home STATE status --follow`
+(optionally `--interval 2`). Ctrl+C closes only this view; the separate collector
+service keeps running. `--json --follow` emits one JSON object per line for each
+refresh. Progress comes from cached checkpoints, not a network health check.
+If no separate collector is running, this view does not start uploads.
+
+When authentication needs a fresh browser sign-in, status includes an additive
+`recovery: {reason, command, argv, instructions}` field. `argv` is the normal sign-in command
+for this profile's public endpoint/client settings; it never includes a token.
+Sign-in saves the public manual-browser/callback-port options for recovery.
+Older profiles without those options include explicit headless forwarding
+instructions; choose the port that is actually forwarded. Missing deployment
+settings yield null command/argv. Short status prints “Sign in again”
+with that command. `refresh_outcome_unknown` is not retried or cleared by status.
+A profile requiring recovery reports `paired: false` until sign-in succeeds.
 
 `collector.watch_pid` is optional: it identifies the foreground watch supervisor,
 not its pass worker or a platform service by name. It is emitted only with a busy
