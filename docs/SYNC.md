@@ -51,6 +51,43 @@ configured at sign-in with `--refresh-replay-grace-seconds 30` (maximum 30; defa
 `refresh_outcome_unknown` requires a new browser sign-in. `invalid_grant` or
 revocation clears stored credentials and stops collection.
 
+## Budgeted collector passes
+
+`csl sync run` and `csl sync watch` accept `--budget-seconds` (default 30)
+and `--budget-bytes` (default 268435456). Discovery reads filenames and stat
+metadata, without opening or freezing transcripts. Pending sessions precede
+already-synced history; smaller files lead, with newer activity breaking ties,
+across providers. The first-run selection remains `new` unless configured otherwise.
+Recorded transcript metadata is still verified before applying selection policy.
+
+A pass prepares one transcript at a time using streamed reads and disk-backed
+view/tool indexes. The byte budget counts cumulative reads, verification and
+upload payloads, so preparing a file can cost several times its size. A normal
+budget yield reports `deferred` / `pass_budget`, exits successfully, retains
+acknowledged upload offsets and resumes on a later pass. Once smaller pending
+work is clear, one previously deferred session gets a dedicated pass with a
+fresh, larger time/byte allowance. Repeated deferrals double that allowance
+until a finite preparation fits; newly arriving small work still goes first
+and does not reset the earned allowance. Transcript memory limits remain the
+same. Incomplete freezing and indexing are discarded rather than published.
+The configured budget is the normal-pass allowance, not a hard ceiling on
+these automatic dedicated retries. JSONL records above 8 MiB
+are rejected per session (`record_size_limit`); a bad session does not abort
+healthy peers. These limits do not modify the original transcripts.
+
+Legacy Codex filenames need a metadata identity check before duplicate-safe
+uploads. That check stops at `session_meta` and caches the verified ID by path,
+size, timestamps and file identity. It has its own per-file 16 MiB read allowance
+and initial one-second cooperative deadline, separate from a small session's
+upload budget. Long preambles save a record position for the next pass; their
+time allowance doubles up to 30 seconds. A changed file invalidates the cache.
+Unresolved identities defer upload rather than allowing a possible duplicate.
+
+The time limit is cooperative between file operations and HTTP requests; an
+in-flight request retains its existing network timeout. Directory discovery
+memory scales with file count, while transcript processing uses bounded records,
+chunks and SQLite pages rather than loading a whole conversation into memory.
+
 ## Pull a session onto this machine
 
 `csl sync pull SESSION_ID` downloads one session package the signed-in account

@@ -1,5 +1,6 @@
 """Opt-in, bounded snapshot publisher. Provider parsing remains provider-owned."""
 from datetime import datetime, timedelta, timezone
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -11,7 +12,7 @@ import tempfile
 import urllib.parse
 import uuid
 
-from csl_sync_fs import open_read, open_stream, protect_fd
+from csl_sync_fs import PassYield, WorkBudget, check_work, work_budget, open_read, open_stream, protect_fd
 from csl_sync_state import SyncError, now, private_directory
 from csl_version import __version__
 
@@ -60,6 +61,16 @@ class Providers:
             self.cache = CachedProviders(self.module, state_root)
         else:
             self.cache = None
+
+    @property
+    def cheap_discovery(self):
+        return self.cache is not None
+
+    def discover_sessions(self, provider):
+        return self.cache.discover_sessions(provider)
+
+    def prepare_session(self, provider, candidate):
+        return self.cache.prepare_session(provider, candidate)
 
     def list_sessions(self, provider):
         return (self.cache or self.module).list_sessions(provider)
@@ -116,7 +127,13 @@ class Collector:
         except (ValueError, TypeError, AttributeError):
             return False  # Unknown age requires explicit inclusion, not an invented timestamp.
 
-    def run(self, *, days=30, providers=PROVIDERS):
+    def run(self, *, days=30, providers=PROVIDERS, budget_seconds=30, budget_bytes=256*1024*1024):
+        if budget_seconds <= 0 or budget_bytes <= 0:
+            raise SyncError('invalid_pass_budget')
+        with work_budget(WorkBudget(budget_seconds, budget_bytes)):
+            return self._run(days=days, providers=providers, budget_seconds=budget_seconds, budget_bytes=budget_bytes)
+
+    def _run(self, *, days, providers, budget_seconds, budget_bytes):
         providers = tuple(providers)
         supported = getattr(self.providers, 'supported_providers', PROVIDERS)
         if type(supported) is not tuple or any(not isinstance(name, str) for name in supported):
@@ -134,14 +151,66 @@ class Collector:
             self.chunk_size = min(self.chunk_size, maximum_chunk)
         tracked, active, results = self.state.tracked(), [], []
         selected_sessions = []
+        previous_selection = self.state.get('selected_sessions') or []
+        cheap = getattr(self.providers, 'cheap_discovery', False) is True
+        candidates = []
         for provider in providers:
             try:
-                rows = self.providers.list_sessions(provider)
+                rows = (self.providers.discover_sessions(provider) if cheap else
+                        self.providers.list_sessions(provider))
+                candidates.extend((provider, row) for row in rows)
+            except PassYield:
+                results.append({'provider': provider, 'status': 'deferred', 'reason': 'pass_budget'})
             except Exception as error:
                 code = getattr(error, 'code', 'provider_unavailable')
                 results.append({'provider': provider, 'status': 'error', 'error': safe_id(code)})
+        if cheap:
+            # Pending/new work precedes verified history. Small files lead within
+            # each group; activity breaks ties, across all providers.
+            def already_synced(item):
+                provider, row = item
+                local = self.state.session(provider, row['native_id'])
+                hint = [row.get('byte_count'), row.get('mtime'), list(row.get('_identity', ()))]
+                return local.get('status') == 'synced' and local.get('discovery_hint') == hint
+            candidates.sort(key=lambda item: (
+                already_synced(item),
+                item[1].get('byte_count', 0), -item[1].get('mtime', 0),
+                item[0], item[1]['native_id']))
+        previous_deferrals = self.state.get('budget_deferrals') or {}
+        deferrals = {}
+        dedicated_used = False
+        for provider, candidate in candidates:
+            native_id = candidate['native_id']
+            if not candidate.get('_identity_hint') and self.state.selection(provider, native_id) is False:
                 continue
-            for metadata in rows:
+            budget_key = digest([provider, native_id])
+            prior = previous_deferrals.get(budget_key)
+            dedicated = bool(cheap and prior and not dedicated_used and
+                             not any(r['status'] == 'deferred' or
+                                     (r['status'] == 'synced' and not r.get('unchanged'))
+                                     for r in results))
+            seconds, size = budget_seconds, budget_bytes
+            if dedicated:
+                dedicated_used = True
+                seconds = max(seconds, prior['seconds'] * 2)
+                size = max(size, prior['bytes'] * 2, candidate.get('byte_count', 0) * 2)
+            scope = work_budget(WorkBudget(seconds, size)) if dedicated else nullcontext()
+            with scope:
+                metadata = candidate
+                if cheap and not candidate.get('error'):
+                    try:
+                        check_work(available=candidate.get('byte_count', 0))
+                        metadata = self.providers.prepare_session(provider, candidate)
+                    except PassYield:
+                        deferrals[budget_key] = {'seconds': max(seconds, (prior or {}).get('seconds', 0)),
+                                                 'bytes': max(size, (prior or {}).get('bytes', 0))}
+                        if [provider, native_id] in previous_selection:
+                            selected_sessions.append([provider, native_id])
+                        results.append({'provider': provider, 'native_id': safe_id(native_id),
+                                        'status': 'deferred', 'reason': 'pass_budget'})
+                        continue
+                    except Exception as error:
+                        metadata = {**candidate, 'error': getattr(error, 'code', 'source_unavailable')}
                 native_id = metadata['native_id']
                 if metadata.get('error'):
                     if self.state.selection(provider, native_id) is False:
@@ -165,7 +234,17 @@ class Collector:
                         results.append({'provider': provider, 'native_id': safe_id(native_id), 'status': 'synced', 'unchanged': True})
                         continue
                     self.sync_session(provider, native_id, metadata)
+                    if cheap:
+                        local = self.state.session(provider, native_id)
+                        local['discovery_hint'] = [candidate.get('byte_count'), candidate.get('mtime'),
+                                                   list(candidate.get('_identity', ()))]
+                        self.state.save_session(provider, native_id, local)
                     results.append({'provider': provider, 'native_id': safe_id(native_id), 'status': 'synced'})
+                except PassYield:
+                    deferrals[budget_key] = {'seconds': max(seconds, (prior or {}).get('seconds', 0)),
+                                                 'bytes': max(size, (prior or {}).get('bytes', 0))}
+                    results.append({'provider': provider, 'native_id': safe_id(native_id),
+                                    'status': 'deferred', 'reason': 'pass_budget'})
                 except Exception as error:
                     code = getattr(error, 'code', 'sync_failed')
                     local = self.state.session(provider, native_id)
@@ -176,11 +255,15 @@ class Collector:
                         raise SyncError(code) from None
         self.registry.call('POST', '/devices/' + segment(self.state.get('device_id')) + '/heartbeat',
                            body={'active_sessions': active}, key=str(uuid.uuid4()))
+        self.state.set('budget_deferrals', deferrals)
         self.state.set('selected_sessions', selected_sessions)
         self.state.set('last_pass_at', now())
         self.state.set('last_error', next((r['error'] for r in results if 'error' in r), None))
         return {'device_id': self.state.get('device_id'), 'sessions': results,
-                'synced': sum(r['status'] == 'synced' for r in results), 'pending': sum(r['status'] != 'synced' for r in results)}
+                'synced': sum(r['status'] == 'synced' for r in results),
+                'deferred': sum(r['status'] == 'deferred' for r in results),
+                'errors': sum(r['status'] == 'error' for r in results),
+                'pending': sum(r['status'] != 'synced' for r in results)}
 
     def capture(self, item):
         key = item.get('file_key')
@@ -203,7 +286,9 @@ class Collector:
                     raise SyncError('source_changed')
                 left = length
                 while left:
+                    check_work()
                     data = source.read(min(1024 * 1024, left))
+                    check_work(len(data))
                     if not data:
                         raise SyncError('source_changed')
                     target.write(data); h.update(data); left -= len(data)
@@ -225,7 +310,9 @@ class Collector:
                         raise SyncError('source_changed')
                     h = hashlib.sha256(); left = item['complete_length']
                     while left:
+                        check_work()
                         data = source.read(min(left, 1024 * 1024))
+                        check_work(len(data))
                         if not data: raise SyncError('source_changed')
                         h.update(data); left -= len(data)
                 if h.hexdigest() != item['sha256']:
@@ -233,14 +320,14 @@ class Collector:
             except OSError:
                 raise SyncError('source_changed') from None
 
-    def build_view(self, provider, native_id, local, files):
+    def build_view(self, provider, native_id, local, files, *, pages=None):
         view = local.setdefault('view', {})
         view.setdefault('generation', str(uuid.uuid4()))
         position, sequence = view.get('position'), view.get('last_seq', 0)
         lengths = {f['file_key']: f['complete_length'] for f in files}
         snapshots = {f['file_key']: {'file_key': f['file_key'], 'length': f['complete_length'],
                                     'sha256': f['sha256']} for f in files}
-        pages = []
+        if pages is None: pages = []
         resets = 0
         def bind_sources(page):
             anchors = page.get('source_files', [page.get('source_file')])
@@ -257,12 +344,13 @@ class Collector:
             if page.get('source_file') is not None and page['source_file'] not in anchors:
                 raise SyncError('source_changed')
         for _ in range(100000):
+            check_work()
             page = self.providers.view_records(provider, native_id, position=position, limit=100)
             bind_sources(page)
             if page.get('reset_required'):
                 if resets: raise SyncError('source_changed')
                 for p in pages: Path(p).unlink(missing_ok=True)
-                pages = []; resets += 1; position = None; sequence = 0
+                pages.clear(); resets += 1; position = None; sequence = 0
                 view.update(generation=str(uuid.uuid4()), position=None, last_seq=0)
                 continue
             records = page.get('records')
@@ -327,7 +415,7 @@ class Collector:
                 if type(maximum) is int and item.get('complete_length', 0) > maximum:
                     raise SyncError('limit_exceeded', status=413)
                 seen.add(item.get('file_key')); files.append(self.capture(item))
-            pages, last_seq = self.build_view(provider, native_id, local, files)
+            pages, last_seq = self.build_view(provider, native_id, local, files, pages=pages)
             self.check_sources(files)
             # Detect newly appearing/disappearing companions as well as changed
             # bytes. A DB-only fence cannot detect a WAL-only transaction.
@@ -362,7 +450,7 @@ class Collector:
                     for page in pages: Path(page).unlink(missing_ok=True)
                     pages = []
                     local['view'].update(generation=str(uuid.uuid4()), position=None, last_seq=0)
-                    pages, last_seq = self.build_view(provider, native_id, local, files)
+                    pages, last_seq = self.build_view(provider, native_id, local, files, pages=pages)
                     self.check_sources(files)
                     refreshed = self.providers.raw_files(provider, native_id)
                     if len(refreshed) != len(files) or signature(refreshed) != signature(files):
@@ -424,6 +512,7 @@ class Collector:
             for page_path in pages:
                 page = json.loads(Path(page_path).read_text())
                 payload = {'generation': local['view']['generation'], 'first_seq': page['records'][0]['seq'], 'records': page['records']}
+                check_work(len(json.dumps(payload).encode()))
                 self.registry.call('PUT', path + '/view', body=payload, key=digest(payload))
                 local['view'].update(position=page['position'], last_seq=page['records'][-1]['seq'])
                 self.state.save_session(provider, native_id, local)
@@ -432,7 +521,7 @@ class Collector:
             local.update(status='synced', last_synced_at=now(), last_error=None)
             local['verified_cache'] = getattr(self.providers, 'verified_cache', lambda *a: None)(provider, native_id)
             self.state.save_session(provider, native_id, local)
-        except SyncError:
+        except (SyncError, PassYield):
             self.state.save_session(provider, native_id, local)
             raise
         except OSError:
@@ -455,10 +544,16 @@ class Collector:
         with open(item['spool'], 'rb') as source:
             left = offset
             while left:
-                part = source.read(min(left, 1024 * 1024)); h.update(part); left -= len(part)
+                check_work()
+                part = source.read(min(left, 1024 * 1024))
+                check_work(len(part))
+                if not part: raise SyncError('source_changed')
+                h.update(part); left -= len(part)
             empty = item['complete_length'] == 0 and not remote
             while offset < item['complete_length'] or empty:
+                check_work()
                 data = source.read(min(self.chunk_size, item['complete_length'] - offset))
+                check_work(len(data))
                 end = offset + len(data)
                 headers = {'X-Start': str(offset), 'X-End': str(end), 'X-Content-SHA256': hashlib.sha256(data).hexdigest()}
                 if offset: headers['X-Prefix-SHA256'] = h.hexdigest()

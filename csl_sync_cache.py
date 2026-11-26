@@ -12,7 +12,8 @@ import shutil
 import sqlite3
 import time
 
-from csl_sync_fs import change_time, open_read, open_stream, protect_fd, protect_path, reparse
+from csl_sync_fs import (PassYield, WorkBudget, work_budget, change_time, check_work,
+                         open_read, open_stream, protect_fd, protect_path, reparse)
 from csl_sync_state import SyncError, private_directory, private_json, read_private_json
 
 EMPTY = hashlib.sha256(b'').hexdigest()
@@ -32,11 +33,22 @@ def hash_prefix(path, length):
     return h.hexdigest()
 
 
+class _Tools:
+    """Tool identity joins stay on disk even for very long conversations."""
+    def __init__(self, db): self.db = db
+    def __setitem__(self, key, value):
+        self.db.execute('INSERT OR REPLACE INTO tools VALUES (?,?)', (key, value))
+    def get(self, key):
+        row = self.db.execute('SELECT name FROM tools WHERE id=?', (key,)).fetchone()
+        return row[0] if row else None
+
+
 class CachedProviders:
     def __init__(self, module, state_root, *, verify_seconds=300, clock=time.time):
         self.module, self.clock, self.verify_seconds = module, clock, verify_seconds
         self.root = private_directory(Path(state_root) / 'provider-cache')
         self.entries, self.hashes, self.reused, self.listed = {}, {}, set(), {}
+        self.identities = {}
 
     def sources(self, provider, path, home, entry=None):
         paths = [path]
@@ -82,12 +94,138 @@ class CachedProviders:
                            st.st_size, st.st_mtime_ns, change_time(path, st)])
         return result
 
-    def list_sessions(self, provider):
+    def discover_sessions(self, provider):
+        """Filename and stat hints only; no transcript opens or cache freezing."""
+        home = self.module.provider_home(provider)
+        discovered = self.module._paths(provider, home)
+        self.listed[provider] = (home, discovered)
+        self.identities.pop(provider, None)
+        rows, names = [], {}
+        for path in discovered:
+            check_work()
+            ids = self.module.csl_codex_history.identity(path) if provider == 'codex' else None
+            match = re.search(r'([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$', path.stem)
+            authoritative = provider != 'codex' or bool(ids or match)
+            sid = ids[0] if ids else match.group(1) if match else path.stem
+            row = {'provider': provider, 'native_id': sid, '_path': path,
+                   '_identity_hint': not authoritative}
+            try:
+                self.module._safe(path, home)
+                info = path.stat()
+                row.update(byte_count=info.st_size, mtime=info.st_mtime,
+                           _identity=(info.st_dev, info.st_ino))
+            except (OSError, self.module.ProviderError, SyncError) as error:
+                row['error'] = getattr(error, 'code', 'source_unavailable')
+            rows.append(row)
+            if authoritative: names.setdefault(sid, []).append(row)
+        for sid, copies in names.items():
+            if len(copies) > 1:
+                self.entries.pop((provider, sid), None)
+                self.reused.discard((provider, sid))
+                for row in copies: row['error'] = 'ambiguous_native_id'
+                for row in copies[1:]: rows.remove(row)
+        return rows
+
+    def legacy_identity(self, path, home):
+        """Read just through session_meta, billed to this file, not its peer.
+
+        Unchanged verified IDs survive collector processes. Long preambles keep
+        their last complete record position so a bounded preflight can resume.
+        The last record may be re-read; individual records remain capped at 8 MiB.
+        """
+        stamp = self.fingerprint([path], home)
+        key = hashlib.sha256(encoded(['legacy-identity', str(home), str(path)])).hexdigest()
+        cache_path = self.root / (key + '.identity.json')
+        try:
+            saved = read_private_json(cache_path) or {}
+        except (SyncError, OSError):
+            # Only this disposable cache uses miss-on-read-error, never auth
+            # files. The private reader still refuses unsafe files without
+            # following links; rebuilding replaces the cache atomically.
+            saved = {}
+        cached_id = saved.get('native_id')
+        if (saved.get('fingerprint') != stamp or
+                type(saved.get('offset')) is not int or not 0 <= saved['offset'] <= path.stat().st_size or
+                type(saved.get('seconds')) not in (int, float) or not 0 < saved['seconds'] <= 30 or
+                (cached_id is not None and (not isinstance(cached_id, str) or
+                 not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', cached_id)))):
+            saved = {'fingerprint': stamp, 'offset': 0, 'seconds': 1}
+        if saved.get('complete'):
+            return saved.get('native_id')
+        sid = None
+        try:
+            # Two maximum-size records permit progress even when the resumed
+            # record is repeated. Never consume the caller's upload allowance.
+            with work_budget(WorkBudget(saved['seconds'], 16*1024*1024 + 2)):
+                for record, offset in self.module._lines(path, start_offset=saved['offset']):
+                    saved['offset'] = offset
+                    payload = record.get('payload')
+                    if record.get('type') == 'session_meta' and isinstance(payload, dict):
+                        sid = payload.get('id') or payload.get('session_id')
+                        if sid: break
+        except PassYield:
+            saved['seconds'] = min(30, saved['seconds'] * 2)
+            if self.fingerprint([path], home) == stamp:
+                private_json(cache_path, saved)
+            raise
+        if self.fingerprint([path], home) != stamp:
+            raise SyncError('source_changed')
+        if sid is not None and (not isinstance(sid, str) or
+                                not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', sid)):
+            raise self.module.ProviderError('invalid_native_id')
+        saved.update(complete=True, native_id=sid)
+        private_json(cache_path, saved)
+        return saved['native_id']
+
+    def unique_identity(self, provider, candidate, native_id):
+        """Resolve legacy filename hints before any upload, including aliases.
+
+        Discovery remains stat-only. Only legacy identity records are read here;
+        other sessions are neither frozen nor parsed into a view.
+        """
+        home, paths = self.listed[provider]
+        if provider not in self.identities:
+            identities = {}
+            for path in paths:
+                check_work()
+                try:
+                    self.module._safe(path, home)
+                    ids = self.module.csl_codex_history.identity(path) if provider == 'codex' else None
+                    match = re.search(r'([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$', path.stem)
+                    sid = path.stem if provider != 'codex' else ids[0] if ids else match.group(1) if match else None
+                    if sid is None:
+                        sid = self.legacy_identity(path, home)
+                    if isinstance(sid, str): identities.setdefault(sid, []).append(path)
+                except (OSError, self.module.ProviderError):
+                    # A malformed peer is isolated, never treated as this session.
+                    continue
+            self.identities[provider] = identities
+        matches = self.identities[provider].get(native_id, [])
+        if matches != [candidate['_path']]:
+            raise SyncError('ambiguous_native_id' if len(matches) > 1 else 'source_changed')
+
+    def prepare_session(self, provider, candidate):
+        path = candidate['_path']
+        info = path.stat()
+        if (info.st_dev, info.st_ino) != candidate.get('_identity'):
+            raise SyncError('source_changed')
+        if provider not in ('codex', 'claude'):
+            home = self.module.provider_home(provider)
+            return self.module._metadata(provider, path, home, 300)
+        rows = self.list_sessions(provider, discovered=[path])
+        if len(rows) != 1: raise SyncError('source_changed')
+        if rows[0].get('error'): raise SyncError(rows[0]['error'])
+        self.unique_identity(provider, candidate, rows[0]['native_id'])
+        return rows[0]
+
+    def list_sessions(self, provider, *, discovered=None):
         if provider not in ('codex', 'claude'): return self.module.list_sessions(provider)
         home = self.module.provider_home(provider)
         rows, seen = [], set()
-        discovered = self.module._paths(provider, home)
-        self.listed[provider] = (home, discovered)
+        partial = discovered is not None
+        if discovered is None:
+            discovered = self.module._paths(provider, home)
+            self.listed[provider] = (home, discovered)
         # Ambiguous names have no safe winner; omit every copy, not just the
         # second one. A bad session must not abort the provider's whole listing.
         names = {}
@@ -145,7 +283,7 @@ class CachedProviders:
         rows = [row for row in rows if row['native_id'] not in ambiguous]
         rows.extend({'native_id': sid, 'error': 'ambiguous_native_id'} for sid in sorted(ambiguous))
         seen = {row['native_id'] for row in rows if 'error' not in row}
-        for key in list(self.entries):
+        for key in list(self.entries) if not partial else []:
             if key[0] == provider and key[1] not in seen:
                 self.entries.pop(key)
                 self.reused.discard(key)
@@ -199,8 +337,11 @@ class CachedProviders:
                 if item['mode'] == 'append':
                     with open_stream(path) as stream:
                         stream.seek(item['complete_length'])
-                        if b'\n' in stream.read(item['size'] - item['complete_length']):
-                            return False
+                        left = item['size'] - item['complete_length']
+                        while left:
+                            chunk = stream.read(min(left, 1024*1024))
+                            if not chunk or b'\n' in chunk: return False
+                            left -= len(chunk)
             return True
         except OSError: return False
 
@@ -224,8 +365,10 @@ class CachedProviders:
                     left = size
                     h = hashlib.sha256()
                     while left:
+                        check_work()
                         chunk = incoming.read(min(left, 1024 * 1024))
                         if not chunk: raise SyncError('source_changed')
+                        check_work(len(chunk))
                         output.write(chunk); h.update(chunk); left -= len(chunk)
                 if hash_prefix(source, size) != h.hexdigest(): raise SyncError('source_changed')
                 inputs.append({'path': str(source), 'size': size, 'sha256': h.hexdigest()})
@@ -261,6 +404,7 @@ class CachedProviders:
         try:
             db.execute('CREATE TABLE IF NOT EXISTS records (seq INTEGER PRIMARY KEY, body TEXT, digest TEXT)')
             db.execute('CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY, value TEXT)')
+            db.execute('CREATE TABLE IF NOT EXISTS tools (id TEXT PRIMARY KEY, name TEXT)')
             saved = db.execute('SELECT value FROM meta WHERE id=1').fetchone()
             saved = json.loads(saved[0]) if saved else None
             append = bool(not nodes and saved and saved['length'] <= primary['complete_length'] and
@@ -268,6 +412,7 @@ class CachedProviders:
             with db:
                 if not append:
                     db.execute('DELETE FROM records')
+                    db.execute('DELETE FROM tools')
                     saved = {'length': 0, 'seq': 0, 'tools': {}}
                 h = self.hashes.get(str(directory)) if append else None
                 if h is None:
@@ -276,18 +421,21 @@ class CachedProviders:
                         for (body,) in db.execute('SELECT body FROM records ORDER BY seq'):
                             h.update(body.encode() + b'\n')
                 else: h = h.copy()
-                seq, tools = saved['seq'], saved['tools']
+                for call, name in saved.get('tools', {}).items():
+                    db.execute('INSERT OR REPLACE INTO tools VALUES (?,?)', (call, name))
+                seq, tools = saved['seq'], _Tools(db)
                 has_conversation = saved.get('has_conversation', False)
-                events = (self.module._codex_lineage_events(nodes, 16000) if nodes else
+                events = (self.module._codex_lineage_events(nodes, 16000, tools=tools) if nodes else
                           self.module._view(provider, path, 16000, primary['complete_length'],
                                             start_offset=saved['length'], tools=tools))
                 for event in events:
+                    check_work()
                     seq += 1
                     has_conversation = has_conversation or event['kind'] in ('text','tool_call','tool_result','image','document')
                     body = encoded({'seq': seq, **event})
                     h.update(body + b'\n')
                     db.execute('INSERT INTO records VALUES (?,?,?)', (seq, body.decode(), h.hexdigest()))
-                value = {'length': primary['complete_length'], 'sha256': primary['sha256'], 'seq': seq, 'tools': tools,
+                value = {'length': primary['complete_length'], 'sha256': primary['sha256'], 'seq': seq, 'tools': {},
                          'has_conversation': has_conversation, 'binding': binding}
                 db.execute('INSERT OR REPLACE INTO meta VALUES (1,?)', (json.dumps(value),))
             self.hashes[str(directory)] = h.copy()
