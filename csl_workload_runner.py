@@ -1,6 +1,7 @@
 """Opt-in workload watch and literal-argv job supervisor; no image activation."""
 from contextlib import contextmanager
 import ctypes
+from dataclasses import replace
 import hashlib
 import http.client
 import io
@@ -25,7 +26,7 @@ from csl_antigravity import FormatError as AntigravityFormatError, inventory as 
 from csl_antigravity_workload import WorkloadAntigravityProvider, source_id as antigravity_source_id
 from csl_text_workload import WorkloadTextProvider
 from csl_workload_auth import WorkloadTokens, boot_clock
-from csl_workload_config import Configuration, PREFIX
+from csl_workload_config import Configuration, PREFIX, PROVIDER_PROFILES
 from csl_workload_http import WorkloadHTTP
 from csl_workload_identity import WorkloadKey, canonical, metadata
 from csl_workload_stream import Bounds, opened_source, verify_prefix
@@ -66,6 +67,8 @@ def scope(config):
     value = {'version': 1, 'origin': config.origin, 'provider': config.provider,
              'profile': config.profile, 'transcript_root': str(config.transcript_root), 'location': config.location}
     if config.expect_session is not None: value['expect_session'] = config.expect_session
+    if config.claude_transcript_root is not None:
+        value['claude_transcript_root'] = str(config.claude_transcript_root)
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
@@ -78,6 +81,8 @@ def environment(config):
     if config.ca_file is not None: result[PREFIX+'TRUST_CA'] = config.ca_file
     if config.observe_session is not None: result[PREFIX+'OBSERVE_SESSION'] = config.observe_session
     if config.expect_session is not None: result[PREFIX+'EXPECT_SESSION'] = config.expect_session
+    if config.claude_transcript_root is not None:
+        result[PREFIX+'CLAUDE_TRANSCRIPT_ROOT'] = str(config.claude_transcript_root)
     return result
 
 
@@ -337,9 +342,36 @@ def source_manifest(config, adapter):
 
 def run_pass(config, deadline, composition=None, expected_worker=None):
     config = checked_config(config)
+    if config.claude_transcript_root is None:
+        return run_provider_pass(config, deadline, composition, expected_worker)
+    if composition is not None:
+        raise SyncError('workload_configuration_refused')
+    claude = replace(config, provider='claude', profile=PROVIDER_PROFILES['claude'],
+                     transcript_root=config.claude_transcript_root, claude_transcript_root=None)
+    codex = replace(config, claude_transcript_root=None)
+    now = boot_clock()
+    codex_deadline = now + max(0, deadline - now) / 2
+    passes = ((codex, config.state_root, codex_deadline),
+              (claude, child(config.state_root, 'claude'), deadline))
+    result = {'ok': True, 'pending': 0, 'synced': 0, 'manifest': []}
+    for agent, state, until in passes:
+        try:
+            part = run_provider_pass(agent, until, provider_state=state, managed_pair=True)
+        except (OSError, SyncError):
+            part = {'ok': False, 'pending': 1, 'synced': 0, 'manifest': []}
+        result['ok'] &= part['ok']
+        result['synced'] += part['synced']
+        result['pending'] += part['pending']
+        result['manifest'].extend(part['manifest'])
+    return result
+
+
+def run_provider_pass(config, deadline, composition=None, expected_worker=None, *,
+                      provider_state=None, managed_pair=False):
+    provider_state = provider_state or config.state_root
     limits = bounds(config)
-    runtime = child(config.state_root, 'runtime')
-    sync = child(config.state_root, 'sync')
+    runtime = child(provider_state, 'runtime')
+    sync = child(provider_state, 'sync')
     with exclusive(sync):
         key = WorkloadKey(config.state_root/'identity')
         http = DeadlineHTTP(config.origin, deadline, ca_file=config.ca_file, attempts=1, timeout=5)
@@ -348,10 +380,12 @@ def run_pass(config, deadline, composition=None, expected_worker=None):
         identity = tokens.status()
         if identity['state'] not in ('ready', 'refresh_inflight'):
             raise SyncError('workload_approval_required')
+        if managed_pair:
+            tokens.managed_identity()
         binding = {'scope': scope(config), 'account_id': identity['account_id'], 'device_id': identity['device_id']}
         previous = read_record(runtime/'binding.json')
         if previous is not None and previous != binding: raise SyncError('workload_runtime_binding_changed')
-        projection_path = config.state_root/'projection'
+        projection_path = provider_state/'projection'
         populated_projection = projection_path.exists() and (projection_path.is_symlink() or not projection_path.is_dir()
                                                             or any(projection_path.iterdir()))
         if previous is None and ((sync/'state.sqlite').exists() or (runtime/'sources.json').exists() or populated_projection):
@@ -374,6 +408,8 @@ def run_pass(config, deadline, composition=None, expected_worker=None):
             raise SyncError('workload_runtime_record_refused')
         private_json(runtime/'sources.json', {'paths': list(selected), 'next_index': (cursor+1) % max(1, len(selected))})
         if not selected:
+            if managed_pair:
+                return {'ok': True, 'synced': 0, 'pending': 0, 'manifest': []}
             result = {'ok': False, 'synced': 0, 'pending': 1, 'manifest': []}
             if config.observe_session is None and composition is not None and composition.get('mode') == 'fresh-codex':
                 try:
@@ -387,7 +423,7 @@ def run_pass(config, deadline, composition=None, expected_worker=None):
             except Exception: http.observation = None
         ordered = selected[cursor:]+selected[:cursor]
         inputs = tuple((config.transcript_root, path) for path in ordered)
-        projection = child(config.state_root, 'projection')
+        projection = child(provider_state, 'projection')
         adapter = (WorkloadAntigravityProvider(inputs, projection, bounds=limits)
                    if config.provider == 'antigravity' else
                    WorkloadTextProvider(config.provider, inputs, projection, bounds=limits,
@@ -477,11 +513,12 @@ class PassProcess:
     def receipt(self):
         if self.process.returncode != 0: return None
         value = read_record(self.path)
+        managed_pair = self.config.claude_transcript_root is not None
         if (value is None or value.get('sequence') != self.sequence or value.get('scope') != scope(self.config)
                 or type(value.get('ok')) is not bool or type(value.get('synced')) is not int
                 or type(value.get('pending')) is not int or min(value['synced'], value['pending']) < 0
-                or not isinstance(value.get('manifest'), list) or len(value['manifest']) > 32
-                or value['ok'] and (not value['manifest'] or value['synced'] != len(value['manifest']) or value['pending'] != 0)):
+                or not isinstance(value.get('manifest'), list) or len(value['manifest']) > (64 if managed_pair else 32)
+                or value['ok'] and ((not value['manifest'] and not managed_pair) or value['synced'] != len(value['manifest']) or value['pending'] != 0)):
             return None
         if self.config.observe_session is not None:
             observed = value.get('observation')
@@ -517,6 +554,8 @@ class Runner:
         self.config, self.pass_factory, self.clock, self.sleep = config, pass_factory, clock, sleep
         self.stopping = False
         if observation_driver is not None and not isinstance(observation_driver, AcceptanceDriver): raise TypeError()
+        if observation_driver is not None and config.claude_transcript_root is not None:
+            raise SyncError('workload_configuration_refused')
         self.observation_driver = observation_driver
 
     def launch(self, deadline):
@@ -568,6 +607,7 @@ class Runner:
                   'writer_exit': None, 'synced': 0, 'worker_reaped': True}
         try:
             if command is not None:
+                if self.config.claude_transcript_root is not None: raise SyncError('workload_command_refused')
                 if not isinstance(command, (list, tuple)) or not command or any(not isinstance(v, str) or '\x00' in v for v in command):
                     raise SyncError('workload_command_refused')
                 if self.stopping: return report
@@ -738,6 +778,12 @@ def main(argv=None):
             if argv == ['--enroll-managed']:
                 tokens.enroll_managed(sys.stdin.buffer.read(8193).decode('ascii'))
             print(json.dumps(tokens.managed_identity(), separators=(',', ':')))
+            return 0
+        if argv in (['--connect-identity'], ['--enroll-connect']):
+            tokens = enrollment_tokens(Configuration.from_environment(os.environ))
+            if argv == ['--enroll-connect']:
+                tokens.enroll_connect(sys.stdin.buffer.read(8193).decode('ascii'))
+            print(json.dumps(tokens.connect_identity(), separators=(',', ':')))
             return 0
         if argv == ['--connect-runtime']:
             from csl_workload_connect import enroll_runtime

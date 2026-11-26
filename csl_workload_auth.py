@@ -26,7 +26,10 @@ REPLAY_SECONDS = 30
 TERMINAL = {'invalid_grant', 'session_revoked', 'access_denied'}
 JOURNAL_FIELDS = {'version', 'binding', 'thumbprint', 'phase', 'boot', 'deadline', 'device_code', 'nonce',
     'interval', 'next_poll', 'account_id', 'device_id', 'access_token', 'refresh_token', 'expires_boot',
-    'expires_wall', 'request_started', 'replay_used', 'fields', 'managed_assignment'}
+    'expires_wall', 'request_started', 'replay_used', 'fields', 'managed_assignment', 'managed_issuer'}
+
+POOL_ISSUER = 'vitral-pool-controller'
+CONNECT_ISSUER = 'vitral-connect-enrollment'
 
 
 def managed_binding(value):
@@ -139,6 +142,9 @@ class WorkloadTokens:
             unb64(value.get('thumbprint'), 32)
             if 'managed_assignment' in value:
                 managed_binding(value['managed_assignment'])
+            if 'managed_issuer' in value and (value['managed_issuer'] != CONNECT_ISSUER
+                                               or 'managed_assignment' not in value):
+                raise ValueError()
             phase = value['phase']
             if phase not in ('revoked', 'expired') and (not isinstance(value.get('boot'), str) or not value['boot']):
                 raise ValueError()
@@ -211,7 +217,22 @@ class WorkloadTokens:
             _, thumb = self._public(value)
             return {'workload_jkt': b64(thumb), 'state': value['phase'] if value else 'signed_out'}
 
+    def connect_identity(self):
+        with self._lock():
+            value = self._read()
+            if value is not None and value.get('managed_issuer') != CONNECT_ISSUER:
+                raise SyncError('workload_identity_binding_changed')
+            public, thumb = self._public(value)
+            return {'public_jwk': public, 'workload_jkt': b64(thumb),
+                    'state': value['phase'] if value else 'signed_out'}
+
+    def enroll_connect(self, assertion):
+        return self._enroll_managed(assertion, CONNECT_ISSUER)
+
     def enroll_managed(self, assertion):
+        return self._enroll_managed(assertion, POOL_ISSUER)
+
+    def _enroll_managed(self, assertion, issuer):
         with self._lock():
             current = self._read()
             _, thumb = self._public(current)
@@ -221,14 +242,15 @@ class WorkloadTokens:
                 claims = jwt_payload(assertion)
                 assignment = managed_binding({key: claims[key] for key in ('environment_id', 'generation')})
                 account = claims['sub']
-                if (claims['iss'] != 'vitral-pool-controller' or claims['aud'] != MANAGED_AUDIENCE
+                if (claims['iss'] != issuer or claims['aud'] != MANAGED_AUDIENCE
                         or claims['owner_issuer'] != self.origin.issuer or claims['workload_jkt'] != b64(thumb)
                         or not re.fullmatch(r'[a-f0-9]{24}', account)):
                     raise ValueError()
             except (KeyError, ValueError, TypeError, SyncError):
                 raise SyncError('workload_assignment_refused') from None
             if current:
-                if current.get('managed_assignment') != assignment or current.get('account_id') != account:
+                if (current.get('managed_assignment') != assignment or current.get('account_id') != account
+                        or current.get('managed_issuer', POOL_ISSUER) != issuer):
                     raise SyncError('workload_identity_binding_changed')
                 if current['phase'] in ('ready', 'refresh_inflight'):
                     return
@@ -240,8 +262,11 @@ class WorkloadTokens:
                 'assignment_assertion': assertion, 'workload': canonical(self.location).decode(),
                 'host_public_key': canonical(public).decode(), 'host_key_proof': proof,
             })
-            self._accept(response, {'version': 1, 'binding': self.binding, 'thumbprint': b64(thumb),
-                                    'managed_assignment': assignment, 'account_id': account})
+            binding = {'version': 1, 'binding': self.binding, 'thumbprint': b64(thumb),
+                       'managed_assignment': assignment, 'account_id': account}
+            if issuer == CONNECT_ISSUER:
+                binding['managed_issuer'] = issuer
+            self._accept(response, binding)
 
     def begin(self, *, timeout=600):
         timeout = number(timeout, 600)
@@ -306,15 +331,16 @@ class WorkloadTokens:
         result = {'version': 1, 'binding': self.binding, 'thumbprint': value['thumbprint'], 'phase': 'ready',
             'account_id': account['id'], 'device_id': device, 'access_token': access, 'refresh_token': refresh,
             'boot': self.boot(), 'expires_boot': expires_boot, 'expires_wall': expires_at}
-        if 'managed_assignment' in value:
-            result['managed_assignment'] = value['managed_assignment']
+        for field in ('managed_assignment', 'managed_issuer'):
+            if field in value:
+                result[field] = value[field]
         self._write(result)
         self._check(write_deadline)
         return access
 
     def _terminal(self, value, phase='revoked'):
         result = {key: value[key] for key in ('version', 'binding', 'thumbprint', 'account_id', 'device_id',
-                                             'managed_assignment') if key in value}
+                                             'managed_assignment', 'managed_issuer') if key in value}
         result['phase'] = phase
         self._write(result)
 
