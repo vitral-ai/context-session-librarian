@@ -293,6 +293,12 @@ class GoPythonTransportTests(unittest.TestCase):
             self.assertEqual(result.returncode,0,result.stdout+'\n'+result.stderr)
             return json.loads(result.stdout)
 
+    def test_ready_pid_publication_race_and_timeout(self):
+        result = subprocess.run(['go', 'test', str(self.fixture/'parent.go'),
+                                 str(self.fixture/'parent_test.go')],
+                                capture_output=True, text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stdout+'\n'+result.stderr)
+
     def test_real_go_python_fd_table_capture_and_request_result(self):
         result = self.run_pair('success')
         self.assertEqual(result['status'],'captured')

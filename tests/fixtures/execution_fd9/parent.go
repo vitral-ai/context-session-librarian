@@ -120,7 +120,26 @@ func readFrame(r io.Reader, limit uint32) ([]byte, error) {
 }
 func opened(path string) *os.File { f, e := os.Open(path); must(e); return f }
 
-func deathSupervisor(args []string) {
+// A ready file can exist before its writer has published the PID bytes.
+func waitReadyPID(path string, deadline time.Time) (int, error) {
+	detail := "PID file not published"
+	for time.Now().Before(deadline) {
+		raw, err := os.ReadFile(path)
+		if err == nil {
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(raw)))
+			if parseErr == nil && pid > 0 {
+				return pid, nil
+			}
+			detail = "PID file is empty or invalid"
+		} else if !os.IsNotExist(err) {
+			return 0, fmt.Errorf("child ready PID read failed: %w", err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return 0, fmt.Errorf("child ready timeout: %s", detail)
+}
+
+func deathSupervisor(args []string) error {
 	// Own the orphan we deliberately create; reap exactly its PID, not other jobs.
 	_, _, errno := syscall.Syscall6(syscall.SYS_PRCTL, 36, 1, 0, 0, 0, 0)
 	if errno != 0 {
@@ -132,19 +151,10 @@ func deathSupervisor(args []string) {
 	must(inner.Start())
 	defer func() { _ = inner.Process.Kill(); _ = inner.Wait() }()
 	root := args[3]
-	var childPID int
 	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		b, e := os.ReadFile(filepath.Join(root, "ready"))
-		if e == nil {
-			childPID, e = strconv.Atoi(string(b))
-			must(e)
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if childPID == 0 {
-		panic("child ready timeout")
+	childPID, err := waitReadyPID(filepath.Join(root, "ready"), deadline)
+	if err != nil {
+		return err
 	}
 	must(inner.Process.Kill())
 	_ = inner.Wait()
@@ -158,13 +168,13 @@ func deathSupervisor(args []string) {
 				panic("parent death fence failed")
 			}
 			fmt.Println(string(encoded(map[string]any{"reaped": true, "signal": int(status.Signal()), "effect": false})))
-			return
+			return nil
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	_ = syscall.Kill(childPID, syscall.SIGKILL)
 	_, _ = syscall.Wait4(childPID, &status, 0, nil)
-	panic("parent-death reap timeout")
+	return fmt.Errorf("parent-death reap timeout")
 }
 
 func main() {
@@ -178,7 +188,10 @@ func main() {
 	args := os.Args[1:]
 	python, child, repo, root, scenario := args[0], args[1], args[2], args[3], args[4]
 	if strings.HasPrefix(scenario, "death-") && len(args) == 5 {
-		deathSupervisor(args)
+		if err := deathSupervisor(args); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		return
 	}
 	packageBytes := []byte("package")
