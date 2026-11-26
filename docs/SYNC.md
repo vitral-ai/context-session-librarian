@@ -46,8 +46,10 @@ The implementation uses private files, not a required system-keyring dependency.
 Refresh is serialized and marks a rotating token in-flight before sending it.
 After an ambiguous response or crash, an old generation is not blindly retried.
 An issuer explicitly guaranteeing replay of the already-issued successor can be
+advertised in discovery as `refresh_replay_grace_seconds` (integer 0–30), or
 configured at sign-in with `--refresh-replay-grace-seconds 30` (maximum 30; default
-0). That recovery is bounded to one replay within the recorded window. Otherwise
+0 when discovery omits it). The issuer's advertised policy is saved at sign-in.
+That recovery is bounded to one replay within the recorded window. Otherwise
 `refresh_outcome_unknown` requires a new browser sign-in. `invalid_grant` or
 revocation clears stored credentials and stops collection.
 

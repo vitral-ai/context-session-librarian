@@ -154,7 +154,13 @@ def discover(url, *, http=None):
     if 'none' not in value.get('token_endpoint_auth_methods_supported', ['none']):
         raise SyncError('public_client_unavailable')
     try:
-        return {'authorization_endpoint': checked_url(value['authorization_endpoint']),
-                'token_endpoint': checked_url(value['token_endpoint'])}
+        result = {'authorization_endpoint': checked_url(value['authorization_endpoint']),
+                  'token_endpoint': checked_url(value['token_endpoint'])}
+        if 'refresh_replay_grace_seconds' in value:
+            grace = value['refresh_replay_grace_seconds']
+            if type(grace) is not int or not 0 <= grace <= 30:
+                raise SyncError('invalid_discovery')
+            result['refresh_replay_grace_seconds'] = grace
+        return result
     except (KeyError, TypeError):
         raise SyncError('invalid_discovery') from None

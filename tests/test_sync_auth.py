@@ -89,6 +89,31 @@ class AuthTests(unittest.TestCase):
             self.assertEqual(error.exception.code,'refresh_outcome_unknown')
         self.assertEqual(http.calls,1)
 
+    def test_discovered_successor_replay_policy_recovers_lost_response(self):
+        class DiscoveryHTTP:
+            def request(inner, *args, **kwargs):
+                return {'code_challenge_methods_supported':['S256'],
+                        'authorization_endpoint':self.origin+'/authorize',
+                        'token_endpoint':self.origin+'/token',
+                        'refresh_replay_grace_seconds':30}
+        tokens,http=self.rotating(0)
+        tokens.config.update(discover(self.origin+'/discovery',http=DiscoveryHTTP()))
+        self.assertEqual(tokens.access_token(),'new-access')
+        self.assertEqual(http.calls,2)
+
+    def test_invalid_discovered_replay_policy_is_rejected(self):
+        for grace in (True, -1, 31, '30', None):
+            with self.subTest(grace=grace):
+                class DiscoveryHTTP:
+                    def request(inner, *args, **kwargs):
+                        return {'code_challenge_methods_supported':['S256'],
+                                'authorization_endpoint':self.origin+'/authorize',
+                                'token_endpoint':self.origin+'/token',
+                                'refresh_replay_grace_seconds':grace}
+                with self.assertRaises(SyncError) as error:
+                    discover(self.origin+'/discovery',http=DiscoveryHTTP())
+                self.assertEqual(error.exception.code,'invalid_discovery')
+
     def test_restart_after_rotating_refresh_recovers_within_grace_but_not_after(self):
         tokens,http=self.rotating(30)
         value=read_private_json(tokens.path);value.update(refresh_state='inflight',refresh_started_at=time.time(),replay_attempted=False)
