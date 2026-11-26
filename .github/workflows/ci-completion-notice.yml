@@ -9,7 +9,6 @@ permissions:
 jobs:
   notify:
     if: ${{ (github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'pull_request_target') && github.event.workflow_run.conclusion != 'cancelled' }}
-    uses: vitral-ai/context-session-librarian/.github/workflows/pr-completion-notice.yml@449b63352ff66a8a232654bc0da6e58b28cc427a
+    uses: vitral-ai/context-session-librarian/.github/workflows/pr-completion-notice.yml@b2fe311d4aeea954393bd37ccf04040d7f516c13
     secrets:
-      CSL_HUB_NOTICE_TOKEN: ${{ secrets.CSL_HUB_NOTICE_TOKEN }}
       CSL_NATS_CI_CREDS: ${{ secrets.CSL_NATS_CI_CREDS }}
