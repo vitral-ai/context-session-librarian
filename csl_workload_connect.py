@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 from csl_sync_fs import durable_replace, flush_directory
 from csl_sync_http import HTTP
 from csl_sync_state import SyncError, exclusive, private_directory, private_json
-from csl_workload_auth import CONNECT_ISSUER, managed_binding
+from csl_workload_auth import CONNECT_ISSUER, jwt_payload, managed_binding
 from csl_workload_http import WorkloadHTTP
 from csl_workload_identity import canonical, metadata, public_key, unb64
 from csl_workload_state import read_record
@@ -116,6 +116,16 @@ def request_uuid(value):
     raise SyncError('workload_connect_response_refused')
 
 
+def reservation_from_environment(env):
+    environment = env.get('VITRAL_CONNECT_EXPECTED_ENVIRONMENT')
+    generation = env.get('VITRAL_CONNECT_EXPECTED_GENERATION')
+    if environment is None and generation is None:
+        return None
+    if not isinstance(generation, str) or not re.fullmatch(r'[1-9][0-9]{0,19}', generation):
+        raise SyncError('workload_connect_configuration_refused')
+    return {'environment_id': environment, 'generation': int(generation)}
+
+
 def run_host(argv, env):
     try:
         return subprocess.check_output(argv, env=env, stderr=subprocess.DEVNULL, timeout=45)
@@ -139,12 +149,21 @@ def complete_enrollment(journal, intent, state_root, host_id):
 
 
 def enroll_runtime(config, tokens, *, organization, method, credential_path, host_state, host_binary,
-                   host_kind, http=None):
+                   host_kind, expected=None, http=None):
     if (not re.fullmatch(r'[a-f0-9]{24}', organization)
             or method not in ('oidc', 'join_token') or host_kind not in ('container', 'ssh')
             or not host_state.is_absolute() or host_state.resolve() != host_state
             or host_state.is_relative_to(config.state_root) or config.state_root.is_relative_to(host_state)):
         raise SyncError('workload_connect_configuration_refused')
+    reservation = None
+    if expected is not None:
+        try:
+            if method != 'join_token' or host_kind != 'ssh':
+                raise ValueError()
+            expected = managed_binding(expected)
+        except (TypeError, ValueError):
+            raise SyncError('workload_connect_configuration_refused') from None
+        reservation = {'organization_id': organization, **expected}
     host_state = private_directory(host_state)
     env = {key: os.environ[key] for key in ('HOME', 'PATH', 'USER') if key in os.environ}
     env.update(VITRAL_TUNNEL_HOME=str(host_state), VITRAL_API=config.origin,
@@ -157,17 +176,25 @@ def enroll_runtime(config, tokens, *, organization, method, credential_path, hos
         host['hostname'] = socket.gethostname() or 'host'
         collector = {'public_jwk': identity['public_jwk'], 'workload': config.location}
         journal = host_state / 'connect.json'
-        scope = hashlib.sha256(canonical({'organization': organization, 'method': method,
-                                          'origin': config.origin, 'host': host, 'collector': collector})).hexdigest()
+        scope_fields = {'organization': organization, 'method': method,
+                        'origin': config.origin, 'host': host, 'collector': collector}
+        if reservation is not None:
+            scope_fields['reservation'] = reservation
+        scope = hashlib.sha256(canonical(scope_fields)).hexdigest()
         intent = read_record(journal)
         if intent is None:
             if (host_state/'api.HOST_ID').exists() or identity['state'] != 'signed_out':
                 raise SyncError('workload_connect_existing_grant')
             intent = {'scope': scope, 'request_id': str(uuid4())}
+            if reservation is not None:
+                intent['reservation'] = reservation
             private_json(journal, intent, durable=True)
-        if intent.get('scope') != scope or (host_state/'revoked').exists():
+        if (intent.get('scope') != scope or intent.get('reservation') != reservation
+                or (host_state/'revoked').exists()):
             raise SyncError('workload_connect_existing_grant')
         assignment = intent.get('assignment', {})
+        if expected is not None and assignment and any(assignment.get(k) != v for k, v in expected.items()):
+            raise SyncError('workload_connect_assignment_changed')
         if not assignment and (host_state/'api.HOST_ID').exists():
             raise SyncError('workload_connect_existing_grant')
         if identity['state'] in ('ready', 'refresh_inflight'):
@@ -199,7 +226,8 @@ def enroll_runtime(config, tokens, *, organization, method, credential_path, hos
         if type(generation) is not int or not 1 <= generation < 2**64:
             raise SyncError('workload_connect_response_refused')
         received['generation'] = generation
-        if assignment and received != assignment:
+        if ((assignment and received != assignment)
+                or (expected is not None and any(received[k] != v for k, v in expected.items()))):
             raise SyncError('workload_connect_assignment_changed')
         for part in ('host', 'collector'):
             section = answer.get(part)
@@ -207,6 +235,11 @@ def enroll_runtime(config, tokens, *, organization, method, credential_path, hos
             if not isinstance(assertion, str) or len(assertion) > 8192 or not re.fullmatch(
                     r'[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', assertion):
                 raise SyncError('workload_connect_response_refused')
+            if expected is not None:
+                claims = jwt_payload(assertion)
+                if (claims.get('iss') != ISSUER or type(claims.get('generation')) is not int
+                        or any(claims.get(k) != v for k, v in expected.items())):
+                    raise SyncError('workload_connect_assignment_changed')
         intent['assignment'] = received
         private_json(journal, intent, durable=True)
         result = {'enrollment_id': received['enrollment_id'], 'environment_id': received['environment_id']}

@@ -92,6 +92,66 @@ class RuntimeEnrollmentTests(unittest.TestCase):
                         '-inkey', str(key_file), '-sigfile', str(sig), '-in', str(raw)], check=True,
                        capture_output=True, timeout=10)
 
+    def test_reserved_guest_rejects_an_envelope_or_assertion_from_another_assignment(self):
+        expected = {'environment_id': ENVIRONMENT, 'generation': 2}
+
+        def assertion(**overrides):
+            claims = {'iss': 'vitral-connect-enrollment', **expected, **overrides}
+            return '.'.join((b64(b'{"alg":"RS256"}'), b64(json.dumps(claims).encode()), 'fixture'))
+
+        matching = {'enrollment_id': ENROLLMENT, **expected,
+                    'host': {'assignment_assertion': assertion()},
+                    'collector': {'assignment_assertion': assertion()}}
+        answers = [
+            {**matching, 'environment_id': str(UUID(int=4))},
+            {**matching, 'generation': 1},
+            {**matching, 'host': {'assignment_assertion': assertion(environment_id=str(UUID(int=4)))}},
+            {**matching, 'collector': {'assignment_assertion': assertion(generation=1)}},
+        ]
+        identity = {'public_jwk': self.collector['public_jwk'], 'state': 'signed_out'}
+        tokens = SimpleNamespace(key=self.key, connect_identity=lambda: identity)
+        args = dict(organization=ORGANIZATION, method='join_token', credential_path=self.credential,
+                    host_state=self.host_state, host_binary='vitral-host', host_kind='ssh', expected=expected)
+
+        def identity_only(argv, _):
+            self.assertEqual(argv[1], 'assignment-identity')
+            return json.dumps(self.host).encode()
+
+        for answer in answers:
+            with self.subTest(answer=answer), patch('csl_workload_connect.run_host', identity_only):
+                http = SimpleNamespace(post=lambda resource, _: (
+                    {'challenge_id': CHALLENGE, 'nonce': NONCE} if resource == 'challenges' else answer))
+                with self.assertRaisesRegex(SyncError, 'workload_connect_assignment_changed'):
+                    enroll_runtime(self.config, tokens, http=http, **args)
+        journal = json.loads((self.host_state / 'connect.json').read_text())
+        self.assertEqual(journal['reservation'], {'organization_id': ORGANIZATION, **expected})
+        self.assertNotIn('assignment', journal)
+        redemptions = []
+
+        def host(argv, env):
+            if argv[1] == 'assignment-identity':
+                return identity_only(argv, env)
+            redemptions.append('host')
+            (self.host_state / 'api.HOST_ID').write_text(HOST_ID)
+            (self.host_state / 'api.ENVIRONMENT_ID').write_text(ENVIRONMENT)
+
+        def enroll(assertion):
+            self.assertEqual(assertion, matching['collector']['assignment_assertion'])
+            redemptions.append('collector')
+            identity.update(state='ready', managed_assignment=expected)
+
+        tokens.enroll_connect = enroll
+        http = SimpleNamespace(post=lambda resource, _: (
+            {'challenge_id': CHALLENGE, 'nonce': NONCE} if resource == 'challenges' else matching))
+        with patch('csl_workload_connect.run_host', host):
+            self.assertEqual(enroll_runtime(self.config, tokens, http=http, **args)['host_id'], HOST_ID)
+            self.credential.unlink()
+            self.assertEqual(enroll_runtime(self.config, tokens, **args)['host_id'], HOST_ID)
+        self.assertEqual(redemptions, ['host', 'collector'])
+        receipt = json.loads((self.host_state / 'connect.json').read_text())
+        self.assertTrue(receipt['complete'])
+        self.assertEqual(receipt['assignment'], {'enrollment_id': ENROLLMENT, **expected})
+
     def test_retries_same_request_and_recovers_after_host_redemption(self):
         events, requests = [], []
         fail_collector = True
