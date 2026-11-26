@@ -232,3 +232,13 @@ signed collector assertion on standard input to `--enroll-managed`. Both
 commands print only the workload thumbprint and local enrollment state. The
 collector keeps the resulting registry credential in its private state and uses
 the regular runner for collection and refresh.
+
+### Dos agentes en un entorno administrado
+
+La configuración normal de Codex puede definir también
+`VITRAL_COLLECTOR_CLAUDE_TRANSCRIPT_ROOT` con el directorio absoluto de
+transcripciones de Claude. Monta solo los directorios de transcripciones, cada
+uno por separado y en modo de solo lectura. Ambas fuentes usan el mismo registro
+administrado y conservan sus versiones y filtros de formato individuales.
+La opción requiere un estado nuevo del supervisor cuando se activa por primera
+vez. No copies el estado de registro de otro entorno.
