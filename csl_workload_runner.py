@@ -739,6 +739,25 @@ def main(argv=None):
                 tokens.enroll_managed(sys.stdin.buffer.read(8193).decode('ascii'))
             print(json.dumps(tokens.managed_identity(), separators=(',', ':')))
             return 0
+        if argv == ['--connect-runtime']:
+            from csl_workload_connect import enroll_runtime
+            config = Configuration.from_environment(os.environ)
+            try:
+                report = enroll_runtime(
+                    config, enrollment_tokens(config), organization=os.environ['VITRAL_CONNECT_ORGANIZATION'],
+                    method=os.environ['VITRAL_CONNECT_METHOD'], credential_path=Path(os.environ['VITRAL_CONNECT_CREDENTIAL_FILE']),
+                    host_state=Path(os.environ['VITRAL_TUNNEL_HOME']),
+                    host_binary=os.environ.get('VITRAL_HOST_BINARY', 'vitral-host'),
+                    host_kind=os.environ.get('VITRAL_TUNNEL_KIND', 'ssh'),
+                )
+            except SyncError as error:
+                report = {'enrolled': False, 'error': error.code}
+                if error.status is not None: report['status'] = error.status
+                if error.retry_after is not None: report['retry_after_seconds'] = error.retry_after
+                print(json.dumps(report, separators=(',', ':')))
+                return 2
+            print(json.dumps({'enrolled': True, **report}, separators=(',', ':')))
+            return 0
         if len(argv) in (4, 5) and argv[0] == '--worker':
             worker_main(argv[1], int(argv[2]), float(argv[3]), int(argv[4]) if len(argv) == 5 else None); return 0
         if argv and argv[0] != '--': raise SyncError('workload_command_refused')

@@ -173,10 +173,13 @@ class WorkloadKey:
         return public_key(der[len(SPKI_PREFIX):])
 
     def proof(self, issuer, credential, nonce, metadata_sha256, *, expected_thumbprint, refresh=False):
+        message = proof_message(issuer, credential, nonce, expected_thumbprint, metadata_sha256, refresh=refresh)
+        return self.sign_message(message, expected_thumbprint)
+
+    def sign_message(self, message, expected_thumbprint):
         _, thumbprint = self.public()
         if not isinstance(expected_thumbprint, bytes) or thumbprint != expected_thumbprint:
             raise SyncError('workload_key_binding_changed')
-        message = proof_message(issuer, credential, nonce, thumbprint, metadata_sha256, refresh=refresh)
         fd, name = tempfile.mkstemp(prefix='.proof-', dir=self.root)
         try:
             os.fchmod(fd, 0o600)

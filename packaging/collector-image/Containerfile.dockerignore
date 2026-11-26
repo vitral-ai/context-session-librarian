@@ -20,6 +20,7 @@
 !csl_version.py
 !csl_workload_auth.py
 !csl_workload_config.py
+!csl_workload_connect.py
 !csl_workload_http.py
 !csl_workload_identity.py
 !csl_workload_observation.py
