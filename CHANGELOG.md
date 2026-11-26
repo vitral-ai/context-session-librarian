@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.1 — 2026-11-26
+
+- Offer a first-run upload choice, defaulting to new sessions, with last N,
+  everything and folder options. Existing profiles keep their selection.
+- Show short status, optional verbose/JSON output and a read-only progress view
+  explaining when the terminal can close while the background collector runs.
+- Report sign-in recovery with a suggested command, preserving saved manual
+  browser and callback-port settings; legacy profiles get forwarding instructions.
+- Correct isolated native-validation HOME and compact-hook assertions, and make
+  the private FD9 test fixture wait for PID publication instead of panicking.
+
+
 ## 0.5.0 — 2026-11-26
 
 - Collect sessions after cheap discovery, prioritizing pending small sessions across
