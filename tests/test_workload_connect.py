@@ -9,7 +9,7 @@ from unittest.mock import patch
 from uuid import UUID
 
 from csl_sync_state import SyncError
-from csl_workload_connect import NAMESPACE, credential_from_file, enroll_runtime, proofs_for, signed_message
+from csl_workload_connect import ConnectHTTP, NAMESPACE, credential_from_file, enroll_runtime, proofs_for, signed_message
 from csl_workload_identity import WorkloadKey, b64, unb64
 
 ORGANIZATION = 'a' * 24
@@ -21,6 +21,23 @@ HOST_ID = 'host-0123456789abcdef'
 CREDENTIAL = 'synthetic-oidc-token'
 LOCATION = {'label': 'testing', 'provider': 'kubernetes', 'cluster': 'dev',
             'namespace': 'test', 'workload': 'fixture', 'replica': 'pod-1'}
+
+
+class ConnectHTTPTests(unittest.TestCase):
+    def test_only_the_two_fixed_connect_paths_use_the_https_origin(self):
+        transport = ConnectHTTP('https://identity.example.test')
+        with patch('csl_workload_connect.HTTP.request', return_value={}) as request:
+            transport.post('challenges', {'request_id': ENROLLMENT})
+            request.assert_called_once_with(
+                transport, 'https://identity.example.test/vitral-connect/v1/challenges', 'POST',
+                data=json.dumps({'request_id': ENROLLMENT}, separators=(',', ':')).encode(),
+                headers={'Content-Type': 'application/json'},
+            )
+            with self.assertRaisesRegex(SyncError, 'workload_connect_endpoint_refused'):
+                transport.post('https://other.example.test', {})
+            with self.assertRaisesRegex(SyncError, 'workload_connect_endpoint_refused'):
+                ConnectHTTP('https://identity.example.test:8443').post('exchanges', {})
+            self.assertEqual(request.call_count, 1)
 
 
 @unittest.skipUnless(shutil.which('ssh-keygen') and shutil.which('openssl'), 'native signing helpers required')
