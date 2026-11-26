@@ -180,19 +180,21 @@ class WriterTests(unittest.TestCase):
         self.assertIsNone(read_fence('codex','native'))
         self.assertTrue(all(method == 'GET' for method,_,_ in self.calls))
 
-    def import_fixture(self):
+    def import_fixture(self, provider='claude'):
         identifier = str(uuid.uuid4())
         raw = (json.dumps(dict(type='user', uuid='fixture-user', sessionId=identifier,
                               message=dict(role='user', content='Synthetic handoff'))) + '\n').encode()
+        if provider == 'codex':
+            raw = (json.dumps(dict(type='session_meta', payload=dict(id=identifier, cwd=str(self.root)))) + '\n').encode()
         member = 'sessions/' + identifier + '/main.jsonl'
         manifest = dict(format='codex-session-librarian',version=3,mode='raw',created_at='2026-11-26T12:00:00Z',
-            sessions=[dict(id=identifier, provider='claude', primary=member, files=[
+            sessions=[dict(id=identifier, provider=provider, primary=member, files=[
                 dict(file=member,relative_path='session.jsonl',file_key='main',role='transcript',
                      bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest())])])
         bundle = self.root/'fixture.zip'
         with zipfile.ZipFile(bundle, 'w') as archive:
             archive.writestr('manifest.json',json.dumps(manifest));archive.writestr(member,raw)
-        row = dict(id='ss_fixture', provider='claude',native_id=identifier,snapshot_id='snapshot-fixture',
+        row = dict(id='ss_fixture', provider=provider,native_id=identifier,snapshot_id='snapshot-fixture',
                    writer=dict(state='released',generation=0,device_id='source-device'),
                    sync=dict(complete=True),package=dict(available=True))
         def call(method, path, **kwargs):
@@ -300,3 +302,89 @@ class WriterTests(unittest.TestCase):
             archive.writestr('other', 'fixture')
         with self.assertRaisesRegex(SyncError, 'invalid_native_manifest'):
             import_same_id(args, None)
+
+    def test_codex_destination_keeps_exact_raw_session_metadata(self):
+        from csl_resume import import_same_id
+        from csl_sync_providers import _resolve
+        args, identifier, raw = self.import_fixture('codex')
+        with patch('csl_sync_http.Registry', return_value=self.api), redirect_stdout(io.StringIO()):
+            self.assertEqual(import_same_id(args, None), [identifier])
+        _, path = _resolve('codex', identifier, None)
+        self.assertEqual(path.read_bytes(), raw)
+        self.assertEqual(read_fence('codex', identifier)['state'], 'active')
+
+    def test_source_command_proves_end_then_flushes_under_same_lock_before_release(self):
+        from csl_sync import command
+        settings = self.state.get('settings'); settings['enabled'] = True
+        self.state.set('settings', settings)
+        args = SimpleNamespace(sync_home=self.state.root, sync_action='release-writer', provider='codex',
+            native_id='native', registry_session_id='ss_fixture', expected_snapshot_id='snapshot-fixture',
+            expected_generation=0, expected_device_id=self.device)
+        events = []
+        def stopped(*unused): events.append('stopped')
+        def flushed(*unused):
+            with self.assertRaisesRegex(SyncError, 'collector_busy'):
+                with native_lock('codex', 'native'): pass
+            events.append('flushed')
+        row = dict(id='ss_fixture',provider='codex',native_id='native',snapshot_id='snapshot-fixture',
+                   writer=dict(state='legacy',generation=0,device_id=self.device),
+                   sync=dict(complete=True),package=dict(available=True))
+        def call(method, path, **kwargs):
+            if method == 'POST':
+                self.assertEqual(events, ['stopped', 'flushed'])
+                events.append('released')
+                row['writer']['state'] = 'released'
+            return row
+        self.api.call = call
+        with patch('csl_sync.Tokens') as tokens, patch('csl_sync.Registry', return_value=self.api), \
+             patch('csl_sync_writer.require_stopped', side_effect=stopped), \
+             patch('csl_sync_providers._resolve', return_value=(self.root, self.root/'fixture')), \
+             patch('csl_sync_providers._metadata', return_value={}), \
+             patch('csl_sync.Collector._sync_session', side_effect=flushed), redirect_stdout(io.StringIO()):
+            tokens.return_value.status.return_value = dict(signed_in=True)
+            command(args, None)
+        self.assertEqual(events, ['stopped', 'flushed', 'released'])
+        self.assertEqual(read_fence('codex', 'native')['state'], 'released')
+
+    def test_active_journal_with_publishing_fence_recovers_without_receipt_or_acquire(self):
+        from csl_resume import import_same_id
+        from csl_sync_writer import save_fence
+        args, identifier, _ = self.import_fixture()
+        def interrupted(provider, identifier, state, binding):
+            if state == 'active': raise OSError('synthetic crash before active fence')
+            return save_fence(provider, identifier, state, binding)
+        with patch('csl_sync_http.Registry', return_value=self.api), \
+             patch('csl_sync_writer.save_fence', side_effect=interrupted), redirect_stdout(io.StringIO()), \
+             self.assertRaises(OSError):
+            import_same_id(args, None)
+        self.assertEqual(self.state.session('claude', identifier)['writer']['state'], 'active')
+        self.assertEqual(read_fence('claude', identifier)['state'], 'publishing')
+        with patch('csl_sync_http.Registry', return_value=self.api), \
+             patch('csl_resume.require_stopped') as stopped, redirect_stdout(io.StringIO()):
+            import_same_id(args, None)
+        stopped.assert_not_called()
+        self.assertEqual(sum(method == 'POST' for method,_,_ in self.calls), 1)
+        self.assertEqual(read_fence('claude', identifier)['state'], 'active')
+
+    def test_completed_release_allows_new_attested_acquisition_on_return(self):
+        from csl_sync_writer import save_fence, profile_binding
+        self.writer.acquire('codex', 'native', **self.binding)
+        self.writer.published('codex', 'native')
+        local = self.state.session('codex', 'native')
+        local['writer']['state'] = 'released'
+        self.state.save_session('codex', 'native', local)
+        save_fence('codex', 'native', 'released', profile_binding(self.state))
+        returned = dict(self.binding, generation=2, snapshot='later-snapshot', request_id=str(uuid.uuid4()))
+        self.response = dict(state='active', device_id=self.device, generation=3)
+        with patch.object(self.writer, 'attest', return_value='foreign-owner'), \
+             self.assertRaisesRegex(SyncError, 'writer_fenced'):
+            self.writer.acquire('codex', 'native', **returned)
+        self.assertEqual(len(self.calls), 1)
+        result = self.writer.acquire('codex', 'native', **returned)
+        self.assertEqual(result['generation'], 3)
+        self.assertEqual(result['request_id'], returned['request_id'])
+        self.assertEqual(len(self.calls), 2)
+        self.writer.acquire('codex', 'native', **returned)
+        self.assertEqual(len(self.calls), 2)
+        with self.assertRaisesRegex(SyncError, 'writer_request_conflict'):
+            self.writer.acquire('codex', 'native', **dict(returned, request_id=str(uuid.uuid4())))

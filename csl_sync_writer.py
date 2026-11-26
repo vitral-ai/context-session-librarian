@@ -140,7 +140,18 @@ class Writer:
             destinations=destinations)
         local = self.state.session(provider, identifier)
         previous = local.get('writer')
-        check_fence(self.state, provider, identifier)
+        fence = check_fence(self.state, provider, identifier)
+        if previous and previous.get('state') == 'released':
+            # A completed handoff can later return to this installation. An
+            # ambiguous pending operation still requires its original binding.
+            if (not fence or fence['state'] != 'released' or
+                    previous.get('account_id') != account_id or
+                    previous.get('device_id') != expected_device or
+                    previous.get('endpoint') != binding['endpoint'] or
+                    type(previous.get('generation')) is not int or generation < previous['generation'] or
+                    self.attest(expected_device) != account_id):
+                raise SyncError('writer_fenced')
+            previous = None
         if previous and any(previous.get(key) != value for key, value in binding.items()):
             raise SyncError('writer_request_conflict')
         if previous and previous.get('state') in ('publishing', 'active'):

@@ -121,7 +121,7 @@ def import_same_id(args, csl):
                     if error.code != 'session_not_found': raise
                     existing = None
                 unpublished_retry = (record.get('request_id') == args.request_id and
-                                     record.get('state') in ('pending', 'publishing') and fence and
+                                     record.get('state') in ('pending', 'publishing', 'active') and fence and
                                      fence['state'] in ('pending', 'publishing'))
                 if existing is not None and not unpublished_retry:
                     require_stopped(provider, identifier)
