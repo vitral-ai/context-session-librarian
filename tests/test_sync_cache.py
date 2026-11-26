@@ -61,6 +61,17 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(self.local()['last_synced_at'], before)
         self.assertTrue(all('/sessions/' not in path for _, path in self.peer.calls[calls:]))
 
+    def test_old_title_cache_refreshes_explicit_native_title(self):
+        self.rows[0]['payload']['thread_name'] = 'Explicit searchable title'
+        self.write()
+        self.run_pass()
+        directory, entry = self.providers.cache.entries[('codex', self.sid)][:2]
+        entry['title_version'] = 1
+        entry['metadata']['title'] = 'choose blue'
+        private_json(directory / 'entry.json', entry)
+        refreshed = Providers(self.state.root).list_sessions('codex')
+        self.assertEqual(refreshed[0]['title'], 'Explicit searchable title')
+
     def test_append_renders_only_tail_and_preserves_historical_tool_correlation(self):
         self.run_pass(); old_length = self.path.stat().st_size
         position = self.local()['view']['position']

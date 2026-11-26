@@ -61,6 +61,11 @@ class ProviderTests(unittest.TestCase):
         self.write(self.path, [first, self.rows[0]])
         self.assertEqual(p.list_sessions('claude', home=self.home)[0]['title'], 'Fix the first real task')
 
+    def test_explicit_custom_title_wins_over_first_user_text(self):
+        self.write(self.path, [*self.rows, {'type': 'custom-title', 'sessionId': self.sid,
+                                         'customTitle': 'My searchable handoff'}])
+        self.assertEqual(p.list_sessions('claude', home=self.home)[0]['title'], 'My searchable handoff')
+
     def test_pagination_append_and_rewrite_reset(self):
         first=p.view_records('claude',self.sid,home=self.home,limit=2)
         self.assertEqual([r['seq'] for r in first['records']],[1,2]);self.assertFalse(first['complete'])
