@@ -54,6 +54,21 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(self.state.get('selection_policy'), before)
         self.assertFalse(self.state.selection('claude', 'excluded'))
 
+    def test_folder_recorded_paths_do_not_expand_or_abort(self):
+        policy = self.configure('folders', folders=[self.tmp.name])
+        for cwd in ['~missing-user/project', 'relative/project', '/bad\x00/path']:
+            self.assertFalse(selected(policy, 'claude', dict(cwd=cwd)))
+        with patch('csl_sync_policy.Path.resolve', side_effect=RuntimeError('unresolvable')):
+            self.assertFalse(selected(policy, 'claude', dict(cwd='/project')))
+        self.assertTrue(selected(policy, 'claude', dict(cwd=self.tmp.name + '/healthy')))
+
+    def test_title_keeps_real_blocks_in_first_user_record(self):
+        blocks = [{'type': 'text', 'text': '# AGENTS.md instructions\nbootstrap'},
+                  {'type': 'text', 'text': 'Fix the upload queue'},
+                  {'type': 'input_text', 'text': '<environment_context>bootstrap</environment_context>'},
+                  {'type': 'text', 'text': 'and show progress'}]
+        self.assertEqual(_user_title({}, blocks), 'Fix the upload queue\nand show progress')
+
     def test_titles_ignore_bootstrap_and_keep_real_prose(self):
         for text in ['# AGENTS.md instructions\n<INSTRUCTIONS>setup</INSTRUCTIONS>', '<environment_context>setup</environment_context>']:
             self.assertIsNone(_user_title({}, text))

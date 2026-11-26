@@ -33,7 +33,14 @@ def selected(policy, provider, row):
     if kind == 'folders':
         cwd = row.get('cwd')
         if not isinstance(cwd, str) or not cwd: return False
-        path = Path(cwd).expanduser().resolve()
+        # Recorded paths are data, not paths to expand against this machine's
+        # account database or working directory.
+        try:
+            path = Path(cwd)
+            if not path.is_absolute() or '\x00' in cwd: return False
+            path = path.resolve()
+        except (OSError, RuntimeError, ValueError):
+            return False
         return any(path.is_relative_to(Path(folder)) for folder in policy['folders'])
     if kind == 'last' and [provider, row['native_id']] in policy.get('initial_sessions', []):
         return True

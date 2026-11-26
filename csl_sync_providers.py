@@ -135,12 +135,15 @@ def _user_title(record, content):
     """Ignore known native bootstrap records, not arbitrary words in user prose."""
     if record.get('isMeta') or record.get('isCompactSummary'):
         return None
-    if isinstance(content, list):
-        content = [part for part in content if isinstance(part, dict) and part.get('type') in ('text', 'input_text')]
-    text = _text(content).strip()
     bootstrap = ('# AGENTS.md instructions', '<environment_context>',
                  '<INSTRUCTIONS>', '<system-reminder>', '<local-command-caveat>',
                  '<command-name>', '<local-command-stdout>')
+    if isinstance(content, list):
+        blocks = [_text(part).strip() for part in content
+                  if isinstance(part, dict) and part.get('type') in ('text', 'input_text')]
+        text = '\n'.join(block for block in blocks if block and not block.startswith(bootstrap))
+    else:
+        text = _text(content).strip()
     if not text or text.startswith(bootstrap):
         return None
     return text[:200]

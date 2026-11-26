@@ -54,6 +54,13 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(main['size'],len(original)+19)
         self.assertEqual(len(p.view_records('claude',self.sid,home=self.home)['records']),4)
 
+    def test_first_user_title_filters_bootstrap_blocks_not_whole_message(self):
+        first = {**self.rows[0], 'message': {'role': 'user', 'content': [
+            {'type': 'text', 'text': '# AGENTS.md instructions\nsetup'},
+            {'type': 'text', 'text': 'Fix the first real task'}]}}
+        self.write(self.path, [first, self.rows[0]])
+        self.assertEqual(p.list_sessions('claude', home=self.home)[0]['title'], 'Fix the first real task')
+
     def test_pagination_append_and_rewrite_reset(self):
         first=p.view_records('claude',self.sid,home=self.home,limit=2)
         self.assertEqual([r['seq'] for r in first['records']],[1,2]);self.assertFalse(first['complete'])
