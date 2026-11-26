@@ -50,6 +50,7 @@ class Configuration:
     ca_file: str | None
     observe_session: str | None = None
     expect_session: str | None = None
+    claude_transcript_root: Path | None = None
 
     @classmethod
     def from_environment(cls, env):
@@ -79,4 +80,10 @@ class Configuration:
         if expect is not None and (provider != 'claude' or observe is not None or not isinstance(expect, str)
                 or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', expect)):
             refused()
-        return cls(origin, provider, profile, source, state, location, flush, spool, ca, observe, expect)
+        claude_source = env.get(PREFIX+'CLAUDE_TRANSCRIPT_ROOT')
+        if claude_source is not None:
+            if provider != 'codex' or observe is not None or expect is not None: refused()
+            claude_source = root_path(claude_source)
+            if any(claude_source.is_relative_to(path) or path.is_relative_to(claude_source)
+                   for path in (source, state)): refused()
+        return cls(origin, provider, profile, source, state, location, flush, spool, ca, observe, expect, claude_source)

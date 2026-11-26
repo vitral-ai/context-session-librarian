@@ -489,6 +489,64 @@ class UploaderTests(unittest.TestCase):
         for data in self.peer.files.values(): self.assertNotIn(CANARY.encode(), data)
         self.assertTrue(self.peer.views)
 
+    def dual_sources(self):
+        path = self.root/'claude-transcripts'
+        path.mkdir()
+        self.config = replace(self.config, claude_transcript_root=path)
+        return path
+
+    def approve_managed_fixture(self):
+        tokens = WorkloadTokens(self.config.state_root/'auth', self.config.origin, self.config.location,
+                               key=WorkloadKey(self.config.state_root/'identity'))
+        journal = read_record(tokens.path)
+        journal['managed_assignment'] = {'environment_id': str(uuid.uuid4()), 'generation': 1}
+        private_json(tokens.path, journal)
+
+    def test_managed_pair_uses_one_grant_and_separate_profile_state(self):
+        path = self.dual_sources()
+        self.approve_managed_fixture()
+        fixture = path/'main.jsonl'
+        rows = native('claude')
+        rows[0]['cwd'] = '/home/agent/project'
+        fixture.write_text(''.join(json.dumps(row)+'\n' for row in rows))
+        handoff = self.config.state_root/'host-id'
+        handoff.write_text('host-0123abcdef456789\n')
+        handoff.chmod(0o644)
+        runtime = child(self.config.state_root, 'runtime')
+        private_json(runtime/'configuration.json', environment(self.config))
+        worker = PassProcess(self.config, str(uuid.uuid4()), boot_clock()+10)
+        self.addCleanup(worker.remove_receipt)
+        self.addCleanup(worker.kill)
+        self.assertTrue(worker.reap(10))
+        receipt = worker.receipt()
+        self.assertTrue(receipt['ok'])
+        self.assertEqual(receipt['synced'], 2)
+        self.assertEqual(self.peer.sessions['sessions/claude/'+SID]['cwd'], '/home/agent/project')
+        for provider in ('codex', 'claude'):
+            record = self.peer.sessions['sessions/'+provider+'/'+SID]
+            self.assertEqual(record['host_id'], 'host-0123abcdef456789')
+            self.assertFalse(record['package']['available'])
+        self.assertTrue((self.config.state_root/'sync/state.sqlite').is_file())
+        self.assertTrue((self.config.state_root/'claude/sync/state.sqlite').is_file())
+        self.assertFalse((self.config.state_root/'claude/auth').exists())
+        self.assertTrue(self.one_pass()['ok'])
+
+    def test_managed_pair_can_sync_one_profile_when_other_has_no_transcript(self):
+        self.dual_sources()
+        self.approve_managed_fixture()
+        receipt = self.one_pass()
+        self.assertTrue(receipt['ok'])
+        self.assertEqual(receipt['synced'], 1)
+        self.assertEqual(set(self.peer.sessions), {'sessions/codex/'+SID})
+
+    def test_managed_pair_rejects_device_grant_and_overlapping_sources(self):
+        self.dual_sources()
+        self.assertFalse(self.one_pass()['ok'])
+        self.assertFalse(self.peer.sessions)
+        overlap = environment(replace(self.config, claude_transcript_root=self.config.transcript_root))
+        with self.assertRaisesRegex(SyncError, 'workload_configuration_refused'):
+            Configuration.from_environment(overlap)
+
     def test_antigravity_profile_uploads_redacted_sqlite_view(self):
         from test_antigravity import make_session
         from test_workload_antigravity import add_user_step

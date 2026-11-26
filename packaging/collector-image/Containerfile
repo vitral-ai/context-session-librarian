@@ -33,6 +33,7 @@ COPY packaging/collector-image/check-runtime.py /opt/vitral/collector/check-runt
 RUN chmod 0555 /usr/bin/openssl /usr/local/bin/csl-workload-collector \
     && chmod 0444 /opt/vitral/collector/check-runtime.py /usr/local/share/licenses/workload-openssl/LICENSE.txt
 ENV PATH=/usr/local/bin:/usr/bin:/bin HOME=/nonexistent PYTHONDONTWRITEBYTECODE=1
+LABEL ai.vitral.csl.workload.managed-claude="1"
 WORKDIR /opt/vitral/collector
 USER 10001:10001
 RUN python3 -E -s -S /opt/vitral/collector/check-runtime.py
