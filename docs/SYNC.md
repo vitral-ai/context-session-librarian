@@ -94,6 +94,60 @@ chunks and SQLite pages rather than loading a whole conversation into memory.
 
 ## Pull a session onto this machine
 
+### Explicit same-ID Resume (experimental)
+
+Default imports remain independent Forks. `import --resume-same-id` opts into a
+registry writer handoff for one raw v3 Codex or Claude session. It requires a
+registered local collector installation; workloads cannot claim a writer.
+The first managed producer supports opted-in Linux Connect launches with an
+explicit native ID known before spawning. Older hosts without `keeper-receipt`,
+implicit selection, and in-provider session switching cannot release a writer.
+Use Fork for those sessions. Native history-base bundles are currently refused.
+
+On the source, stop the managed provider normally, then run:
+
+```sh
+csl sync --home PROFILE release-writer codex NATIVE_ID \
+  --registry-session-id REGISTRY_ID --expected-snapshot-id SNAPSHOT \
+  --expected-generation GENERATION --expected-device-id SOURCE_DEVICE
+```
+
+This checks the authenticated host's positive ended-process receipt, flushes
+the transcript, and verifies the exact complete snapshot before releasing.
+If the flush changes the snapshot, inspect the completed session and repeat
+with its new snapshot ID. A missing managed receipt refuses with
+`writer_unsupported_source`; it does not stop unrelated provider processes.
+
+Pull the released package using the destination's own collector sign-in, then:
+
+```sh
+csl import PACKAGE --cwd PROJECT --resume-same-id --sync-home PROFILE \
+  --registry-session-id REGISTRY_ID --expected-snapshot-id SNAPSHOT \
+  --expected-generation GENERATION --request-id REQUEST_UUID \
+  --expected-device-id DESTINATION_DEVICE
+```
+
+The destination verifies its server-attested installation, the owner-scoped
+released snapshot, package checksums, and native ID. An existing local ID also
+needs byte-identical files and its exact positive managed stop receipt. Files
+are published without replacement, retaining their original ID and bytes.
+Use the same request UUID and arguments after an ambiguous acquire or partial
+publication. It never silently forks, rolls back by deleting files, or opens
+the provider directly. Resume afterward through the managed Vitral Connect
+route; `--open` is refused until that route is integrated.
+
+The collector sends the acquired writer generation on snapshot, raw, and view
+writes. Under the same resolved provider home, CSL and the managed launcher
+share `.csl-writers/<sha256(UTF-8 native ID)>.lock`. A durable sibling JSON fence
+contains `schema_version:1`, `provider`, `native_session_id`, and `state`.
+Missing permits legacy starts; `active` permits managed starts;
+`pending`, `publishing`, `releasing`, `released`, unreadable, or malformed fences
+refuse starts. CSL also pins the local profile, device, and registry in `binding`.
+Only the owning profile can upload; ambiguous handoffs remain fenced. No token
+or transcript text is stored in these fences. Hosts must hold the same lock
+while checking the fence, invalidating an older end receipt, reserving the ID,
+and recording the new process incarnation.
+
 `csl sync pull SESSION_ID` downloads one session package the signed-in account
 owns, using this installation's own sign-in. The registry derives the owner from
 that token, so another account's session id is refused (`not_found`) and nothing

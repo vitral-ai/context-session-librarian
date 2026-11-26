@@ -14,7 +14,8 @@ from csl_version import __version__ as VERSION
 MAX_RESPONSE = 16 * 1024 * 1024
 ERROR_CODES = {'unauthenticated', 'session_revoked', 'forbidden', 'not_found', 'invalid_input',
                'prefix_mismatch', 'revision_conflict', 'idempotency_conflict', 'limit_exceeded',
-               'tombstoned', 'package_unavailable', 'unavailable', 'quota_exceeded', 'invalid_grant'}
+               'writer_device_required', 'writer_fenced', 'writer_in_use', 'writer_snapshot_changed',
+               'writer_request_conflict', 'writer_unsupported_source', 'writer_snapshot_incomplete', 'tombstoned', 'package_unavailable', 'unavailable', 'quota_exceeded', 'invalid_grant'}
 
 
 def checked_url(value):

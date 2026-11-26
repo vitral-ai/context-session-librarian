@@ -231,6 +231,10 @@ class Collector:
                     active.append({'provider': provider, 'native_id': native_id, 'last_write_at': metadata['updated_at']})
                 try:
                     if getattr(self.providers, 'unchanged', lambda *a: False)(provider, native_id, self.state.session(provider, native_id)):
+                        if provider in ('codex', 'claude'):
+                            from csl_sync_writer import native_lock, write_headers
+                            with native_lock(provider, native_id):
+                                write_headers(self.state, provider, native_id, self.registry)
                         results.append({'provider': provider, 'native_id': safe_id(native_id), 'status': 'synced', 'unchanged': True})
                         continue
                     self.sync_session(provider, native_id, metadata)
@@ -398,6 +402,16 @@ class Collector:
         return pages, sequence
 
     def sync_session(self, provider, native_id, metadata):
+        from csl_sync_writer import native_lock
+        if provider in ('codex', 'claude'):
+            with native_lock(provider, native_id):
+                return self._sync_session(provider, native_id, metadata)
+        return self._sync_session(provider, native_id, metadata)
+
+    def _sync_session(self, provider, native_id, metadata):
+        from csl_sync_writer import write_headers
+        writer_headers = (write_headers(self.state, provider, native_id, self.registry)
+                          if provider in ('codex', 'claude') else {})
         local = self.state.session(provider, native_id)
         paired_revisions = None
         if getattr(self.providers, 'pair_view_revisions', False) is True:
@@ -490,7 +504,7 @@ class Collector:
             body['snapshot_id'] = snapshot_id
             local.update(snapshot_id=snapshot_id, status='syncing')
             self.state.save_session(provider, native_id, local)  # Fixed before the first remote write.
-            self.registry.call('PUT', path, body=body, key=digest(body))
+            self.registry.call('PUT', path, body=body, headers=writer_headers, key=digest(body))
             remote_files, cursor = {}, None
             for _ in range(10000):
                 suffix = '/files?limit=100' + ('&cursor=' + urllib.parse.quote(cursor, safe='') if cursor else '')
@@ -507,13 +521,13 @@ class Collector:
             for item in files:
                 checkpoint = local['files'][item['file_key']]
                 self.upload(path, item, checkpoint, remote_files.get((item['file_key'], checkpoint['revision'])),
-                            on_progress=lambda: self.state.save_session(provider, native_id, local))
+                            on_progress=lambda: self.state.save_session(provider, native_id, local), writer_headers=writer_headers)
                 self.state.save_session(provider, native_id, local)
             for page_path in pages:
                 page = json.loads(Path(page_path).read_text())
                 payload = {'generation': local['view']['generation'], 'first_seq': page['records'][0]['seq'], 'records': page['records']}
                 check_work(len(json.dumps(payload).encode()))
-                self.registry.call('PUT', path + '/view', body=payload, key=digest(payload))
+                self.registry.call('PUT', path + '/view', body=payload, headers=writer_headers, key=digest(payload))
                 local['view'].update(position=page['position'], last_seq=page['records'][-1]['seq'])
                 self.state.save_session(provider, native_id, local)
                 callback = getattr(self.registry, 'view_acknowledged', None)
@@ -530,7 +544,7 @@ class Collector:
             for item in files: Path(item['spool']).unlink(missing_ok=True)
             for page in pages: Path(page).unlink(missing_ok=True)
 
-    def upload(self, path, item, checkpoint, remote, *, on_progress=lambda: None):
+    def upload(self, path, item, checkpoint, remote, *, on_progress=lambda: None, writer_headers=None):
         offset = remote.get('length', 0) if remote else 0
         if type(offset) is not int or not 0 <= offset <= item['complete_length']:
             checkpoint.update(revision=str(uuid.uuid4()), offset=0, offset_sha256=EMPTY_HASH)
@@ -555,7 +569,7 @@ class Collector:
                 data = source.read(min(self.chunk_size, item['complete_length'] - offset))
                 check_work(len(data))
                 end = offset + len(data)
-                headers = {'X-Start': str(offset), 'X-End': str(end), 'X-Content-SHA256': hashlib.sha256(data).hexdigest()}
+                headers = {**(writer_headers or {}), 'X-Start': str(offset), 'X-End': str(end), 'X-Content-SHA256': hashlib.sha256(data).hexdigest()}
                 if offset: headers['X-Prefix-SHA256'] = h.hexdigest()
                 suffix = '/files/' + segment(item['file_key']) + '/content?' + urllib.parse.urlencode({
                     'revision': checkpoint['revision'], 'mode': 'replace' if item['mode'] == 'rewrite' else 'append'})

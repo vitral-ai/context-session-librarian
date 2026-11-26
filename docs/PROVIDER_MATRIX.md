@@ -25,6 +25,9 @@ The experimental `sync` command publishes through the local provider interface
 for Codex, Claude Code and Antigravity CLI to a registry you configure.
 Raw sync uploads transcripts including any secrets they contain. See [sync](SYNC.md)
 and [Antigravity scope and limitations](ANTIGRAVITY.md).
+Explicit registry same-ID Resume is experimental for raw v3 Codex/Claude bundles
+without history bases, with a managed Linux Connect writer handoff. It refuses
+unmanaged source release and direct `--open`; default import remains a Fork.
 An internal [sanitized workload provider foundation](WORKLOAD_PROVIDERS.md)
 adds the [Codex/Claude text profiles](WORKLOAD_TEXT_PROFILES.md)
 for integration tests only. It activates no public command and does not change

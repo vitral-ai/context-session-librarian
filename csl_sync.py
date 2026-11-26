@@ -243,6 +243,30 @@ def command(args, csl):
                 result = Collector(state, registry, None).register()
                 print(json.dumps({'device_id': state.get('device_id'), 'registered': True}))
                 return
+            if action == 'release-writer':
+                from csl_sync_writer import Writer, native_id, native_lock, require_stopped
+                from csl_sync_providers import _resolve, _metadata
+                native_id(args.native_id)
+                native_id(args.registry_session_id)
+                native_id(args.expected_snapshot_id)
+                native_id(args.expected_device_id)
+                if not 0 <= args.expected_generation < 2**63 - 1:
+                    raise SyncError('invalid_writer_generation')
+                with native_lock(args.provider, args.native_id):
+                    require_stopped(args.provider, args.native_id)
+                    writer = Writer(state, registry)
+                    writer.attest(args.expected_device_id)
+                    local = state.session(args.provider, args.native_id).get('writer', {})
+                    if local.get('state') not in ('releasing', 'released'):
+                        root, path = _resolve(args.provider, args.native_id, None)
+                        metadata = _metadata(args.provider, path, root, 0)
+                        # Keep the same native lock through flush and remote release.
+                        Collector(state, registry, Providers())._sync_session(args.provider, args.native_id, metadata)
+                    result = writer.release(args.provider, args.native_id,
+                        registry_id=args.registry_session_id, snapshot=args.expected_snapshot_id,
+                        generation=args.expected_generation, expected_device=args.expected_device_id)
+                print(json.dumps(result))
+                return
             providers = Providers(state.root)
             collector = Collector(state, registry, providers)
             result = collector.run(days=None if args.all else args.days, providers=args.providers or PROVIDERS,
@@ -380,6 +404,13 @@ def add_commands(subparsers, csl):
     config.add_argument('--limit', type=positive)
     config.add_argument('--folder', action='append')
     actions.add_parser('register-device', help='Register this signed-in installation without uploading sessions.')
+    release = actions.add_parser('release-writer', help='Flush and release a positively ended managed native session. Unmanaged sessions must Fork.')
+    release.add_argument('provider', choices=['codex', 'claude'])
+    release.add_argument('native_id')
+    release.add_argument('--registry-session-id', required=True)
+    release.add_argument('--expected-snapshot-id', required=True)
+    release.add_argument('--expected-generation', required=True, type=int)
+    release.add_argument('--expected-device-id', required=True)
     pull_parser = actions.add_parser('pull', help='Download one of this signed-in account\'s sessions as a package ZIP for csl import. Uses this installation\'s own sign-in; no token in arguments or output.')
     pull_parser.add_argument('session_id')
     pull_parser.add_argument('--out-dir', type=Path, help='Private output directory (default: <sync home>/pulled); created with mode 0700.')

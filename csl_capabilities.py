@@ -32,7 +32,9 @@ def coverage():
         commands[name]['antigravity']='experimental'
     commands['providers'] = {provider:'experimental' for provider in ('codex','claude','antigravity')}
     commands['sync']['antigravity'] = 'experimental'
-    return {"schema_version": 1, "agent_history": {"cli": "csl agents history", "mcp_tool": "history", "read_only": True, "default_retention_per_pair": 200}, "providers": ["codex", "claude", "antigravity"], "commands": commands,
+    return {"schema_version": 1, "same_id_resume": {"status": "experimental", "explicit": True,
+                "providers": ["codex", "claude"], "package_version": 3, "history_bases": False,
+                "managed_source_required": True, "direct_open": False}, "agent_history": {"cli": "csl agents history", "mcp_tool": "history", "read_only": True, "default_retention_per_pair": 200}, "providers": ["codex", "claude", "antigravity"], "commands": commands,
             "sync_providers": {"interface_version":1,"module":"csl_sync_providers",
                                "operations":["list_sessions","raw_files","view_records","package_descriptor"],
                                "network":False,"model_calls":False,"native_package_version":3,

@@ -624,6 +624,18 @@ def publish_session_file(source_path, target):
 
 
 def import_bundle(args, csl):
+    if getattr(args, 'resume_same_id', False):
+        from csl_resume import import_same_id
+        from csl_sync_state import SyncError
+        try:
+            return import_same_id(args, csl)
+        except SyncError as error:
+            if error.code == 'writer_unsupported_source':
+                raise TransferError("This session wasn't started through a supported Vitral launcher, so it can't move machines safely; use Fork (import without --resume-same-id).") from None
+            raise TransferError(error.code) from None
+    if any(getattr(args, key, None) is not None for key in
+           ('registry_session_id', 'expected_snapshot_id', 'expected_generation', 'request_id', 'expected_device_id')):
+        raise TransferError('Writer handoff arguments require --resume-same-id; omit them for Fork.')
     cwd = args.cwd.expanduser().resolve()
     if not args.list and not cwd.is_dir():
         raise TransferError(f"Working directory does not exist: {cwd}")
@@ -812,6 +824,16 @@ def add_commands(subparsers, csl):
     mode = imp.add_mutually_exclusive_group()
     add_open_argument(mode)
     mode.add_argument("--list", action="store_true", help="Validate and list contents without installing.")
+    imp.add_argument('--resume-same-id', action='store_true', help='Explicit registry single-writer Resume; raw v3 only. Default import remains a Fork.')
+    import os
+    sync_base = os.environ.get('LOCALAPPDATA') if os.name == 'nt' else os.environ.get('XDG_STATE_HOME')
+    sync_default = (Path(sync_base) if sync_base else Path.home() / '.local/state') / 'csl' / 'sync'
+    imp.add_argument('--sync-home', type=Path, default=sync_default)
+    imp.add_argument('--registry-session-id')
+    imp.add_argument('--expected-snapshot-id')
+    imp.add_argument('--expected-generation', type=int)
+    imp.add_argument('--request-id')
+    imp.add_argument('--expected-device-id')
     imp.add_argument("--name", help="Rename a single imported session.")
     imp.add_argument("--provider", choices=("codex", "claude", "antigravity"), help="Require this native CLI; defaults to the package provider, not conversion.")
     from csl_conversion import add_conversion_options
