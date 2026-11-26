@@ -11,7 +11,7 @@ import time
 import unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from csl_sync import command
+from csl_sync import command, configure_choice
 from csl_sync_state import State, SyncError, private_json
 from csl_sync_state import exclusive
 from csl_sync_watch import process_birth, watch_owner
@@ -42,6 +42,76 @@ class CLITests(unittest.TestCase):
         self.assertFalse(status['collector']['running'])
         self.assertEqual(status['totals']['pending'], 0)
         self.assertIn('Collector stopped; not paired; policy new.', self.cli('status').stdout)
+
+    def test_interactive_choices_and_cancel_preserve_local_optouts(self):
+        state = State(self.home)
+        self.addCleanup(state.close)
+        state.select('claude', 'private-old', False)
+        choices = [('new', ['']), ('all', ['3']),
+                   ('folders', ['4', str(self.root / 'project'), '']),
+                   ('last', ['2', '1'])]
+        for expected, answers in choices:
+            with self.subTest(expected=expected), patch('csl_sync.sys.stdin.isatty', return_value=True), patch('builtins.input', side_effect=answers), patch('csl_sync.Providers') as providers, redirect_stderr(io.StringIO()):
+                providers.return_value.list_sessions.return_value = [dict(native_id='recent', updated_at='2026-11-26T10:00:00Z')]
+                policy = configure_choice(state)
+                self.assertEqual(policy['selection'], expected)
+                self.assertFalse(state.selection('claude', 'private-old'))
+                if expected == 'last': self.assertEqual(policy['limit'], 1)
+                else: providers.assert_not_called()
+        before = state.get('selection_policy')
+        with patch('csl_sync.sys.stdin.isatty', return_value=True), patch('builtins.input', side_effect=['4', EOFError]), redirect_stderr(io.StringIO()), self.assertRaises(SyncError) as error:
+            configure_choice(state)
+        self.assertEqual(error.exception.code, 'selection_cancelled')
+        self.assertEqual(state.get('selection_policy'), before)
+        result = self.cli('configure')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('selection_required', result.stderr)
+        self.assertEqual(state.get('selection_policy'), before)
+
+    def test_status_recovery_is_actionable_without_changing_credentials(self):
+        state = State(self.home)
+        self.addCleanup(state.close)
+        state.set('settings', dict(enabled=True, endpoint='https://registry.example.test/v1',
+                  discovery_url='https://identity.example.test/discovery', client_id='collector',
+                  scope='session_sync offline_access'))
+        state.set('registered', True)
+        credentials = self.home / 'credentials.json'
+        private_json(credentials, dict(access_token='PRIVATE_ACCESS', refresh_token='PRIVATE_REFRESH',
+                     refresh_state='inflight', expires_at=time.time()+600))
+        before = credentials.read_bytes()
+        result = self.cli('status', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        status = json.loads(result.stdout)
+        self.assertFalse(status['paired'])
+        recovery = status['recovery']
+        self.assertEqual(recovery['reason'], 'refresh_outcome_unknown')
+        self.assertEqual(recovery['argv'][:5], ['csl', 'sync', '--home', str(self.home), 'sign-in'])
+        self.assertIn('https://registry.example.test/v1', recovery['argv'])
+        human = self.cli('status')
+        self.assertIn('Sign in again: csl sync --home', human.stdout)
+        self.assertEqual(credentials.read_bytes(), before)
+        self.assertNotIn('PRIVATE_', result.stdout + result.stderr + human.stdout + human.stderr)
+
+    def test_follow_refreshes_cached_state_without_releasing_watch_owner(self):
+        state = State(self.home)
+        self.addCleanup(state.close)
+        args = argparse.Namespace(sync_home=self.home, sync_action='status', json=True, verbose=False, follow=True, interval=1)
+        out, err = io.StringIO(), io.StringIO()
+        updates = iter([True, False])
+        def update(_):
+            if next(updates): state.set('last_error', 'registry_unavailable')
+            else: raise KeyboardInterrupt
+        with exclusive(state.root), watch_owner(state), patch('csl_sync.time.sleep', side_effect=update):
+            with redirect_stdout(out), redirect_stderr(err), self.assertRaises(SystemExit) as stopped:
+                command(args, None)
+            self.assertEqual(stopped.exception.code, 130)
+            rows = [json.loads(line) for line in out.getvalue().splitlines()]
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[1]['last_error'], 'registry_unavailable')
+            self.assertTrue(rows[0]['collector']['busy'])
+            with self.assertRaises(SyncError):
+                with exclusive(state.root): pass
+            self.assertEqual(state.get('watch_owner')['pid'], os.getpid())
 
     def test_status_reports_actual_watch_supervisor_not_busy_operation(self):
         if process_birth(os.getpid()) is None:

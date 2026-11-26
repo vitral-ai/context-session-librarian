@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
+import subprocess
 import sqlite3
 import stat
 import sys
@@ -24,47 +26,123 @@ WARNING = ('Raw sync uploads the complete transcript bytes and supported compani
            'Only enable it for a registry and account you trust. Nothing syncs until you sign in and run sync.')
 
 
+
+def recovery_action(state, settings, authentication):
+    reason = state.get('last_error')
+    auth_state = authentication.get('state')
+    if auth_state == 'inflight': reason = 'refresh_outcome_unknown'
+    elif auth_state in ('revoked', 'signed_out'): reason = 'sign_in_required'
+    if reason not in ('refresh_outcome_unknown', 'sign_in_required', 'credential_revoked'):
+        return None
+    keys = ('endpoint', 'discovery_url', 'client_id')
+    if not all(isinstance(settings.get(key), str) and settings[key] for key in keys):
+        return {'reason': reason, 'command': None, 'argv': None}
+    argv = ['csl', 'sync', '--home', str(state.root), 'sign-in']
+    for key in keys + ('scope', 'audience', 'label', 'kind', 'environment'):
+        value = settings.get(key)
+        if value:
+            option = 'environment-name' if key == 'environment' else key.replace('_', '-')
+            argv.extend(['--' + option, str(value)])
+    return dict(reason=reason, argv=argv,
+                command=subprocess.list2cmdline(argv) if os.name == 'nt' else shlex.join(argv))
+
+
+def status_snapshot(state):
+    settings = state.get('settings', {})
+    result = state.status()
+    result['authentication'] = Tokens(state.root, settings).status()
+    result['enabled'] = bool(settings.get('enabled'))
+    result.update(schema_version=1, paired=bool(result['authentication']['signed_in'] and state.get('registered', False)),
+                  policy=state.get('selection_policy', {'selection': 'legacy', 'configured_at': None, 'limit': None, 'folders': []}))
+    try:
+        with exclusive(state.root): running = False
+    except SyncError as error:
+        if error.code != 'collector_busy': raise
+        running = True
+    busy = running
+    running = busy and state.get('lock_action') in ('run', 'watch')
+    result['collector'] = {'running': running, 'busy': busy}
+    from csl_sync_watch import watch_pid
+    owner_pid = watch_pid(state) if busy else None
+    if owner_pid is not None:
+        result['collector'].update(running=True, watch_pid=owner_pid)
+    rows = result['sessions']
+    included = [row for row in rows if row['selected']]
+    result['totals'] = dict(selected=len(included), synced=sum(row['status'] == 'synced' for row in included),
+                            pending=sum(row['status'] != 'synced' for row in included),
+                            excluded=state.db.execute('SELECT COUNT(*) FROM selections WHERE included=0').fetchone()[0],
+                            synced_bytes=sum(row['synced_bytes'] for row in included),
+                            planned_bytes=sum(row['planned_bytes'] for row in included))
+    recovery = recovery_action(state, settings, result['authentication'])
+    if recovery:
+        result['recovery'] = recovery
+        result['paired'] = False
+    return result
+
+
+def print_status(result, *, verbose=False):
+    totals = result['totals']
+    running = result['collector']['running']
+    print(f"Collector {'running' if running else 'stopped'}; {'paired' if result['paired'] else 'not paired'}; policy {result['policy']['selection']}.")
+    print(f"{totals['synced']} synced, {totals['pending']} pending, {totals['excluded']} excluded; {totals['synced_bytes']}/{totals['planned_bytes']} bytes uploaded.")
+    if result.get('last_error'): print('Last error: ' + result['last_error'])
+    recovery = result.get('recovery')
+    if recovery:
+        print('Sign in again: ' + (recovery['command'] or 'csl sync sign-in --help'))
+    if verbose:
+        for row in result['sessions']:
+            print(f"{row['provider']} {row['native_id']} {row['status']} {row['last_error'] or ''}")
+    if running:
+        print('You can close this status view; the collector continues running.')
+    else:
+        print('This view does not start uploads; start your configured collector service to sync.')
+
+
+def configure_choice(state, selection=None, *, limit=None, folders=()):
+    from csl_sync_policy import configure
+    if selection is None:
+        if not sys.stdin.isatty():
+            raise SyncError('selection_required')
+        print('Upload sessions: 1) New only [default]  2) Last N and new  3) Everything  4) By folder', file=sys.stderr)
+        def answer(prompt):
+            try: return input(prompt).strip()
+            except EOFError: raise SyncError('selection_cancelled') from None
+        choice = answer('Choice [1]: ') or '1'
+        selection = {'1': 'new', '2': 'last', '3': 'all', '4': 'folders'}.get(choice)
+        if selection is None: raise SyncError('invalid_selection_policy')
+        if selection == 'last':
+            try: limit = int(answer('How many recent sessions? [30]: ') or '30')
+            except ValueError: raise SyncError('invalid_selection_limit') from None
+        elif selection == 'folders':
+            paths = []
+            while True:
+                value = answer('Folder (empty to finish): ')
+                if not value: break
+                paths.append(value)
+            folders = paths
+    rows = []
+    if selection == 'last':
+        sources = Providers(state.root)
+        for provider in PROVIDERS:
+            rows.extend({**row, 'provider': provider} for row in sources.list_sessions(provider))
+    return configure(state, selection, limit=limit, folders=folders, rows=rows)
+
+
 def command(args, csl):
     state = None
     try:
         state = State(args.sync_home)
         action = args.sync_action
         if action == 'status':
-            settings = state.get('settings', {})
-            result = state.status()
-            result['authentication'] = Tokens(state.root, settings).status()
-            result['enabled'] = bool(settings.get('enabled'))
-            result.update(schema_version=1, paired=bool(result['authentication']['signed_in'] and state.get('registered', False)),
-                          policy=state.get('selection_policy', {'selection': 'legacy', 'configured_at': None, 'limit': None, 'folders': []}))
-            try:
-                with exclusive(state.root): running = False
-            except SyncError as error:
-                if error.code != 'collector_busy': raise
-                running = True
-            busy = running
-            running = busy and state.get('lock_action') in ('run', 'watch')
-            result['collector'] = {'running': running, 'busy': busy}
-            from csl_sync_watch import watch_pid
-            owner_pid = watch_pid(state) if busy else None
-            if owner_pid is not None:
-                result['collector'].update(running=True, watch_pid=owner_pid)
-            rows = result['sessions']
-            included = [row for row in rows if row['selected']]
-            result['totals'] = dict(selected=len(included), synced=sum(row['status'] == 'synced' for row in included),
-                                    pending=sum(row['status'] != 'synced' for row in included),
-                                    excluded=state.db.execute('SELECT COUNT(*) FROM selections WHERE included=0').fetchone()[0],
-                                    synced_bytes=sum(row['synced_bytes'] for row in included),
-                                    planned_bytes=sum(row['planned_bytes'] for row in included))
-            if args.json:
-                print(json.dumps(result, separators=(',', ':')))
-            else:
-                totals = result['totals']
-                print(f"Collector {'running' if running else 'stopped'}; {'paired' if result['paired'] else 'not paired'}; policy {result['policy']['selection']}.")
-                print(f"{totals['synced']} synced, {totals['pending']} pending, {totals['excluded']} excluded; {totals['synced_bytes']} bytes uploaded.")
-                if args.verbose:
-                    for row in rows: print(f"{row['provider']} {row['native_id']} {row['status']} {row['last_error'] or ''}")
-                if running: print('You can close this status view; the collector continues running.')
-            return
+            while True:
+                result = status_snapshot(state)
+                if args.json:
+                    print(json.dumps(result, separators=(',', ':')), flush=True)
+                else:
+                    print_status(result, verbose=args.verbose)
+                    sys.stdout.flush()
+                if not getattr(args, 'follow', False): return
+                time.sleep(args.interval)
         if action == 'watch':
             settings = state.get('settings', {})
             if not settings.get('enabled') or not Tokens(state.root, settings).status()['signed_in']:
@@ -90,13 +168,7 @@ def command(args, csl):
         with pass_lock(state.root):
             state.set('lock_action', action)
             if action == 'configure':
-                from csl_sync_policy import configure
-                rows = []
-                if args.selection == 'last':
-                    sources = Providers(state.root)
-                    for provider in PROVIDERS:
-                        rows.extend({**row, 'provider': provider} for row in sources.list_sessions(provider))
-                policy = configure(state, args.selection, limit=args.limit, folders=args.folder or [], rows=rows)
+                policy = configure_choice(state, args.selection, limit=args.limit, folders=args.folder or [])
                 print(json.dumps({'policy': policy, 'remote_deleted': False}))
                 return
             if action in ('include', 'exclude'):
@@ -107,8 +179,7 @@ def command(args, csl):
                 print(WARNING, file=sys.stderr)
                 # Preserve installed collectors' legacy selection; new installs anchor once.
                 if state.get('selection_policy') is None and not state.get('settings'):
-                    from csl_sync_policy import configure
-                    configure(state, 'new')
+                    configure_choice(state, None if sys.stdin.isatty() else 'new')
                 state.set('registered', False)
                 settings = {'endpoint': checked_url(args.endpoint), 'client_id': args.client_id,
                             'discovery_url': checked_url(args.discovery_url), 'scope': args.scope,
@@ -284,10 +355,12 @@ def add_commands(subparsers, csl):
     signin.add_argument('--callback-port', type=port, default=0, help='Loopback port; 0 chooses a free port. Useful with an explicit SSH forward.')
     signin.add_argument('--manual-browser', action='store_true', help='Write the authorization URL to a private state file, never logs; open it in your own system browser.')
     status = actions.add_parser('status', help='Short local collector status; no network calls or credentials.')
+    status.add_argument('--follow', action='store_true', help='Read-only progress view; Ctrl-C closes this view, not the collector.')
+    status.add_argument('--interval', type=positive, default=2, help='Seconds between local progress snapshots.')
     status.add_argument('--json', action='store_true', help='Versioned machine-readable status.')
     status.add_argument('--verbose', action='store_true', help='Include the per-session table.')
     config = actions.add_parser('configure', help='Choose local upload selection; never deletes remote sessions. Stop watch first.')
-    config.add_argument('--selection', required=True, choices=['new', 'last', 'all', 'folders'])
+    config.add_argument('--selection', choices=['new', 'last', 'all', 'folders'])
     config.add_argument('--limit', type=positive)
     config.add_argument('--folder', action='append')
     actions.add_parser('register-device', help='Register this signed-in installation without uploading sessions.')
