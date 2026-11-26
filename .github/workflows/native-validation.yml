@@ -63,5 +63,7 @@ jobs:
           CSL_RUN_MEDIA_TESTS: '1'
           CSL_MEDIA_SANDBOX: required
         run: |
-          lab=$(mktemp -d)
+          # Execution checks reject writable ancestors such as /tmp.
+          lab=$(mktemp -d "$HOME/.csl-native-validation.XXXXXX")
+          trap 'rm -rf "$lab"' EXIT
           env HOME="$lab" CODEX_HOME="$lab/codex" CLAUDE_CONFIG_DIR="$lab/claude" python -m unittest discover -s tests -v
