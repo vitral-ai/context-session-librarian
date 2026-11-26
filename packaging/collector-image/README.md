@@ -247,3 +247,20 @@ uno por separado y en modo de solo lectura. Ambas fuentes usan el mismo registro
 administrado y conservan sus versiones y filtros de formato individuales.
 La opción requiere un estado nuevo del supervisor cuando se activa por primera
 vez. No copies el estado de registro de otro entorno.
+
+### Registro del runtime en Vitral Connect
+
+Ejecuta una vez `csl-workload-collector --connect-runtime` con la configuración
+habitual del collector, `VITRAL_TUNNEL_HOME` para el estado del host y estas
+variables del entorno:
+
+- `VITRAL_CONNECT_ORGANIZATION` contiene el ID de la organización.
+- `VITRAL_CONNECT_METHOD` es `oidc` o `join_token`.
+- `VITRAL_CONNECT_CREDENTIAL_FILE` apunta al archivo privado con el token.
+- `VITRAL_HOST_BINARY` puede indicar el binario de Vitral Host ya verificado.
+- `VITRAL_TUNNEL_KIND` es `container` para Pods o `ssh` para VMs.
+
+El comando requiere `ssh-keygen` y usa HTTPS en el puerto 443. Si devuelve
+`enrolled: true`, ambos registros están listos. Conserva los dos directorios de
+estado para reintentar la misma solicitud tras un fallo transitorio. El archivo
+del token se monta solo durante el registro.
