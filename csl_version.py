@@ -4,7 +4,7 @@ import re
 import subprocess
 from pathlib import Path
 
-__version__ = "0.5.1"
+__version__ = Path(__file__).with_name("VERSION").read_text(encoding="ascii").strip()
 _ARCHIVE_COMMIT = "$Format:%H$"
 
 
