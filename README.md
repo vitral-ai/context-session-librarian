@@ -49,6 +49,18 @@ Make sure `~/.local/bin` is on `PATH`. The installer prints
 the installed launcher's version and warns if your shell resolves `csl` to a
 different installation. Keep the checkout: the installed launcher
 points to it. You can choose another installation prefix with `./install.sh PREFIX`.
+For an existing tagged checkout, update inside its retained directory after the
+release is published (keep any local changes; do not reset them):
+
+```bash
+git fetch --tags
+git switch --detach v0.5.0
+csl --version
+```
+
+Only branch-tracking development checkouts use `git pull --ff-only`.
+Pinned guided installations update through their installer release.
+
 Context Session Librarian was previously named Codex Session Librarian; the
 `csl` command and existing installation paths remain compatible.
 

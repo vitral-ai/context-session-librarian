@@ -16,8 +16,11 @@ checks and independent review pass. Record the final source SHA, immutable archi
 URL, byte count and SHA-256 in the GitHub Release for the guided installer.
 Distribution remains a source checkout/archive with Python 3.11+; no wheel,
 package registry, bundled interpreter or automatic updater is introduced.
-Existing checkouts update explicitly with `git pull --ff-only`; pinned guided
-installers need their owner to update the archive pin. Downloading or installing
+Branch-tracking development checkouts update with `git pull --ff-only`. Tagged
+installs have a detached HEAD: update with `git fetch --tags` followed by
+`git switch --detach v0.5.0` after publication. Keep local edits separately; do
+not reset or discard them. Pinned guided installers need their owner to update
+the archive pin. Downloading or installing
 starts no service and preserves local authentication/selection state.
 
 This release includes bounded collector passes, upload selection and short/JSON
