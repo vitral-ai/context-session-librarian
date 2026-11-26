@@ -39,7 +39,8 @@ workflow under `docs/` before changing it.
 - Import and launch: add `--open`. Use a local directory that actually exists.
 - Default export is portable: it removes encrypted reasoning/state while
   retaining conversation and tool history. `--raw` retains encrypted content.
-- Imports always create new UUIDs. Never overwrite the source or reuse its ID.
+- Imports create new UUIDs by default. Only explicit registry `--resume-same-id`
+  uses the single-writer handoff in docs/SYNC.md; never overwrite existing bytes.
 - Archives are searched by filename even when absent from the CSL index.
 - Source metadata without messages cannot restore a conversation. Report that
   limitation rather than inventing context or presenting it as a usable export.

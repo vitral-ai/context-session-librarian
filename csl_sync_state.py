@@ -161,7 +161,14 @@ class State:
     def reset_checkpoints(self):
         # Fresh authorization can select a different account/registry; preserve opt-outs.
         with self.db:
-            self.db.execute('UPDATE sessions SET data=?', (json.dumps({'files': {}, 'view': {}, 'status': 'pending'}),))
+            rows = list(self.db.execute('SELECT provider,native_id,data FROM sessions'))
+            for provider, native_id, raw in rows:
+                previous = json.loads(raw)
+                data = {'files': {}, 'view': {}, 'status': 'pending'}
+                # Authorization changes must never erase a pending/released writer fence.
+                if 'writer' in previous: data['writer'] = previous['writer']
+                self.db.execute('UPDATE sessions SET data=? WHERE provider=? AND native_id=?',
+                                (json.dumps(data), provider, native_id))
 
     def status(self):
         rows = []
