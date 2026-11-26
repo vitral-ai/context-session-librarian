@@ -224,7 +224,8 @@ class WorkloadTokens:
                 raise SyncError('workload_identity_binding_changed')
             public, thumb = self._public(value)
             return {'public_jwk': public, 'workload_jkt': b64(thumb),
-                    'state': value['phase'] if value else 'signed_out'}
+                    'state': value['phase'] if value else 'signed_out',
+                    'managed_assignment': value.get('managed_assignment') if value else None}
 
     def enroll_connect(self, assertion):
         return self._enroll_managed(assertion, CONNECT_ISSUER)

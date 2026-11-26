@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 from uuid import UUID
 
-from csl_sync_state import SyncError
+from csl_sync_state import SyncError, private_json
 from csl_workload_connect import ConnectHTTP, NAMESPACE, credential_from_file, enroll_runtime, proofs_for, signed_message
 from csl_workload_identity import WorkloadKey, b64, unb64
 
@@ -126,6 +126,12 @@ class RuntimeEnrollmentTests(unittest.TestCase):
                 fail_collector = False
                 raise SyncError('fixture_lost_response')
             identity['state'] = 'ready'
+            identity['managed_assignment'] = {'environment_id': ENVIRONMENT, 'generation': 2}
+
+        def lose_final_write(path, value, **kwargs):
+            if value.get('complete') is True:
+                raise OSError('fixture_interrupted_journal')
+            private_json(path, value, **kwargs)
 
         identity = {'public_jwk': self.collector['public_jwk'], 'state': 'signed_out'}
         tokens = SimpleNamespace(key=self.key, connect_identity=lambda: dict(identity), enroll_connect=collector)
@@ -134,8 +140,19 @@ class RuntimeEnrollmentTests(unittest.TestCase):
         with patch('csl_workload_connect.run_host', host):
             with self.assertRaisesRegex(SyncError, 'fixture_lost_response'):
                 enroll_runtime(self.config, tokens, **args)
-            result = enroll_runtime(self.config, tokens, **args)
+            with patch('csl_workload_connect.private_json', lose_final_write):
+                with self.assertRaisesRegex(OSError, 'fixture_interrupted_journal'):
+                    enroll_runtime(self.config, tokens, **args)
+            self.assertEqual((self.collector_state / 'host-id').read_text(), HOST_ID + '\n')
+            journal = self.host_state / 'connect.json'
+            self.assertNotIn('complete', json.loads(journal.read_text()))
             self.credential.unlink()
+            identity['managed_assignment']['generation'] = 3
+            with self.assertRaisesRegex(SyncError, 'workload_connect_existing_grant'):
+                enroll_runtime(self.config, tokens, **args)
+            identity['managed_assignment']['generation'] = 2
+            result = enroll_runtime(self.config, tokens, **args)
+            self.assertTrue(json.loads(journal.read_text())['complete'])
             self.assertEqual(enroll_runtime(self.config, tokens, **args), result)
         self.assertEqual(result, {'host_id': HOST_ID, 'environment_id': ENVIRONMENT, 'enrollment_id': ENROLLMENT})
         self.assertEqual(events, ['host', 'collector', 'host', 'collector'])

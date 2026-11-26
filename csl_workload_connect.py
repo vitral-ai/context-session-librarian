@@ -15,11 +15,12 @@ from uuid import UUID, uuid4
 from csl_sync_fs import durable_replace, flush_directory
 from csl_sync_http import HTTP
 from csl_sync_state import SyncError, exclusive, private_directory, private_json
+from csl_workload_auth import CONNECT_ISSUER, managed_binding
 from csl_workload_http import WorkloadHTTP
 from csl_workload_identity import canonical, metadata, public_key, unb64
 from csl_workload_state import read_record
 
-ISSUER = 'vitral-connect-enrollment'
+ISSUER = CONNECT_ISSUER
 CLIENT = 'vitral-connect-v1'
 NAMESPACE = 'vitral-connect-enroll@vitral'
 REQUEST_FIELDS = ('organization_id', 'method', 'request_id', 'challenge_id')
@@ -122,6 +123,21 @@ def run_host(argv, env):
         raise SyncError('workload_connect_host_unavailable') from None
 
 
+def complete_enrollment(journal, intent, state_root, host_id):
+    with tempfile.NamedTemporaryFile(mode='w', encoding='ascii', dir=state_root,
+                                     prefix='.host-id-', delete=False) as temporary:
+        temporary.write(host_id + '\n')
+        temporary.flush()
+        os.fsync(temporary.fileno())
+    try:
+        durable_replace(temporary.name, state_root / 'host-id')
+        flush_directory(state_root)
+    finally:
+        Path(temporary.name).unlink(missing_ok=True)
+    intent['complete'] = True
+    private_json(journal, intent, durable=True)
+
+
 def enroll_runtime(config, tokens, *, organization, method, credential_path, host_state, host_binary,
                    host_kind, http=None):
     if (not re.fullmatch(r'[a-f0-9]{24}', organization)
@@ -154,19 +170,28 @@ def enroll_runtime(config, tokens, *, organization, method, credential_path, hos
         assignment = intent.get('assignment', {})
         if not assignment and (host_state/'api.HOST_ID').exists():
             raise SyncError('workload_connect_existing_grant')
-        result = {
-            'enrollment_id': assignment.get('enrollment_id'),
-            'environment_id': assignment.get('environment_id'),
-        }
-        if intent.get('complete') is True:
-            if identity['state'] not in ('ready', 'refresh_inflight'):
+        if identity['state'] in ('ready', 'refresh_inflight'):
+            try:
+                binding = managed_binding({key: assignment[key] for key in ('environment_id', 'generation')})
+            except (KeyError, TypeError, ValueError):
+                raise SyncError('workload_connect_existing_grant') from None
+            if identity['managed_assignment'] != binding:
                 raise SyncError('workload_connect_existing_grant')
-            return {**result, 'host_id': enrolled_host(host_state, result['environment_id'])}
+            enrollment = request_uuid(assignment.get('enrollment_id'))
+            host_id = enrolled_host(host_state, binding['environment_id'])
+            # Collector redemption follows a successful host redemption. Both
+            # bindings therefore survive an interrupted final journal write.
+            if intent.get('complete') is not True:
+                complete_enrollment(journal, intent, config.state_root, host_id)
+            return {'enrollment_id': enrollment, 'environment_id': binding['environment_id'], 'host_id': host_id}
+        if identity['state'] != 'signed_out' or intent.get('complete') is True:
+            raise SyncError('workload_connect_existing_grant')
 
         request = {'organization_id': organization, 'method': method, 'request_id': request_uuid(intent['request_id'])}
+        credential = credential_from_file(credential_path)
         challenge = http.post('challenges', request)
         request = {**request, 'challenge_id': request_uuid(challenge.get('challenge_id')),
-                   'credential': credential_from_file(credential_path), 'host': host, 'collector': collector}
+                   'credential': credential, 'host': host, 'collector': collector}
         request['proofs'] = proofs_for(request, challenge.get('nonce'), host_state, tokens.key)
         answer = http.post('exchanges', request)
         received = {key: request_uuid(answer.get(key)) for key in ('enrollment_id', 'environment_id')}
@@ -193,19 +218,7 @@ def enroll_runtime(config, tokens, *, organization, method, credential_path, hos
             run_host([host_binary, 'enroll', '--assignment-file', str(assertion_file)], env)
         result['host_id'] = enrolled_host(host_state, received['environment_id'])
         tokens.enroll_connect(answer['collector']['assignment_assertion'])
-        handoff = config.state_root / 'host-id'
-        with tempfile.NamedTemporaryFile(mode='w', encoding='ascii', dir=config.state_root,
-                                         prefix='.host-id-', delete=False) as temporary:
-            temporary.write(result['host_id'] + '\n')
-            temporary.flush()
-            os.fsync(temporary.fileno())
-        try:
-            durable_replace(temporary.name, handoff)
-            flush_directory(config.state_root)
-        finally:
-            Path(temporary.name).unlink(missing_ok=True)
-        intent['complete'] = True
-        private_json(journal, intent, durable=True)
+        complete_enrollment(journal, intent, config.state_root, result['host_id'])
         return result
 
 

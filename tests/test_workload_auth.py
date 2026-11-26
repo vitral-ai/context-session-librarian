@@ -171,6 +171,7 @@ class WorkloadAuthTests(unittest.TestCase):
         with self.assertRaisesRegex(SyncError, 'workload_identity_binding_changed'):
             client.enroll_managed(self.assignment())
         self.assertEqual(client.connect_identity()['state'], 'ready')
+        self.assertEqual(client.connect_identity()['managed_assignment'], self.journal()['managed_assignment'])
         self.client().access_token(force_refresh=True)
         self.assertEqual(self.journal()['managed_issuer'], CONNECT_ISSUER)
         self.assertEqual([kind for kind, _ in self.issuer.effects], ['managed', 'refresh'])
