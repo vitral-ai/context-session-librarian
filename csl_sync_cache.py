@@ -109,7 +109,7 @@ class CachedProviders:
                 paths = self.sources(provider, path, home, entry)
                 stamp = self.fingerprint(paths, home)
                 elapsed = self.clock() - entry['checked_at'] if entry else -1
-                reusable = bool(entry and entry.get('schema') == 2 and entry.get('title_version') == 1 and entry.get('index_valid', True))
+                reusable = bool(entry and entry.get('schema') == 2 and entry.get('title_version') == 2 and entry.get('index_valid', True))
                 reuse = bool(reusable and entry.get('fingerprint') == stamp and
                              0 <= elapsed < self.verify_seconds)
                 if not reuse and reusable and entry.get('fingerprint') == stamp:
@@ -245,7 +245,7 @@ class CachedProviders:
             reason = None if has_conversation else 'no_conversation'
             package = ({'available': False, 'reason': reason, 'descriptor_version': 1, 'manifest': None, 'members': []}
                        if reason else self.module._package_mapping(provider, metadata['native_id'], frozen.suffix, metadata, inventory, nodes=nodes))
-            return {'schema': 2, 'title_version': 1, 'metadata': metadata, 'inventory': inventory, 'package': package,
+            return {'schema': 2, 'title_version': 2, 'metadata': metadata, 'inventory': inventory, 'package': package,
                     'index_valid': True,
                     'view_binding': binding,
                     'graph_rollouts': [n.rollout_id for n in nodes[:-1]] if nodes else [],
@@ -296,7 +296,15 @@ class CachedProviders:
 
     def signature(self, provider, native_id):
         found = self.entries.get((provider, native_id))
-        return found[1]['content_signature'] if found else None
+        if not found: return None
+        entry = found[1]
+        # Listing can refresh the cache before collection. Bind the published
+        # title too, so that refresh cannot hide a metadata-only migration.
+        return hashlib.sha256(encoded({
+            'content': entry['content_signature'],
+            'title_version': entry.get('title_version'),
+            'title': entry['metadata'].get('title'),
+        })).hexdigest()
 
     def unchanged(self, provider, native_id, signature):
         return ((provider, native_id) in self.reused and signature is not None and

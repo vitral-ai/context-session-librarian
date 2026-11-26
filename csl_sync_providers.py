@@ -217,7 +217,7 @@ def _metadata(provider, path, root, active_seconds, files=None, *, evidence=None
     modified = max((Path(f['path']).stat().st_mtime for f in files), default=path.stat().st_mtime)
     state = 'archived' if 'archived_sessions' in path.relative_to(root).parts else (
         'active' if datetime.now(timezone.utc).timestamp() - modified <= active_seconds else 'idle')
-    return {'provider': provider, 'native_id': sid, 'title': (first_user_title or title or sid)[:200], 'cwd': cwd,
+    return {'provider': provider, 'native_id': sid, 'title': (title or first_user_title or sid)[:200], 'cwd': cwd,
             'repository': _repository(cwd), 'created_at': created, 'updated_at': updated,
             'model': model, 'record_count': count,
             'byte_count': sum(f['complete_length'] for f in files),
