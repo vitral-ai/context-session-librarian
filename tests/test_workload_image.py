@@ -40,7 +40,7 @@ class WorkloadImageTests(unittest.TestCase):
                 pending.extend(item for item in imports if item.startswith('csl_'))
         value = json.loads((IMAGE/'runtime.json').read_bytes())
         self.assertEqual(set(value['modules']), {name+'.py' for name in expected})
-        self.assertEqual(value['data'], ['packaging/workload-collector/profiles.json', 'LICENSE'])
+        self.assertEqual(value['data'], ['packaging/workload-collector/profiles.json', 'LICENSE', 'VERSION'])
         for forbidden in ('csl_sync.py', 'csl_sync_auth.py', 'codex_sessions.py', 'csl_bridge.py'):
             self.assertNotIn(forbidden, value['modules'])
 

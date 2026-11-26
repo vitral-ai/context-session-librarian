@@ -13,5 +13,5 @@
     "csl_workload_producer.py", "csl_workload_provider.py",
     "csl_workload_runner.py", "csl_workload_state.py", "csl_workload_stream.py"
   ],
-  "data": ["packaging/workload-collector/profiles.json", "LICENSE"]
+  "data": ["packaging/workload-collector/profiles.json", "LICENSE", "VERSION"]
 }
