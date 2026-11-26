@@ -16,12 +16,13 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import urllib.parse
+import urllib.request
 import uuid
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from csl_sync_engine import Collector, Providers
-from csl_sync_http import Registry
+from csl_sync_http import Registry, HTTP, NoRedirect
 from csl_sync_state import State, SyncError
 from csl_sync_writer import Writer, native_lock
 from csl_resume import import_same_id
@@ -34,6 +35,24 @@ def loopback(url):
     if parsed.scheme != 'http' or parsed.hostname not in ('127.0.0.1', 'localhost', '::1'):
         raise ValueError('fixture endpoints must use loopback HTTP')
     return url.rstrip('/')
+
+
+class FixtureRegistry(Registry):
+    """All fixture traffic, including import's internally built client, is direct."""
+    def __init__(self, endpoint, tokens):
+        http = HTTP()
+        http.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        super().__init__(endpoint, tokens, http=http)
+
+
+def require_stale_writer_refused(api, registry_id, current_snapshot):
+    try:
+        api.call('POST', '/sessions/'+registry_id+'/writer/release',
+            body=dict(generation=0, expected_snapshot_id=current_snapshot))
+    except SyncError as error:
+        assert error.code == 'writer_fenced', error.code
+    else:
+        raise AssertionError('stale source release accepted')
 
 
 class Tokens:
@@ -63,12 +82,12 @@ def run(fixture):
                 state.set('device_id', fixture[side]['device_id'])
                 state.set('settings', dict(endpoint=endpoint, kind='local',
                     token_endpoint=identity+'/native-auth/v1/token'))
-                api = Registry(endpoint, Tokens(fixture[side]['access_token']))
+                api = FixtureRegistry(endpoint, Tokens(fixture[side]['access_token']))
                 with environment(directory):
                     Collector(state, api, Providers()).register()
                     assert Writer(state, api).attest(fixture[side]['device_id']) == fixture['account_id']
             source, destination = states
-            source_api = Registry(endpoint, Tokens(fixture['source']['access_token']))
+            source_api = FixtureRegistry(endpoint, Tokens(fixture['source']['access_token']))
             captured = {}
             original = source_api.call
             def capture(method, path, **kwargs):
@@ -106,11 +125,11 @@ def run(fixture):
                 repair_interrupted=False, history_policy='active', registry_session_id=registry_id,
                 expected_snapshot_id=snapshot, expected_generation=0, request_id=str(uuid.uuid4()),
                 expected_device_id=fixture['destination']['device_id'])
-            with environment(destination_root), patch('csl_sync_auth.Tokens', return_value=Tokens(fixture['destination']['access_token'])), redirect_stdout(io.StringIO()):
+            with environment(destination_root), patch('csl_sync_auth.Tokens', return_value=Tokens(fixture['destination']['access_token'])), patch('csl_sync_http.Registry', FixtureRegistry), redirect_stdout(io.StringIO()):
                 assert import_same_id(args, None) == [identifier]
                 path = csl_claude.target_path(identifier, destination_root)
                 with path.open('a') as output: output.write(record('Synthetic B3 destination append'))
-                destination_api = Registry(endpoint, Tokens(fixture['destination']['access_token']))
+                destination_api = FixtureRegistry(endpoint, Tokens(fixture['destination']['access_token']))
                 Collector(destination, destination_api, Providers()).sync_session('claude', identifier,
                     providers._metadata('claude', path, providers.provider_home('claude'), 120))
                 row = destination_api.call('GET', '/sessions/'+registry_id)
@@ -119,12 +138,7 @@ def run(fixture):
                 assert row['sync']['complete'] is True and row['snapshot_id'] != snapshot
             # Exercise the server fence, bypassing the local fence deliberately.
             with environment(source_root):
-                try:
-                    source_api.call('POST', '/sessions/'+registry_id+'/writer/release',
-                        body=dict(generation=0, expected_snapshot_id=snapshot))
-                except SyncError as error:
-                    assert error.code in ('writer_fenced', 'writer_snapshot_changed'), error.code
-                else: raise AssertionError('stale source release accepted')
+                require_stale_writer_refused(source_api, registry_id, row['snapshot_id'])
             return dict(result='PASS', native_id=identifier, registry_id=registry_id,
                 generation=1, same_registry_session=True, managed_process_witness='NOT RUN')
         finally:
