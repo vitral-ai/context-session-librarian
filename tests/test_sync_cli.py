@@ -24,10 +24,22 @@ class CLITests(unittest.TestCase):
         return subprocess.run([sys.executable,str(Path(__file__).resolve().parents[1]/'codex_sessions.py'),'sync','--home',str(self.home),*args],env=env,capture_output=True,text=True,timeout=5)
 
     def test_unsigned_cli_cannot_sync_and_status_does_not_discover_private_sources(self):
-        status=self.cli('status');self.assertEqual(status.returncode,0)
+        status=self.cli('status','--json');self.assertEqual(status.returncode,0)
         self.assertFalse(json.loads(status.stdout)['authentication']['signed_in'])
         run=self.cli('run');self.assertEqual(run.returncode,2);self.assertIn('sign_in_required',run.stderr)
         self.assertNotIn(str(self.root),run.stderr);self.assertFalse((self.root/'codex').exists())
+
+    def test_policy_status_contract_is_local_and_default_is_short(self):
+        result = self.cli('configure', '--selection', 'new')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        policy = json.loads(result.stdout)['policy']
+        status = json.loads(self.cli('status', '--json').stdout)
+        self.assertEqual(status['schema_version'], 1)
+        self.assertEqual(status['policy'], policy)
+        self.assertFalse(status['paired'])
+        self.assertFalse(status['collector']['running'])
+        self.assertEqual(status['totals']['pending'], 0)
+        self.assertIn('Collector stopped; not paired; policy new.', self.cli('status').stdout)
 
     def test_local_selection_and_sign_out_do_not_delete_remote_data(self):
         for action in ['include','exclude']:
@@ -36,7 +48,7 @@ class CLITests(unittest.TestCase):
         s=State(self.home);s.set('settings',{'enabled':True});s.close()
         private_json(self.home/'credentials.json',{'access_token':'fixture-access','refresh_token':'fixture-refresh','refresh_state':'ready','expires_at':time.time()+600})
         r=self.cli('sign-out');self.assertEqual(r.returncode,0);self.assertFalse(json.loads(r.stdout)['remote_revocation'])
-        self.assertNotIn('fixture-access',r.stdout+r.stderr);self.assertFalse(json.loads(self.cli('status').stdout)['enabled'])
+        self.assertNotIn('fixture-access',r.stdout+r.stderr);self.assertFalse(json.loads(self.cli('status','--json').stdout)['enabled'])
 
     def test_foreground_watch_survives_transient_outage_with_bounded_backoff(self):
         s=State(self.home);s.set('settings',{'enabled':True,'endpoint':'http://127.0.0.1:1','token_endpoint':'http://127.0.0.1:1/token','client_id':'fake'});s.close()

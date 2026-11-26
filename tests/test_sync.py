@@ -13,6 +13,8 @@ from csl_sync_engine import Collector
 from csl_sync_http import HTTP, Registry, checked_url
 from csl_sync_state import State, SyncError, exclusive
 from sync_support import FakeProvider, FakeTokens, Peer
+from unittest.mock import patch
+from csl_sync_policy import configure
 
 
 class SyncTests(unittest.TestCase):
@@ -41,6 +43,16 @@ class SyncTests(unittest.TestCase):
     def test_lost_upload_response_is_idempotent(self):
         self.peer.drop_once=True;self.run_pass()
         self.assertEqual(self.data(),b'one\ntwo\n');self.assertEqual(len(self.peer.writes),2)
+
+    def test_bad_recorded_folder_does_not_block_healthy_upload(self):
+        configure(self.state, 'folders', folders=['/fake/project'])
+        healthy = self.provider.list_sessions('codex')[0]
+        bad = {**healthy, 'native_id': 'bad-cwd', 'cwd': '~no-such-fixture-user/project'}
+        with patch.object(self.provider, 'list_sessions', return_value=[bad, healthy]):
+            result = self.run_pass()
+        self.assertEqual(result['synced'], 1)
+        self.assertEqual(result['pending'], 0)
+        self.assertEqual(self.data(), b'one\ntwo\n')
 
     def test_view_from_another_source_snapshot_is_not_published(self):
         render = self.provider.view_records

@@ -95,13 +95,19 @@ class Collector:
         config = self.state.get('settings', {})
         body = {'label': config.get('label', 'CSL device'), 'platform': system(),
                 'kind': config.get('kind', 'local'), 'environment': config.get('environment'), 'csl_version': __version__}
-        return self.registry.call('PUT', '/devices/' + segment(self.state.get('device_id')), body=body,
-                                  key=digest(body))
+        receipt = self.registry.call('PUT', '/devices/' + segment(self.state.get('device_id')), body=body,
+                                     key=digest(body))
+        self.state.set('registered', True)
+        return receipt
 
     def selected(self, provider, row, days, tracked):
         explicit = self.state.selection(provider, row['native_id'])
         if explicit is not None:
             return explicit
+        policy = self.state.get('selection_policy')
+        if policy is not None:
+            from csl_sync_policy import selected
+            return selected(policy, provider, row)
         if (provider, row['native_id']) in tracked or days is None:
             return True
         try:
@@ -127,6 +133,7 @@ class Collector:
         if type(maximum_chunk) is int and maximum_chunk > 0:
             self.chunk_size = min(self.chunk_size, maximum_chunk)
         tracked, active, results = self.state.tracked(), [], []
+        selected_sessions = []
         for provider in providers:
             try:
                 rows = self.providers.list_sessions(provider)
@@ -150,6 +157,7 @@ class Collector:
                     continue
                 if not self.selected(provider, metadata, days, tracked):
                     continue
+                selected_sessions.append([provider, native_id])
                 if metadata.get('state') == 'active' and metadata.get('updated_at'):
                     active.append({'provider': provider, 'native_id': native_id, 'last_write_at': metadata['updated_at']})
                 try:
@@ -168,6 +176,7 @@ class Collector:
                         raise SyncError(code) from None
         self.registry.call('POST', '/devices/' + segment(self.state.get('device_id')) + '/heartbeat',
                            body={'active_sessions': active}, key=str(uuid.uuid4()))
+        self.state.set('selected_sessions', selected_sessions)
         self.state.set('last_pass_at', now())
         self.state.set('last_error', next((r['error'] for r in results if 'error' in r), None))
         return {'device_id': self.state.get('device_id'), 'sessions': results,

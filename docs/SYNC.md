@@ -77,6 +77,49 @@ first (`csl sync sign-in --manual-browser --callback-port PORT ...`, with that
 loopback port forwarded to a browser you control, then `csl sync register-device`).
 A device-code sign-in is not available yet.
 
+## Upload choice and installer contract
+
+Before enabling the platform service, configure the local selection once:
+
+```sh
+csl sync --home STATE configure --selection new
+csl sync --home STATE configure --selection last --limit 30
+csl sync --home STATE configure --selection all
+csl sync --home STATE configure --selection folders --folder ~/work --folder ~/other
+```
+
+Choose one command. `new` selects sessions **created after configuration**, not
+old sessions edited recently. This is the default on a new sign-in. `last` takes
+one snapshot of the N most recently active sessions across providers, then follows
+new sessions. `all` follows everything; `folders` follows sessions whose recorded
+working directory is inside a selected folder. Unknown creation times require
+explicit inclusion for `new`. Local `include`/`exclude` overrides the policy;
+changing policy never removes remote content. Existing installations retain their
+legacy age/tracked-session policy until explicitly configured.
+
+Pairing is the same on Windows, macOS and Linux: `sync --home STATE sign-in`
+with the explicit deployment endpoint, discovery URL and public client ID shown
+above, then `sync --home STATE register-device`. Browser PKCE is required; this
+collector does not offer a device-code login. Installers own platform service
+setup and run `csl sync --home STATE watch --interval 30`. The `--home` argument
+always precedes the subcommand. Sign-in and configuration do not start uploads.
+
+`csl sync --home STATE status` prints a short summary; add `--verbose` for the
+cached session table. `--json` returns `schema_version: 1`, `paired`, `enabled`,
+`collector: {running, busy}`, `policy: {selection, configured_at, limit, folders}`
+(`last` also has `initial_sessions`), and `totals: {selected, synced, pending,
+excluded, synced_bytes, planned_bytes}`. Existing `authentication`, `device_id`,
+`last_error`, `last_pass_at` and `sessions` fields remain. `paired` means local
+sign-in plus successful device registration, not a fresh remote health check.
+Totals cover cached sessions and the latest completed selection scan; exclusions
+include explicit opt-outs not yet scanned. Status does no network or transcript
+reads. When a collector holds its installation lock, the status view says you
+can close it; closing a foreground **watch** still stops that collector.
+
+Session titles use the first real user text, skipping known native bootstrap,
+instruction and tool-result records. Native title/ID is the fallback until real
+user text exists. Raw transcripts are never changed.
+
 ## Scope and status
 
 ```sh

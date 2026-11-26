@@ -39,6 +39,13 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(r['cwd'],str(self.cwd));self.assertEqual(r['state'],'active')
         self.assertEqual({f['role'] for f in p.raw_files('claude',self.sid,home=self.home)},{'transcript','subagent'})
 
+    def test_title_uses_first_real_user_after_bootstrap_and_tool_results(self):
+        bootstrap = {**self.rows[0], 'isMeta': True, 'message': {'role': 'user', 'content': 'bootstrap'}}
+        instructions = {**self.rows[0], 'message': {'role': 'user', 'content': '# AGENTS.md instructions\nsetup'}}
+        self.write(self.path, [bootstrap, instructions, self.rows[2], self.rows[0]])
+        row = p.list_sessions('claude', home=self.home)[0]
+        self.assertEqual(row['title'], 'Decide A')
+
     def test_partial_tail_never_in_hash_or_view(self):
         original=self.path.read_bytes()
         with self.path.open('ab') as f:f.write(b'{"type":"assistant"')
@@ -46,6 +53,13 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(main['complete_length'],len(original));self.assertEqual(main['sha256'],hashlib.sha256(original).hexdigest())
         self.assertEqual(main['size'],len(original)+19)
         self.assertEqual(len(p.view_records('claude',self.sid,home=self.home)['records']),4)
+
+    def test_first_user_title_filters_bootstrap_blocks_not_whole_message(self):
+        first = {**self.rows[0], 'message': {'role': 'user', 'content': [
+            {'type': 'text', 'text': '# AGENTS.md instructions\nsetup'},
+            {'type': 'text', 'text': 'Fix the first real task'}]}}
+        self.write(self.path, [first, self.rows[0]])
+        self.assertEqual(p.list_sessions('claude', home=self.home)[0]['title'], 'Fix the first real task')
 
     def test_pagination_append_and_rewrite_reset(self):
         first=p.view_records('claude',self.sid,home=self.home,limit=2)

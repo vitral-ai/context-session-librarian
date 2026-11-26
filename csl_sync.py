@@ -34,7 +34,32 @@ def command(args, csl):
             result = state.status()
             result['authentication'] = Tokens(state.root, settings).status()
             result['enabled'] = bool(settings.get('enabled'))
-            print(json.dumps(result, separators=(',', ':')))
+            result.update(schema_version=1, paired=bool(result['authentication']['signed_in'] and state.get('registered', False)),
+                          policy=state.get('selection_policy', {'selection': 'legacy', 'configured_at': None, 'limit': None, 'folders': []}))
+            try:
+                with exclusive(state.root): running = False
+            except SyncError as error:
+                if error.code != 'collector_busy': raise
+                running = True
+            busy = running
+            running = busy and state.get('lock_action') in ('run', 'watch')
+            result['collector'] = {'running': running, 'busy': busy}
+            rows = result['sessions']
+            included = [row for row in rows if row['selected']]
+            result['totals'] = dict(selected=len(included), synced=sum(row['status'] == 'synced' for row in included),
+                                    pending=sum(row['status'] != 'synced' for row in included),
+                                    excluded=state.db.execute('SELECT COUNT(*) FROM selections WHERE included=0').fetchone()[0],
+                                    synced_bytes=sum(row['synced_bytes'] for row in included),
+                                    planned_bytes=sum(row['planned_bytes'] for row in included))
+            if args.json:
+                print(json.dumps(result, separators=(',', ':')))
+            else:
+                totals = result['totals']
+                print(f"Collector {'running' if running else 'stopped'}; {'paired' if result['paired'] else 'not paired'}; policy {result['policy']['selection']}.")
+                print(f"{totals['synced']} synced, {totals['pending']} pending, {totals['excluded']} excluded; {totals['synced_bytes']} bytes uploaded.")
+                if args.verbose:
+                    for row in rows: print(f"{row['provider']} {row['native_id']} {row['status']} {row['last_error'] or ''}")
+                if running: print('You can close this status view; the collector continues running.')
             return
         if action == 'watch':
             settings = state.get('settings', {})
@@ -59,12 +84,28 @@ def command(args, csl):
                                   args.out_dir or state.root / 'pulled'), separators=(',', ':')))
             return
         with pass_lock(state.root):
+            state.set('lock_action', action)
+            if action == 'configure':
+                from csl_sync_policy import configure
+                rows = []
+                if args.selection == 'last':
+                    sources = Providers(state.root)
+                    for provider in PROVIDERS:
+                        rows.extend({**row, 'provider': provider} for row in sources.list_sessions(provider))
+                policy = configure(state, args.selection, limit=args.limit, folders=args.folder or [], rows=rows)
+                print(json.dumps({'policy': policy, 'remote_deleted': False}))
+                return
             if action in ('include', 'exclude'):
                 state.select(args.provider, args.native_id, action == 'include')
                 print(json.dumps({'provider': args.provider, 'included': action == 'include', 'remote_deleted': False}))
                 return
             if action == 'sign-in':
                 print(WARNING, file=sys.stderr)
+                # Preserve installed collectors' legacy selection; new installs anchor once.
+                if state.get('selection_policy') is None and not state.get('settings'):
+                    from csl_sync_policy import configure
+                    configure(state, 'new')
+                state.set('registered', False)
                 settings = {'endpoint': checked_url(args.endpoint), 'client_id': args.client_id,
                             'discovery_url': checked_url(args.discovery_url), 'scope': args.scope,
                             'audience': args.audience, 'refresh_replay_grace_seconds': args.refresh_replay_grace_seconds,
@@ -230,7 +271,13 @@ def add_commands(subparsers, csl):
                         help='Seconds to wait for the browser login before giving up (default 180).')
     signin.add_argument('--callback-port', type=port, default=0, help='Loopback port; 0 chooses a free port. Useful with an explicit SSH forward.')
     signin.add_argument('--manual-browser', action='store_true', help='Write the authorization URL to a private state file, never logs; open it in your own system browser.')
-    actions.add_parser('status', help='Local cached IDs, byte counts, pending states and last error; never tokens or transcript text.')
+    status = actions.add_parser('status', help='Short local collector status; no network calls or credentials.')
+    status.add_argument('--json', action='store_true', help='Versioned machine-readable status.')
+    status.add_argument('--verbose', action='store_true', help='Include the per-session table.')
+    config = actions.add_parser('configure', help='Choose local upload selection; never deletes remote sessions. Stop watch first.')
+    config.add_argument('--selection', required=True, choices=['new', 'last', 'all', 'folders'])
+    config.add_argument('--limit', type=positive)
+    config.add_argument('--folder', action='append')
     actions.add_parser('register-device', help='Register this signed-in installation without uploading sessions.')
     pull_parser = actions.add_parser('pull', help='Download one of this signed-in account\'s sessions as a package ZIP for csl import. Uses this installation\'s own sign-in; no token in arguments or output.')
     pull_parser.add_argument('session_id')
