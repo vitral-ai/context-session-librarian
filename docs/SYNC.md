@@ -64,9 +64,14 @@ A pass prepares one transcript at a time using streamed reads and disk-backed
 view/tool indexes. The byte budget counts cumulative reads, verification and
 upload payloads, so preparing a file can cost several times its size. A normal
 budget yield reports `deferred` / `pass_budget`, exits successfully, retains
-acknowledged upload offsets and resumes on a later pass. Increase the budget
-for a transcript whose preparation cannot fit in one pass: incomplete freezing
-and indexing are discarded rather than published. JSONL records above 8 MiB
+acknowledged upload offsets and resumes on a later pass. Once smaller pending
+work is clear, one previously deferred session gets a dedicated pass with a
+fresh, larger time/byte allowance. Repeated deferrals double that allowance
+until a finite preparation fits; newly arriving small work still goes first
+and does not reset the earned allowance. Transcript memory limits remain the
+same. Incomplete freezing and indexing are discarded rather than published.
+The configured budget is the normal-pass allowance, not a hard ceiling on
+these automatic dedicated retries. JSONL records above 8 MiB
 are rejected per session (`record_size_limit`); a bad session does not abort
 healthy peers. These limits do not modify the original transcripts.
 

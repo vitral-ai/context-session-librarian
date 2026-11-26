@@ -1,5 +1,6 @@
 """Opt-in, bounded snapshot publisher. Provider parsing remains provider-owned."""
 from datetime import datetime, timedelta, timezone
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -130,9 +131,9 @@ class Collector:
         if budget_seconds <= 0 or budget_bytes <= 0:
             raise SyncError('invalid_pass_budget')
         with work_budget(WorkBudget(budget_seconds, budget_bytes)):
-            return self._run(days=days, providers=providers)
+            return self._run(days=days, providers=providers, budget_seconds=budget_seconds, budget_bytes=budget_bytes)
 
-    def _run(self, *, days, providers):
+    def _run(self, *, days, providers, budget_seconds, budget_bytes):
         providers = tuple(providers)
         supported = getattr(self.providers, 'supported_providers', PROVIDERS)
         if type(supported) is not tuple or any(not isinstance(name, str) for name in supported):
@@ -166,64 +167,95 @@ class Collector:
         if cheap:
             # Pending/new work precedes verified history. Small files lead within
             # each group; activity breaks ties, across all providers.
+            def already_synced(item):
+                provider, row = item
+                local = self.state.session(provider, row['native_id'])
+                hint = [row.get('byte_count'), row.get('mtime'), list(row.get('_identity', ()))]
+                return local.get('status') == 'synced' and local.get('discovery_hint') == hint
             candidates.sort(key=lambda item: (
-                self.state.session(item[0], item[1]['native_id']).get('status') == 'synced',
+                already_synced(item),
                 item[1].get('byte_count', 0), -item[1].get('mtime', 0),
                 item[0], item[1]['native_id']))
+        previous_deferrals = self.state.get('budget_deferrals') or {}
+        deferrals = {}
+        dedicated_used = False
         for provider, candidate in candidates:
             native_id = candidate['native_id']
-            if self.state.selection(provider, native_id) is False:
+            if not candidate.get('_identity_hint') and self.state.selection(provider, native_id) is False:
                 continue
-            metadata = candidate
-            if cheap and not candidate.get('error'):
+            budget_key = digest([provider, native_id])
+            prior = previous_deferrals.get(budget_key)
+            dedicated = bool(cheap and prior and not dedicated_used and
+                             not any(r['status'] == 'deferred' or
+                                     (r['status'] == 'synced' and not r.get('unchanged'))
+                                     for r in results))
+            seconds, size = budget_seconds, budget_bytes
+            if dedicated:
+                dedicated_used = True
+                seconds = max(seconds, prior['seconds'] * 2)
+                size = max(size, prior['bytes'] * 2, candidate.get('byte_count', 0) * 2)
+            scope = work_budget(WorkBudget(seconds, size)) if dedicated else nullcontext()
+            with scope:
+                metadata = candidate
+                if cheap and not candidate.get('error'):
+                    try:
+                        check_work(available=candidate.get('byte_count', 0))
+                        metadata = self.providers.prepare_session(provider, candidate)
+                    except PassYield:
+                        deferrals[budget_key] = {'seconds': max(seconds, (prior or {}).get('seconds', 0)),
+                                                 'bytes': max(size, (prior or {}).get('bytes', 0))}
+                        if [provider, native_id] in previous_selection:
+                            selected_sessions.append([provider, native_id])
+                        results.append({'provider': provider, 'native_id': safe_id(native_id),
+                                        'status': 'deferred', 'reason': 'pass_budget'})
+                        continue
+                    except Exception as error:
+                        metadata = {**candidate, 'error': getattr(error, 'code', 'source_unavailable')}
+                native_id = metadata['native_id']
+                if metadata.get('error'):
+                    if self.state.selection(provider, native_id) is False:
+                        continue
+                    code = safe_id(metadata['error'])
+                    local = self.state.session(provider, native_id)
+                    local.update(status='error', last_error=code)
+                    # Unknown-age diagnostics must not grant tracked eligibility.
+                    if (provider, native_id) in tracked or self.state.selection(provider, native_id) is True:
+                        self.state.save_session(provider, native_id, local)
+                    results.append({'provider': provider, 'native_id': safe_id(native_id),
+                                    'status': 'error', 'error': code})
+                    continue
+                if not self.selected(provider, metadata, days, tracked):
+                    continue
+                selected_sessions.append([provider, native_id])
+                if metadata.get('state') == 'active' and metadata.get('updated_at'):
+                    active.append({'provider': provider, 'native_id': native_id, 'last_write_at': metadata['updated_at']})
                 try:
-                    check_work(available=candidate.get('byte_count', 0))
-                    metadata = self.providers.prepare_session(provider, candidate)
+                    if getattr(self.providers, 'unchanged', lambda *a: False)(provider, native_id, self.state.session(provider, native_id)):
+                        results.append({'provider': provider, 'native_id': safe_id(native_id), 'status': 'synced', 'unchanged': True})
+                        continue
+                    self.sync_session(provider, native_id, metadata)
+                    if cheap:
+                        local = self.state.session(provider, native_id)
+                        local['discovery_hint'] = [candidate.get('byte_count'), candidate.get('mtime'),
+                                                   list(candidate.get('_identity', ()))]
+                        self.state.save_session(provider, native_id, local)
+                    results.append({'provider': provider, 'native_id': safe_id(native_id), 'status': 'synced'})
                 except PassYield:
-                    if [provider, native_id] in previous_selection:
-                        selected_sessions.append([provider, native_id])
+                    deferrals[budget_key] = {'seconds': max(seconds, (prior or {}).get('seconds', 0)),
+                                                 'bytes': max(size, (prior or {}).get('bytes', 0))}
                     results.append({'provider': provider, 'native_id': safe_id(native_id),
                                     'status': 'deferred', 'reason': 'pass_budget'})
-                    continue
                 except Exception as error:
-                    metadata = {**candidate, 'error': getattr(error, 'code', 'source_unavailable')}
-            native_id = metadata['native_id']
-            if metadata.get('error'):
-                if self.state.selection(provider, native_id) is False:
-                    continue
-                code = safe_id(metadata['error'])
-                local = self.state.session(provider, native_id)
-                local.update(status='error', last_error=code)
-                # Unknown-age diagnostics must not grant tracked eligibility.
-                if (provider, native_id) in tracked or self.state.selection(provider, native_id) is True:
+                    code = getattr(error, 'code', 'sync_failed')
+                    local = self.state.session(provider, native_id)
+                    local.update(status='error', last_error=safe_id(code))
                     self.state.save_session(provider, native_id, local)
-                results.append({'provider': provider, 'native_id': safe_id(native_id),
-                                'status': 'error', 'error': code})
-                continue
-            if not self.selected(provider, metadata, days, tracked):
-                continue
-            selected_sessions.append([provider, native_id])
-            if metadata.get('state') == 'active' and metadata.get('updated_at'):
-                active.append({'provider': provider, 'native_id': native_id, 'last_write_at': metadata['updated_at']})
-            try:
-                if getattr(self.providers, 'unchanged', lambda *a: False)(provider, native_id, self.state.session(provider, native_id)):
-                    results.append({'provider': provider, 'native_id': safe_id(native_id), 'status': 'synced', 'unchanged': True})
-                    continue
-                self.sync_session(provider, native_id, metadata)
-                results.append({'provider': provider, 'native_id': safe_id(native_id), 'status': 'synced'})
-            except PassYield:
-                results.append({'provider': provider, 'native_id': safe_id(native_id),
-                                'status': 'deferred', 'reason': 'pass_budget'})
-            except Exception as error:
-                code = getattr(error, 'code', 'sync_failed')
-                local = self.state.session(provider, native_id)
-                local.update(status='error', last_error=safe_id(code))
-                self.state.save_session(provider, native_id, local)
-                results.append({'provider': provider, 'native_id': safe_id(native_id), 'status': 'error', 'error': safe_id(code)})
-                if code in ('credential_revoked', 'session_revoked', 'sign_in_required', 'refresh_outcome_unknown'):
-                    raise SyncError(code) from None
+                    results.append({'provider': provider, 'native_id': safe_id(native_id), 'status': 'error', 'error': safe_id(code)})
+                    if code in ('credential_revoked', 'session_revoked', 'sign_in_required', 'refresh_outcome_unknown'):
+                        raise SyncError(code) from None
         self.registry.call('POST', '/devices/' + segment(self.state.get('device_id')) + '/heartbeat',
                            body={'active_sessions': active}, key=str(uuid.uuid4()))
+        self.state.set('budget_deferrals', deferrals)
         self.state.set('selected_sessions', selected_sessions)
         self.state.set('last_pass_at', now())
         self.state.set('last_error', next((r['error'] for r in results if 'error' in r), None))

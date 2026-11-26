@@ -47,6 +47,7 @@ class CachedProviders:
         self.module, self.clock, self.verify_seconds = module, clock, verify_seconds
         self.root = private_directory(Path(state_root) / 'provider-cache')
         self.entries, self.hashes, self.reused, self.listed = {}, {}, set(), {}
+        self.identities = {}
 
     def sources(self, provider, path, home, entry=None):
         paths = [path]
@@ -97,28 +98,63 @@ class CachedProviders:
         home = self.module.provider_home(provider)
         discovered = self.module._paths(provider, home)
         self.listed[provider] = (home, discovered)
+        self.identities.pop(provider, None)
         rows, names = [], {}
         for path in discovered:
             check_work()
             ids = self.module.csl_codex_history.identity(path) if provider == 'codex' else None
             match = re.search(r'([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$', path.stem)
+            authoritative = provider != 'codex' or bool(ids or match)
             sid = ids[0] if ids else match.group(1) if match else path.stem
-            names.setdefault(sid, []).append(path)
-        for sid, paths in names.items():
-            row = {'provider': provider, 'native_id': sid, '_path': paths[0]}
+            row = {'provider': provider, 'native_id': sid, '_path': path,
+                   '_identity_hint': not authoritative}
             try:
-                if len(paths) != 1:
-                    self.entries.pop((provider, sid), None)
-                    self.reused.discard((provider, sid))
-                    raise SyncError('ambiguous_native_id')
-                self.module._safe(paths[0], home)
-                info = paths[0].stat()
+                self.module._safe(path, home)
+                info = path.stat()
                 row.update(byte_count=info.st_size, mtime=info.st_mtime,
                            _identity=(info.st_dev, info.st_ino))
             except (OSError, self.module.ProviderError, SyncError) as error:
                 row['error'] = getattr(error, 'code', 'source_unavailable')
             rows.append(row)
+            if authoritative: names.setdefault(sid, []).append(row)
+        for sid, copies in names.items():
+            if len(copies) > 1:
+                self.entries.pop((provider, sid), None)
+                self.reused.discard((provider, sid))
+                for row in copies: row['error'] = 'ambiguous_native_id'
+                for row in copies[1:]: rows.remove(row)
         return rows
+
+    def unique_identity(self, provider, candidate, native_id):
+        """Resolve legacy filename hints before any upload, including aliases.
+
+        Discovery remains stat-only. Only legacy identity records are read here;
+        other sessions are neither frozen nor parsed into a view.
+        """
+        home, paths = self.listed[provider]
+        if provider not in self.identities:
+            identities = {}
+            for path in paths:
+                check_work()
+                try:
+                    self.module._safe(path, home)
+                    ids = self.module.csl_codex_history.identity(path) if provider == 'codex' else None
+                    match = re.search(r'([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$', path.stem)
+                    sid = path.stem if provider != 'codex' else ids[0] if ids else match.group(1) if match else None
+                    if sid is None:
+                        for record, _ in self.module._lines(path):
+                            payload = record.get('payload')
+                            if record.get('type') == 'session_meta' and isinstance(payload, dict):
+                                sid = payload.get('id') or payload.get('session_id')
+                                if sid: break
+                    if isinstance(sid, str): identities.setdefault(sid, []).append(path)
+                except (OSError, self.module.ProviderError):
+                    # A malformed peer is isolated, never treated as this session.
+                    continue
+            self.identities[provider] = identities
+        matches = self.identities[provider].get(native_id, [])
+        if matches != [candidate['_path']]:
+            raise SyncError('ambiguous_native_id' if len(matches) > 1 else 'source_changed')
 
     def prepare_session(self, provider, candidate):
         path = candidate['_path']
@@ -130,10 +166,8 @@ class CachedProviders:
             return self.module._metadata(provider, path, home, 300)
         rows = self.list_sessions(provider, discovered=[path])
         if len(rows) != 1: raise SyncError('source_changed')
-        # The filename is a discovery hint, not authority to change a native ID.
-        if rows[0]['native_id'] != candidate['native_id']:
-            raise SyncError('source_identity_changed')
         if rows[0].get('error'): raise SyncError(rows[0]['error'])
+        self.unique_identity(provider, candidate, rows[0]['native_id'])
         return rows[0]
 
     def list_sessions(self, provider, *, discovered=None):

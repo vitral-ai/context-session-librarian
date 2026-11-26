@@ -76,6 +76,68 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual({row['native_id'] for row in result['sessions'] if row['status']=='synced'},set(small))
         self.assertNotIn(('codex',old),self.state.tracked())
 
+    def test_oversized_preparation_eventually_finishes_without_manual_budget_change(self):
+        large,_ = self.transcript(text='large prompt ' * 10000)
+        small = [self.transcript(provider='claude')[0] for _ in range(3)]
+        def run():
+            return self.collector.run(days=None, providers=('codex','claude'),
+                                      budget_seconds=1, budget_bytes=32768)
+        first = run()
+        rows = {r['native_id']:r for r in first['sessions']}
+        self.assertTrue(all(rows[sid]['status']=='synced' for sid in small), first)
+        self.assertEqual(rows[large]['status'], 'deferred')
+        second = run()
+        self.assertEqual(second['errors'], 0, second)
+        saved = dict(self.state.get('budget_deferrals'))
+        self.assertGreater(next(iter(saved.values()))['seconds'], 1)
+        # Fresh small work preempts the dedicated retry without resetting its
+        # earned allowance. No source truncation or external budget change.
+        fresh,_ = self.transcript(provider='claude')
+        third = run()
+        self.assertTrue(any(r['native_id']==fresh and r['status']=='synced'
+                            for r in third['sessions']), third)
+        self.assertEqual(saved, self.state.get('budget_deferrals'))
+        for _ in range(12):
+            result = run()
+            self.assertEqual(result['errors'], 0, result)
+            if self.state.session('codex',large).get('status') == 'synced':
+                break
+        self.assertEqual(self.state.session('codex',large).get('status'), 'synced', result)
+        self.assertFalse(self.state.get('budget_deferrals'))
+        self.assertFalse(list(self.collector.spool.iterdir()))
+
+    def test_legacy_filename_uses_verified_identity_and_selection(self):
+        sid,path = self.transcript(created='2001-01-01T00:00:00Z')
+        old = path.with_name('older-native-name.jsonl'); path.rename(old)
+        self.state.select('codex', old.stem, False)  # Hint is not authority.
+        self.state.select('codex', sid, True)
+        result = self.collector.run(providers=('codex',))
+        self.assertEqual((result['synced'], result['errors']), (1,0), result)
+        self.assertEqual(result['sessions'][0]['native_id'], sid)
+        self.assertNotIn(('codex',old.stem), self.state.tracked())
+
+    def test_legacy_verified_exclusion_does_not_upload(self):
+        sid,path = self.transcript()
+        path.rename(path.with_name('old.jsonl'))
+        self.state.select('codex',sid,False)
+        result = self.collector.run(days=None,providers=('codex',))
+        self.assertEqual(result['synced'],0,result)
+        self.assertNotIn(('codex',sid), self.state.tracked())
+
+    def test_legacy_aliases_refuse_duplicate_native_ids_before_upload(self):
+        for canonical in (False, True):
+            with self.subTest(canonical=canonical):
+                sid,path = self.transcript()
+                first = path if canonical else path.with_name('old-first.jsonl')
+                if not canonical: path.rename(first)
+                second = path.with_name('old-second.jsonl')
+                second.write_bytes(first.read_bytes())
+                result = self.collector.run(days=None,providers=('codex',))
+                self.assertEqual(result['synced'],0,result)
+                self.assertTrue(all(r.get('error')=='ambiguous_native_id' for r in result['sessions']),result)
+                self.assertNotIn(('codex',sid),self.state.tracked())
+                first.unlink(); second.unlink()
+
     def test_budget_yield_does_not_grant_unknown_age_tracking(self):
         sid,_=self.transcript()
         result=self.collector.run(providers=('codex',),budget_bytes=1)
