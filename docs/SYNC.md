@@ -116,9 +116,9 @@ include explicit opt-outs not yet scanned. Status does no network or transcript
 reads. When a collector holds its installation lock, the status view says you
 can close it; closing a foreground **watch** still stops that collector.
 
-Session titles use the first real user text, skipping known native bootstrap,
-instruction and tool-result records. Native title/ID is the fallback until real
-user text exists. Raw transcripts are never changed.
+Explicit native titles are preserved. Otherwise session titles use the first real
+user text, skipping known native bootstrap, instruction and tool-result records,
+with the native ID as the fallback. Raw transcripts are never changed.
 
 ## Scope and status
 
