@@ -178,6 +178,65 @@ class BudgetTests(unittest.TestCase):
         old.write_text(json.dumps(header) + '\n' + records[1] + '\n')
         self.assertEqual(fresh.cache.legacy_identity(old, self.home), replacement)
 
+    def test_malformed_legacy_id_cannot_poison_later_healthy_pass(self):
+        _, path = self.transcript()
+        old = path.with_name('malformed-old.jsonl'); path.rename(old)
+        old.write_text(json.dumps({'type':'session_meta', 'payload':{'id':'x'*1024**2}}) + '\n')
+        for _ in range(2):
+            healthy, _ = self.transcript()
+            result = self.collector.run(days=None, providers=('codex',))
+            rows = {row['native_id']:row for row in result['sessions']}
+            self.assertEqual(rows[healthy]['status'], 'synced', result)
+            self.assertEqual(rows[old.stem]['error'], 'invalid_native_id', result)
+        self.assertFalse(list(self.providers.cache.root.glob('*.identity.json')))
+
+    def test_legacy_identity_uses_existing_native_id_bounds(self):
+        _, path = self.transcript()
+        old = path.with_name('old-bounds.jsonl'); path.rename(old)
+        for sid in ('a', 'a'*128, 'a'*129, 'space id', 42):
+            with self.subTest(native_id=str(sid)[:16]):
+                old.write_text(json.dumps({'type':'session_meta', 'payload':{'id':sid}}) + '\n')
+                if isinstance(sid, str) and sid in ('a', 'a'*128):
+                    self.assertEqual(self.providers.cache.legacy_identity(old, self.home), sid)
+                else:
+                    with self.assertRaisesRegex(native.ProviderError, 'invalid_native_id'):
+                        self.providers.cache.legacy_identity(old, self.home)
+
+    def test_oversized_prior_identity_cache_recovers_as_miss(self):
+        import hashlib
+        from csl_sync_cache import encoded
+        from csl_sync_state import private_json, read_private_json
+        sid, path = self.transcript()
+        old = path.with_name('old-format.jsonl'); path.rename(old)
+        cache = self.providers.cache
+        key = hashlib.sha256(encoded(['legacy-identity', str(self.home), str(old)])).hexdigest()
+        cache_path = cache.root / (key + '.identity.json')
+        private_json(cache_path, {'fingerprint':cache.fingerprint([old], self.home),
+                                 'complete':True, 'native_id':'x'*1024**2})
+        healthy, _ = self.transcript()
+        result = self.collector.run(days=None, providers=('codex',))
+        self.assertEqual(result['errors'], 0, result)
+        self.assertEqual({row['native_id'] for row in result['sessions']
+                          if row['status']=='synced'}, {sid, healthy}, result)
+        self.assertEqual(read_private_json(cache_path)['native_id'], sid)
+        self.assertLess(cache_path.stat().st_size, 1024)
+
+    def test_unreadable_preflight_cache_is_not_a_credential_failure(self):
+        import csl_sync_cache
+        from csl_sync_state import SyncError
+        sid, path = self.transcript()
+        old = path.with_name('old-unreadable.jsonl'); path.rename(old)
+        # Restrict the injected failure to preflight metadata, never auth files.
+        original = csl_sync_cache.read_private_json
+        def read(path):
+            if str(path).endswith('.identity.json'):
+                raise SyncError('unsafe_credentials_file')
+            return original(path)
+        with patch.object(csl_sync_cache, 'read_private_json', side_effect=read):
+            result = self.collector.run(days=None, providers=('codex',))
+        self.assertEqual((result['synced'], result['errors']), (1, 0), result)
+        self.assertEqual(result['sessions'][0]['native_id'], sid)
+
     def test_legacy_identity_preamble_resumes_without_spending_peer_budget(self):
         sid, path = self.transcript()
         old = path.with_name('old-preamble.jsonl'); path.rename(old)

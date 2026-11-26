@@ -136,8 +136,19 @@ class CachedProviders:
         stamp = self.fingerprint([path], home)
         key = hashlib.sha256(encoded(['legacy-identity', str(home), str(path)])).hexdigest()
         cache_path = self.root / (key + '.identity.json')
-        saved = read_private_json(cache_path) or {}
-        if saved.get('fingerprint') != stamp:
+        try:
+            saved = read_private_json(cache_path) or {}
+        except (SyncError, OSError):
+            # Only this disposable cache uses miss-on-read-error, never auth
+            # files. The private reader still refuses unsafe files without
+            # following links; rebuilding replaces the cache atomically.
+            saved = {}
+        cached_id = saved.get('native_id')
+        if (saved.get('fingerprint') != stamp or
+                type(saved.get('offset')) is not int or not 0 <= saved['offset'] <= path.stat().st_size or
+                type(saved.get('seconds')) not in (int, float) or not 0 < saved['seconds'] <= 30 or
+                (cached_id is not None and (not isinstance(cached_id, str) or
+                 not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', cached_id)))):
             saved = {'fingerprint': stamp, 'offset': 0, 'seconds': 1}
         if saved.get('complete'):
             return saved.get('native_id')
@@ -159,7 +170,10 @@ class CachedProviders:
             raise
         if self.fingerprint([path], home) != stamp:
             raise SyncError('source_changed')
-        saved.update(complete=True, native_id=sid if isinstance(sid, str) else None)
+        if sid is not None and (not isinstance(sid, str) or
+                                not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', sid)):
+            raise self.module.ProviderError('invalid_native_id')
+        saved.update(complete=True, native_id=sid)
         private_json(cache_path, saved)
         return saved['native_id']
 
