@@ -73,6 +73,32 @@ class CacheTests(unittest.TestCase):
         refreshed = Providers(self.state.root).list_sessions('codex')
         self.assertEqual(refreshed[0]['title'], 'Explicit searchable title')
 
+    def test_listing_before_pass_still_publishes_migrated_title(self):
+        self.rows.append({'type': 'event_msg', 'payload': {
+            'type': 'thread_name_updated', 'thread_name': 'Explicit searchable title'}})
+        self.write()
+        metadata = native._metadata
+        def old_metadata(*args, **kwargs):
+            return {**metadata(*args, **kwargs), 'title': 'choose blue'}
+        with patch.object(native, '_metadata', side_effect=old_metadata):
+            self.assertEqual(self.run_pass()['synced'], 1)
+        self.assertEqual(next(iter(self.peer.sessions.values()))['title'], 'choose blue')
+        directory, entry = self.providers.cache.entries[('codex', self.sid)][:2]
+        entry['title_version'] = 1
+        private_json(directory / 'entry.json', entry)
+        # Prior collectors persisted only the inventory signature.
+        local = self.local()
+        local['verified_cache'] = entry['content_signature']
+        self.state.save_session('codex', self.sid, local)
+        self.providers = Providers(self.state.root)
+        self.providers.cache.clock = lambda: self.clock[0]
+        self.collector.providers = self.providers
+        # configure --selection last enumerates sessions before the next pass.
+        self.assertEqual(self.providers.list_sessions('codex')[0]['title'], 'Explicit searchable title')
+        self.assertEqual(self.run_pass()['synced'], 1)
+        self.assertEqual(next(iter(self.peer.sessions.values()))['title'], 'Explicit searchable title')
+        self.assertTrue(self.run_pass()['sessions'][0]['unchanged'])
+
     def test_append_renders_only_tail_and_preserves_historical_tool_correlation(self):
         self.run_pass(); old_length = self.path.stat().st_size
         position = self.local()['view']['position']

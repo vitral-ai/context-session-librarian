@@ -296,7 +296,15 @@ class CachedProviders:
 
     def signature(self, provider, native_id):
         found = self.entries.get((provider, native_id))
-        return found[1]['content_signature'] if found else None
+        if not found: return None
+        entry = found[1]
+        # Listing can refresh the cache before collection. Bind the published
+        # title too, so that refresh cannot hide a metadata-only migration.
+        return hashlib.sha256(encoded({
+            'content': entry['content_signature'],
+            'title_version': entry.get('title_version'),
+            'title': entry['metadata'].get('title'),
+        })).hexdigest()
 
     def unchanged(self, provider, native_id, signature):
         return ((provider, native_id) in self.reused and signature is not None and
