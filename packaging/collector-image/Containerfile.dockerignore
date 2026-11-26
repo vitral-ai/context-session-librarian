@@ -13,6 +13,7 @@
 !csl_sync_engine.py
 !csl_sync_fs.py
 !csl_sync_http.py
+!csl_sync_policy.py
 !csl_sync_providers.py
 !csl_sync_state.py
 !csl_sync_windows.py
