@@ -84,7 +84,8 @@ class NoticeWorkflowTests(unittest.TestCase):
         self.assertIn('types: [completed]', workflow)
         self.assertRegex(workflow, r'pr-completion-notice.yml@[0-9a-f]{40}')
         self.assertNotIn('pull_request:', workflow)
-        self.assertIn('CSL_HUB_NOTICE_TOKEN: ${{ secrets.CSL_HUB_NOTICE_TOKEN }}', workflow)
+        self.assertNotIn('CSL_HUB_', workflow)
+        self.assertIn('CSL_NATS_CI_CREDS: ${{ secrets.CSL_NATS_CI_CREDS }}', workflow)
         self.assertNotIn('secrets: inherit', workflow)
         self.assertNotIn('checkout', workflow)
 
