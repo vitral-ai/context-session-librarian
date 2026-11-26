@@ -50,6 +50,60 @@ class CacheTests(unittest.TestCase):
     def run_pass(self): return self.collector.run(days=None, providers=['codex'])
     def local(self): return self.state.session('codex', self.sid)
 
+    def test_all_raw_bytes_sent_finishes_next_pass_after_view_interruption(self):
+        from csl_sync_fs import PassYield
+        for provider in ('codex', 'claude'):
+            for after_ack in (False, True):
+                with self.subTest(provider=provider, after_ack=after_ack):
+                    sid = str(uuid.uuid4())
+                    home = self.root / (provider + str(after_ack))
+                    if provider == 'codex':
+                        path = home / 'sessions' / ('rollout-' + sid + '.jsonl')
+                        rows = json.loads(json.dumps(self.rows[:2]))
+                        rows[0]['payload']['id'] = sid
+                        env = {'CODEX_HOME': str(home)}
+                    else:
+                        path = home / 'projects' / 'fixture' / (sid + '.jsonl')
+                        rows = [{'type': 'user', 'sessionId': sid,
+                                 'uuid': str(uuid.uuid4()), 'parentUuid': None,
+                                 'message': {'role': 'user', 'content': 'synthetic question'}}]
+                        env = {'CLAUDE_CONFIG_DIR': str(home)}
+                    path.parent.mkdir(parents=True)
+                    original = ''.join(json.dumps(row) + '\n' for row in rows).encode()
+                    path.write_bytes(original)
+                    registry = self.collector.registry
+                    call = registry.call
+                    def interrupted(method, target, **kwargs):
+                        if method == 'PUT' and target.endswith('/view'):
+                            if after_ack:
+                                call(method, target, **kwargs)
+                            raise PassYield()
+                        return call(method, target, **kwargs)
+                    with patch.dict(os.environ, env), \
+                         patch.object(registry, 'call', side_effect=interrupted):
+                        result = self.collector.run(days=None, providers=[provider])
+                    self.assertEqual(result['pending'], 1)
+                    local = self.state.session(provider, sid)
+                    self.assertEqual(local['status'], 'syncing')
+                    self.assertTrue(all(f['offset'] == f['length'] for f in local['files'].values()))
+                    key = 'sessions/' + provider + '/' + sid
+                    revision = local['files']['main']['revision']
+                    self.assertEqual(bytes(self.peer.files[(key, 'main', revision)]), original)
+                    writes = len(self.peer.writes)
+                    # Reopen durable state and provider caches; no in-memory view cursor survives.
+                    with closing(State(self.state.root)) as restored, patch.dict(os.environ, env):
+                        collector = Collector(restored, registry, Providers(restored.root))
+                        self.assertEqual(collector.run(days=None, providers=[provider])['synced'], 1)
+                        finished = restored.session(provider, sid)
+                        self.assertEqual(finished['status'], 'synced')
+                        self.assertIsNone(finished['last_error'])
+                        self.assertEqual(finished['files']['main']['revision'], revision)
+                        self.assertEqual(len(self.peer.writes), writes)
+                        view = self.peer.views[(key, finished['view']['generation'])]
+                        self.assertEqual([r['seq'] for r in view], [1])
+                        self.assertTrue(collector.run(days=None, providers=[provider])['sessions'][0]['unchanged'])
+                    self.assertEqual(path.read_bytes(), original)
+
     def test_unchanged_skips_parsing_hashing_views_and_per_session_http(self):
         self.assertEqual(self.run_pass()['synced'], 1)
         before = self.local()['last_synced_at']; calls = len(self.peer.calls)
