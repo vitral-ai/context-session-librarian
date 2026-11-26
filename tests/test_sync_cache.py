@@ -62,7 +62,8 @@ class CacheTests(unittest.TestCase):
         self.assertTrue(all('/sessions/' not in path for _, path in self.peer.calls[calls:]))
 
     def test_old_title_cache_refreshes_explicit_native_title(self):
-        self.rows[0]['payload']['thread_name'] = 'Explicit searchable title'
+        self.rows.append({'type': 'event_msg', 'payload': {
+            'type': 'thread_name_updated', 'thread_name': 'Explicit searchable title'}})
         self.write()
         self.run_pass()
         directory, entry = self.providers.cache.entries[('codex', self.sid)][:2]
