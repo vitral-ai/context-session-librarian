@@ -38,7 +38,7 @@ $profileArgument = [Convert]::ToBase64String($profileBytes)
 
 Push-Location $root
 try {
-    $status = & $Python -m csl_sync sync --home $State status | ConvertFrom-Json
+    $status = & $Python -m csl_sync sync --home $State status --json | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0 -or -not $status.enabled -or -not $status.authentication.signed_in) {
         throw 'Sign in to this collector state before enabling the task.'
     }
