@@ -13,6 +13,8 @@ from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from csl_sync import command
 from csl_sync_state import State, SyncError, private_json
+from csl_sync_state import exclusive
+from csl_sync_watch import process_birth, watch_owner
 
 
 class CLITests(unittest.TestCase):
@@ -40,6 +42,21 @@ class CLITests(unittest.TestCase):
         self.assertFalse(status['collector']['running'])
         self.assertEqual(status['totals']['pending'], 0)
         self.assertIn('Collector stopped; not paired; policy new.', self.cli('status').stdout)
+
+    def test_status_reports_actual_watch_supervisor_not_busy_operation(self):
+        if process_birth(os.getpid()) is None:
+            self.skipTest('Exact native process identity unavailable')
+        state = State(self.home)
+        self.addCleanup(state.close)
+        with exclusive(state.root), watch_owner(state):
+            state.set('lock_action', 'run')
+            status = json.loads(self.cli('status', '--json').stdout)
+            self.assertTrue(status['collector']['running'])
+            self.assertEqual(status['collector']['watch_pid'], os.getpid())
+            record = state.get('watch_owner')
+            state.set('watch_owner', {**record, 'birth': ['stale-pid-incarnation']})
+            self.assertNotIn('watch_pid', json.loads(self.cli('status', '--json').stdout)['collector'])
+        self.assertNotIn('watch_pid', json.loads(self.cli('status', '--json').stdout)['collector'])
 
     def test_local_selection_and_sign_out_do_not_delete_remote_data(self):
         for action in ['include','exclude']:

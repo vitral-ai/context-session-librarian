@@ -44,6 +44,10 @@ def command(args, csl):
             busy = running
             running = busy and state.get('lock_action') in ('run', 'watch')
             result['collector'] = {'running': running, 'busy': busy}
+            from csl_sync_watch import watch_pid
+            owner_pid = watch_pid(state) if busy else None
+            if owner_pid is not None:
+                result['collector'].update(running=True, watch_pid=owner_pid)
             rows = result['sessions']
             included = [row for row in rows if row['selected']]
             result['totals'] = dict(selected=len(included), synced=sum(row['status'] == 'synced' for row in included),

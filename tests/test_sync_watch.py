@@ -14,7 +14,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from csl_sync_state import State, SyncError, exclusive, private_json
-from csl_sync_watch import LOCK_ENV, pass_lock, run_pass, watch
+from csl_sync_watch import LOCK_ENV, pass_lock, process_birth, run_pass, watch, watch_owner, watch_pid
 from sync_support import Peer
 
 
@@ -29,6 +29,41 @@ class WatchTests(unittest.TestCase):
                      'refresh_state':'ready','expires_at':time.time()+600})
         self.args = argparse.Namespace(sync_home=self.state.root,days=30,all=True,providers=['codex'],interval=60)
         self.hints = Mock(); self.hints.changed.return_value = False
+
+    def test_watch_identity_requires_lock_and_matching_process_incarnation(self):
+        if process_birth(os.getpid()) is None:
+            self.skipTest('Exact native process identity unavailable')
+        with exclusive(self.state.root), watch_owner(self.state):
+            self.assertEqual(watch_pid(self.state), os.getpid())
+            record = self.state.get('watch_owner')
+            self.state.set('watch_owner', {**record, 'birth': ['prior-process']})
+            self.assertIsNone(watch_pid(self.state))
+            self.state.set('watch_owner', record)
+        self.assertIsNone(self.state.get('watch_owner'))
+        # Even an exact live PID must not be attributed without the state lock.
+        self.state.set('watch_owner', record)
+        self.assertIsNone(watch_pid(self.state))
+
+    def test_dead_watch_and_unavailable_identity_are_not_attributed_to_busy_lock(self):
+        child = subprocess.Popen([sys.executable, '-c', 'pass'])
+        child.wait(timeout=5)
+        with exclusive(self.state.root):
+            self.state.set('watch_owner', {'pid': child.pid, 'birth': ['stale']})
+            self.assertIsNone(watch_pid(self.state))
+            self.state.set('watch_owner', {'pid': os.getpid(), 'birth': ['unavailable']})
+            with patch('csl_sync_watch.process_birth', return_value=None):
+                self.assertIsNone(watch_pid(self.state))
+
+    def test_pass_does_not_replace_watch_identity_and_cleanup_precedes_unlock(self):
+        def worker(*_):
+            self.state.set('lock_action', 'run')  # What the pass interpreter writes.
+            if process_birth(os.getpid()) is not None:
+                self.assertEqual(watch_pid(self.state), os.getpid())
+            raise KeyboardInterrupt()
+        with patch('csl_sync_watch.run_pass', side_effect=worker), self.assertRaises(KeyboardInterrupt):
+            watch(self.args, self.state, self.hints)
+        with exclusive(self.state.root):
+            self.assertIsNone(self.state.get('watch_owner'))
 
     def test_real_signal_crash_restarts_in_fresh_child_and_keeps_installation_lock(self):
         original = subprocess.Popen
