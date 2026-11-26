@@ -8,6 +8,33 @@ The version records below refer to their original published tags, which are unch
 
 ## Version records
 
+### v0.5.0 — collector release candidate
+
+Luis's B4 release commission selects the reviewed main containing collector #132.
+The source version is 0.5.0. Publish an annotated tag only after exact-head hosted
+checks and independent review pass. Record the final source SHA, immutable archive
+URL, byte count and SHA-256 in the GitHub Release for the guided installer.
+Distribution remains a source checkout/archive with Python 3.11+; no wheel,
+package registry, bundled interpreter or automatic updater is introduced.
+Branch-tracking development checkouts update with `git pull --ff-only`. Tagged
+installs have a detached HEAD: update with `git fetch --tags` followed by
+`git switch --detach v0.5.0` after publication. Keep local edits separately; do
+not reset or discard them. Pinned guided installers need their owner to update
+the archive pin. Downloading or installing
+starts no service and preserves local authentication/selection state.
+
+This release includes bounded collector passes, upload selection and short/JSON
+status, session error isolation, approved agent communications and reviewed
+Connect/workload changes. Raw sync remains experimental and uploads secrets
+unchanged. Native loader evidence is version-specific; no universal macOS,
+Windows or live continuation claim follows from source publication.
+
+The release owner records exact hosted results and an isolated source install/demo
+in the published notes. A laptop live-upload witness is separate: it needs that
+installation's own valid DEV sign-in. Do not retry an ambiguous rotating refresh
+or transfer credentials to manufacture this witness.
+
+
 ### v0.4.2
 
 This release removes Gemini CLI support. Current native provider profiles are

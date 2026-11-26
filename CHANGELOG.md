@@ -1,6 +1,25 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-11-26
+
+- Collect sessions after cheap discovery, prioritizing pending small sessions across
+  providers. Stream transcript preparation and uploads under normal per-pass
+  byte/time budgets; retry large sessions with a dedicated growing allowance.
+- Configure upload choice before enabling collection: new sessions by default,
+  last N plus new sessions, everything, or recorded working-directory folders.
+  Existing selections remain unchanged. Short status, verbose rows and versioned
+  JSON expose pairing, progress totals and optional lock-bound watch identity.
+- Isolate malformed sessions so healthy peers continue; retain explicit titles,
+  derive default titles from real user text and preserve unchanged native bytes.
+- Add approved-pair agent messaging, compact reply envelopes, scoped history and
+  NATS delivery alongside existing transports. Owner configuration is required.
+- Include managed Connect enrollment bindings and workload producer fixes from
+  reviewed main. Collector installation alone starts no service or upload.
+
+Raw sync remains opt-in and uploads secrets unchanged. Backup version changes
+start a fresh capture; finish pending runs using their original producer.
+Historical releases and native compatibility evidence remain unchanged.
+
 
 - Frame bridge text injected into native conversations as
   `[Message from=<agent>; session=<sender conversation UUID>; task=<UUID>]`

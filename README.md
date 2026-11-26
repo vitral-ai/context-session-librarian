@@ -29,17 +29,17 @@ Use `csl light` for persistent pool communication: one reconnecting SSH stream p
 running environment, durable message IDs, and native Codex followup delivery.
 New bridge peers default to light; old per-request transports remain explicit,
 deprecated fallbacks. See the [one-page runbook](docs/LIGHT_RUNBOOK.md).
-This feature is in the development checkout, not the v0.4.2 tag below.
+This feature is included in v0.5.0; existing configured transports remain supported.
 
 ## Install
 
 Requires Linux and Python 3.11+. The core CLI uses only the Python standard
 library; no virtualenv or pip installation is needed. Confirm tag availability in
-the [v0.4.2 Release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.4.2)
+the [v0.5.0 Release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.5.0)
 before using the tagged installation below.
 
 ```bash
-git clone --branch v0.4.2 https://github.com/vitral-ai/context-session-librarian.git context-session-librarian
+git clone --branch v0.5.0 https://github.com/vitral-ai/context-session-librarian.git context-session-librarian
 cd context-session-librarian
 ./install.sh
 csl --version
@@ -49,13 +49,25 @@ Make sure `~/.local/bin` is on `PATH`. The installer prints
 the installed launcher's version and warns if your shell resolves `csl` to a
 different installation. Keep the checkout: the installed launcher
 points to it. You can choose another installation prefix with `./install.sh PREFIX`.
+For an existing tagged checkout, update inside its retained directory after the
+release is published (keep any local changes; do not reset them):
+
+```bash
+git fetch --tags
+git switch --detach v0.5.0
+csl --version
+```
+
+Only branch-tracking development checkouts use `git pull --ff-only`.
+Pinned guided installations update through their installer release.
+
 Context Session Librarian was previously named Codex Session Librarian; the
 `csl` command and existing installation paths remain compatible.
 
 Opening a conversation requires its native CLI and your own authentication.
 Local search and ZIP transfers need no GitHub account or paid model calls.
 Team exchange additionally requires [GitHub CLI](https://cli.github.com/).
-For development, clone without `--branch v0.4.2` in a separate directory;
+For development, clone without `--branch v0.5.0` in a separate directory;
 see [release history](CHANGELOG.md) for published changes.
 
 ## Find And Reopen A Conversation
