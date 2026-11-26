@@ -165,9 +165,12 @@ refresh. Progress comes from cached checkpoints, not a network health check.
 If no separate collector is running, this view does not start uploads.
 
 When authentication needs a fresh browser sign-in, status includes an additive
-`recovery: {reason, command, argv}` field. `argv` is the normal sign-in command
+`recovery: {reason, command, argv, instructions}` field. `argv` is the normal sign-in command
 for this profile's public endpoint/client settings; it never includes a token.
-Missing settings yield null command/argv. Short status prints “Sign in again”
+Sign-in saves the public manual-browser/callback-port options for recovery.
+Older profiles without those options include explicit headless forwarding
+instructions; choose the port that is actually forwarded. Missing deployment
+settings yield null command/argv. Short status prints “Sign in again”
 with that command. `refresh_outcome_unknown` is not retried or cleared by status.
 A profile requiring recovery reports `paired: false` until sign-in succeeds.
 

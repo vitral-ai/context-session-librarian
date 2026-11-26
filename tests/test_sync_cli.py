@@ -92,6 +92,30 @@ class CLITests(unittest.TestCase):
         self.assertEqual(credentials.read_bytes(), before)
         self.assertNotIn('PRIVATE_', result.stdout + result.stderr + human.stdout + human.stderr)
 
+    def test_status_error_does_not_replace_collector_diagnostic(self):
+        state = State(self.home)
+        self.addCleanup(state.close)
+        state.set('last_error', 'registry_unavailable')
+        private_json(self.home / 'credentials.json', ['malformed-credentials'])
+        result = self.cli('status', '--follow')
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(state.get('last_error'), 'registry_unavailable')
+
+    def test_recovery_retains_manual_browser_and_loopback_port(self):
+        args = argparse.Namespace(sync_home=self.home, sync_action='sign-in',
+            endpoint='http://127.0.0.1:1/v1', client_id='public-client',
+            discovery_url='http://127.0.0.1:1/discovery', scope='session_sync offline_access',
+            audience=None, refresh_replay_grace_seconds=0, label='Fixture', kind='local',
+            environment_name=None, manual_browser=True, callback_port=8765)
+        with patch('csl_sync.discover', return_value={'authorization_endpoint':'http://127.0.0.1:1/authorize','token_endpoint':'http://127.0.0.1:1/token'}), patch('csl_sync.Tokens.sign_in', return_value={'signed_in':True}), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            command(args, None)
+        private_json(self.home / 'credentials.json', dict(access_token='PRIVATE_ACCESS', refresh_state='inflight'))
+        result = json.loads(self.cli('status', '--json').stdout)
+        argv = result['recovery']['argv']
+        self.assertIn('--manual-browser', argv)
+        self.assertEqual(argv[argv.index('--callback-port')+1], '8765')
+        self.assertIsNone(result['recovery']['instructions'])
+
     def test_follow_refreshes_cached_state_without_releasing_watch_owner(self):
         state = State(self.home)
         self.addCleanup(state.close)

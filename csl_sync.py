@@ -43,7 +43,14 @@ def recovery_action(state, settings, authentication):
         if value:
             option = 'environment-name' if key == 'environment' else key.replace('_', '-')
             argv.extend(['--' + option, str(value)])
-    return dict(reason=reason, argv=argv,
+    if settings.get('manual_browser'):
+        argv.append('--manual-browser')
+    if type(settings.get('callback_port')) is int:
+        argv.extend(['--callback-port', str(settings['callback_port'])])
+    instructions = None
+    if 'manual_browser' not in settings or 'callback_port' not in settings:
+        instructions = 'On a headless host, add --manual-browser --callback-port PORT and forward that loopback port to your browser.'
+    return dict(reason=reason, argv=argv, instructions=instructions,
                 command=subprocess.list2cmdline(argv) if os.name == 'nt' else shlex.join(argv))
 
 
@@ -89,6 +96,7 @@ def print_status(result, *, verbose=False):
     recovery = result.get('recovery')
     if recovery:
         print('Sign in again: ' + (recovery['command'] or 'csl sync sign-in --help'))
+        if recovery.get('instructions'): print(recovery['instructions'])
     if verbose:
         for row in result['sessions']:
             print(f"{row['provider']} {row['native_id']} {row['status']} {row['last_error'] or ''}")
@@ -185,7 +193,8 @@ def command(args, csl):
                             'discovery_url': checked_url(args.discovery_url), 'scope': args.scope,
                             'audience': args.audience, 'refresh_replay_grace_seconds': args.refresh_replay_grace_seconds,
                             'label': args.label, 'kind': args.kind, 'environment': args.environment_name,
-                            'enabled': False}
+                            'enabled': False, 'manual_browser': bool(getattr(args, 'manual_browser', False)),
+                            'callback_port': getattr(args, 'callback_port', 0)}
                 state.set('settings', settings)
                 settings.update(discover(settings['discovery_url']))
                 state.set('settings', settings)
@@ -234,7 +243,7 @@ def command(args, csl):
             print(json.dumps(result, separators=(',', ':')), flush=True)
             if result['errors']: raise SystemExit(2)
     except SyncError as error:
-        if state is not None: state.set('last_error', error.code)
+        if state is not None and args.sync_action != 'status': state.set('last_error', error.code)
         print(json.dumps({'state': 'stopped', 'error': error.code, 'retryable': error.retryable}), file=sys.stderr)
         raise SystemExit(2) from None
     except KeyboardInterrupt:
