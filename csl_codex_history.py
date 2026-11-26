@@ -136,7 +136,9 @@ def lines(path, length=None):
         with decoded(path) as stream:
             while length is None or offset < length:
                 limit = -1 if length is None else length - offset
-                body = stream.readline(limit)
+                body = stream.readline(min(limit, 8*1024*1024+1) if limit >= 0 else 8*1024*1024+1)
+                if len(body) > 8*1024*1024:
+                    raise HistoryError('history_base_record_size_limit')
                 if not body:
                     break
                 start = offset; offset += len(body)

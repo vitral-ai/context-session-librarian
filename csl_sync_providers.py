@@ -58,7 +58,9 @@ def _lines(path, max_bytes=None, start_offset=0):
             source.seek(start_offset);left-=start_offset
             while left:
                 offset = source.tell()
-                line = source.readline(left)
+                line = source.readline(min(left, 8*1024*1024 + 1))
+                if len(line) > 8*1024*1024:
+                    raise ProviderError('record_size_limit')
                 left -= len(line)
                 if not line.endswith(b'\n'):
                     break
@@ -235,7 +237,9 @@ def _descriptor(path, root, relative, role):
             for _ in _lines(path):
                 pass
             while stream.tell() < size:
-                line = stream.readline(size-stream.tell())
+                line = stream.readline(min(size-stream.tell(), 8*1024*1024 + 1))
+                if len(line) > 8*1024*1024:
+                    raise ProviderError('record_size_limit')
                 if not line.endswith(b'\n'):
                     break
                 digest.update(line); complete += len(line)
@@ -472,8 +476,8 @@ def _package_mapping(provider, native_id, suffix, meta, files, *, nodes=None):
             'members':members}
 
 
-def _codex_lineage_events(nodes,text_limit):
-    tools={}
+def _codex_lineage_events(nodes,text_limit,tools=None):
+    tools={} if tools is None else tools
     for node in nodes:
         records=((r,start) for r,start,_,_ in csl_codex_history.lines(node.path,node.length))
         for event in _view('codex',node.path,text_limit,records=records,tools=tools):

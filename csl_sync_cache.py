@@ -12,7 +12,7 @@ import shutil
 import sqlite3
 import time
 
-from csl_sync_fs import change_time, open_read, open_stream, protect_fd, protect_path, reparse
+from csl_sync_fs import change_time, check_work, open_read, open_stream, protect_fd, protect_path, reparse
 from csl_sync_state import SyncError, private_directory, private_json, read_private_json
 
 EMPTY = hashlib.sha256(b'').hexdigest()
@@ -30,6 +30,16 @@ def hash_prefix(path, length):
             if not chunk: raise SyncError('source_changed')
             h.update(chunk); length -= len(chunk)
     return h.hexdigest()
+
+
+class _Tools:
+    """Tool identity joins stay on disk even for very long conversations."""
+    def __init__(self, db): self.db = db
+    def __setitem__(self, key, value):
+        self.db.execute('INSERT OR REPLACE INTO tools VALUES (?,?)', (key, value))
+    def get(self, key):
+        row = self.db.execute('SELECT name FROM tools WHERE id=?', (key,)).fetchone()
+        return row[0] if row else None
 
 
 class CachedProviders:
@@ -82,12 +92,58 @@ class CachedProviders:
                            st.st_size, st.st_mtime_ns, change_time(path, st)])
         return result
 
-    def list_sessions(self, provider):
+    def discover_sessions(self, provider):
+        """Filename and stat hints only; no transcript opens or cache freezing."""
+        home = self.module.provider_home(provider)
+        discovered = self.module._paths(provider, home)
+        self.listed[provider] = (home, discovered)
+        rows, names = [], {}
+        for path in discovered:
+            check_work()
+            ids = self.module.csl_codex_history.identity(path) if provider == 'codex' else None
+            match = re.search(r'([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$', path.stem)
+            sid = ids[0] if ids else match.group(1) if match else path.stem
+            names.setdefault(sid, []).append(path)
+        for sid, paths in names.items():
+            row = {'provider': provider, 'native_id': sid, '_path': paths[0]}
+            try:
+                if len(paths) != 1:
+                    self.entries.pop((provider, sid), None)
+                    self.reused.discard((provider, sid))
+                    raise SyncError('ambiguous_native_id')
+                self.module._safe(paths[0], home)
+                info = paths[0].stat()
+                row.update(byte_count=info.st_size, mtime=info.st_mtime,
+                           _identity=(info.st_dev, info.st_ino))
+            except (OSError, self.module.ProviderError, SyncError) as error:
+                row['error'] = getattr(error, 'code', 'source_unavailable')
+            rows.append(row)
+        return rows
+
+    def prepare_session(self, provider, candidate):
+        path = candidate['_path']
+        info = path.stat()
+        if (info.st_dev, info.st_ino) != candidate.get('_identity'):
+            raise SyncError('source_changed')
+        if provider not in ('codex', 'claude'):
+            home = self.module.provider_home(provider)
+            return self.module._metadata(provider, path, home, 300)
+        rows = self.list_sessions(provider, discovered=[path])
+        if len(rows) != 1: raise SyncError('source_changed')
+        # The filename is a discovery hint, not authority to change a native ID.
+        if rows[0]['native_id'] != candidate['native_id']:
+            raise SyncError('source_identity_changed')
+        if rows[0].get('error'): raise SyncError(rows[0]['error'])
+        return rows[0]
+
+    def list_sessions(self, provider, *, discovered=None):
         if provider not in ('codex', 'claude'): return self.module.list_sessions(provider)
         home = self.module.provider_home(provider)
         rows, seen = [], set()
-        discovered = self.module._paths(provider, home)
-        self.listed[provider] = (home, discovered)
+        partial = discovered is not None
+        if discovered is None:
+            discovered = self.module._paths(provider, home)
+            self.listed[provider] = (home, discovered)
         # Ambiguous names have no safe winner; omit every copy, not just the
         # second one. A bad session must not abort the provider's whole listing.
         names = {}
@@ -145,7 +201,7 @@ class CachedProviders:
         rows = [row for row in rows if row['native_id'] not in ambiguous]
         rows.extend({'native_id': sid, 'error': 'ambiguous_native_id'} for sid in sorted(ambiguous))
         seen = {row['native_id'] for row in rows if 'error' not in row}
-        for key in list(self.entries):
+        for key in list(self.entries) if not partial else []:
             if key[0] == provider and key[1] not in seen:
                 self.entries.pop(key)
                 self.reused.discard(key)
@@ -199,8 +255,11 @@ class CachedProviders:
                 if item['mode'] == 'append':
                     with open_stream(path) as stream:
                         stream.seek(item['complete_length'])
-                        if b'\n' in stream.read(item['size'] - item['complete_length']):
-                            return False
+                        left = item['size'] - item['complete_length']
+                        while left:
+                            chunk = stream.read(min(left, 1024*1024))
+                            if not chunk or b'\n' in chunk: return False
+                            left -= len(chunk)
             return True
         except OSError: return False
 
@@ -224,8 +283,10 @@ class CachedProviders:
                     left = size
                     h = hashlib.sha256()
                     while left:
+                        check_work()
                         chunk = incoming.read(min(left, 1024 * 1024))
                         if not chunk: raise SyncError('source_changed')
+                        check_work(len(chunk))
                         output.write(chunk); h.update(chunk); left -= len(chunk)
                 if hash_prefix(source, size) != h.hexdigest(): raise SyncError('source_changed')
                 inputs.append({'path': str(source), 'size': size, 'sha256': h.hexdigest()})
@@ -261,6 +322,7 @@ class CachedProviders:
         try:
             db.execute('CREATE TABLE IF NOT EXISTS records (seq INTEGER PRIMARY KEY, body TEXT, digest TEXT)')
             db.execute('CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY, value TEXT)')
+            db.execute('CREATE TABLE IF NOT EXISTS tools (id TEXT PRIMARY KEY, name TEXT)')
             saved = db.execute('SELECT value FROM meta WHERE id=1').fetchone()
             saved = json.loads(saved[0]) if saved else None
             append = bool(not nodes and saved and saved['length'] <= primary['complete_length'] and
@@ -268,6 +330,7 @@ class CachedProviders:
             with db:
                 if not append:
                     db.execute('DELETE FROM records')
+                    db.execute('DELETE FROM tools')
                     saved = {'length': 0, 'seq': 0, 'tools': {}}
                 h = self.hashes.get(str(directory)) if append else None
                 if h is None:
@@ -276,18 +339,21 @@ class CachedProviders:
                         for (body,) in db.execute('SELECT body FROM records ORDER BY seq'):
                             h.update(body.encode() + b'\n')
                 else: h = h.copy()
-                seq, tools = saved['seq'], saved['tools']
+                for call, name in saved.get('tools', {}).items():
+                    db.execute('INSERT OR REPLACE INTO tools VALUES (?,?)', (call, name))
+                seq, tools = saved['seq'], _Tools(db)
                 has_conversation = saved.get('has_conversation', False)
-                events = (self.module._codex_lineage_events(nodes, 16000) if nodes else
+                events = (self.module._codex_lineage_events(nodes, 16000, tools=tools) if nodes else
                           self.module._view(provider, path, 16000, primary['complete_length'],
                                             start_offset=saved['length'], tools=tools))
                 for event in events:
+                    check_work()
                     seq += 1
                     has_conversation = has_conversation or event['kind'] in ('text','tool_call','tool_result','image','document')
                     body = encoded({'seq': seq, **event})
                     h.update(body + b'\n')
                     db.execute('INSERT INTO records VALUES (?,?,?)', (seq, body.decode(), h.hexdigest()))
-                value = {'length': primary['complete_length'], 'sha256': primary['sha256'], 'seq': seq, 'tools': tools,
+                value = {'length': primary['complete_length'], 'sha256': primary['sha256'], 'seq': seq, 'tools': {},
                          'has_conversation': has_conversation, 'binding': binding}
                 db.execute('INSERT OR REPLACE INTO meta VALUES (1,?)', (json.dumps(value),))
             self.hashes[str(directory)] = h.copy()

@@ -1,0 +1,129 @@
+"""Budget and memory witnesses use synthetic transcripts, never installed homes."""
+import json
+import os
+from pathlib import Path
+import tempfile
+import tracemalloc
+import unittest
+from unittest.mock import patch
+import uuid
+
+import csl_sync_providers as native
+from csl_sync_engine import Collector, Providers
+from csl_sync_fs import PassYield, WorkBudget, work_budget, open_stream
+from csl_sync_http import HTTP, Registry
+from csl_sync_policy import configure
+from csl_sync_state import State
+from sync_support import FakeTokens, Peer
+
+
+class BudgetTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.home = self.root/'codex'; (self.home/'sessions').mkdir(parents=True)
+        self.claude = self.root/'claude'
+        env = patch.dict(os.environ, CODEX_HOME=str(self.home), CLAUDE_CONFIG_DIR=str(self.claude))
+        env.start(); self.addCleanup(env.stop)
+        self.state = State(self.root/'state'); self.addCleanup(self.state.close)
+        self.peer = Peer(); self.addCleanup(self.peer.close)
+        self.providers = Providers(self.state.root)
+        self.collector = Collector(self.state, Registry(self.peer.url, FakeTokens(), http=HTTP(sleep=lambda _:None)), self.providers)
+
+    def transcript(self, *, provider='codex', text='small prompt', created='2099-01-01T00:00:00Z'):
+        sid = str(uuid.uuid4())
+        if provider == 'codex':
+            path = self.home/'sessions'/f'rollout-{sid}.jsonl'
+            records = [{'type':'session_meta','timestamp':created,'payload':{'id':sid}},
+                       {'type':'response_item','payload':{'type':'message','role':'user',
+                        'content':[{'type':'input_text','text':text}]}}]
+        else:
+            path = self.claude/'projects'/'synthetic'/f'{sid}.jsonl'; path.parent.mkdir(parents=True,exist_ok=True)
+            records = [{'type':'user','sessionId':sid,'timestamp':created,
+                        'message':{'role':'user','content':text}}]
+        path.write_text(''.join(json.dumps(row)+'\n' for row in records))
+        return sid,path
+
+    def test_discovery_does_not_open_parse_or_freeze_transcripts(self):
+        self.transcript(); self.transcript(provider='claude')
+        with patch.object(native,'_metadata',side_effect=AssertionError('parsed')), \
+             patch.object(self.providers.cache,'prepare',side_effect=AssertionError('frozen')), \
+             patch('csl_sync_cache.open_stream',side_effect=AssertionError('opened')):
+            rows = self.providers.discover_sessions('codex') + self.providers.discover_sessions('claude')
+        self.assertEqual(len(rows),2)
+        self.assertTrue(all({'_path','byte_count','mtime','native_id'} <= row.keys() for row in rows))
+
+    def test_huge_old_file_does_not_block_small_new_uploads_or_allocate_its_contents(self):
+        configure(self.state, 'new')
+        old,path = self.transcript(created='2001-01-01T00:00:00Z')
+        with path.open('ab') as stream: stream.truncate(1024**3)
+        os.utime(path,(1,1))
+        small = [self.transcript(provider='claude' if i%2 else 'codex')[0] for i in range(16)]
+        original = self.providers.prepare_session
+        def prepare(provider,row):
+            self.assertNotEqual(row['native_id'],old,'huge transcript must be deferred before preparation')
+            return original(provider,row)
+        tracemalloc.start()
+        try:
+            with patch.object(self.providers,'prepare_session',side_effect=prepare):
+                result=self.collector.run(days=None,providers=('codex','claude'),budget_bytes=2*1024**2)
+            _,peak=tracemalloc.get_traced_memory()
+        finally: tracemalloc.stop()
+        self.assertEqual(result['synced'],len(small),result)
+        self.assertEqual(result['errors'],0,result)
+        self.assertEqual(result['deferred'],1)
+        self.assertLess(peak,16*1024**2)
+        self.assertEqual({row['native_id'] for row in result['sessions'] if row['status']=='synced'},set(small))
+        self.assertNotIn(('codex',old),self.state.tracked())
+
+    def test_budget_yield_does_not_grant_unknown_age_tracking(self):
+        sid,_=self.transcript()
+        result=self.collector.run(providers=('codex',),budget_bytes=1)
+        self.assertEqual(result['deferred'],1)
+        self.assertEqual(result['errors'],0)
+        self.assertNotIn(('codex',sid),self.state.tracked())
+        self.assertIsNone(self.state.get('last_error'))
+        self.assertEqual(self.collector.run(days=None,providers=('codex',))['synced'],1)
+
+    def test_single_oversized_record_isolated_from_healthy_peer(self):
+        bad,path=self.transcript()
+        with path.open('ab') as stream:
+            stream.write(b'{"padding":"')
+            for _ in range(9): stream.write(b'x'*1024**2)
+            stream.write(b'"}\n')
+        good,_=self.transcript(provider='claude')
+        result=self.collector.run(days=None,providers=('codex','claude'))
+        rows={row['native_id']:row for row in result['sessions']}
+        self.assertEqual(rows[good]['status'],'synced',result)
+        self.assertEqual(rows[bad]['error'],'record_size_limit')
+
+    def test_time_budget_uses_monotonic_and_read_is_bounded_before_allocation(self):
+        _,path=self.transcript()
+        ticks=[10]
+        budget=WorkBudget(2,10,clock=lambda:ticks[0])
+        with work_budget(budget),open_stream(path) as stream:
+            with self.assertRaises(PassYield): stream.read()
+            self.assertLessEqual(stream.tell(),11)
+        ticks[0]=12
+        with self.assertRaises(PassYield): budget.check()
+
+    def test_upload_ack_survives_cooperative_yield_and_next_pass(self):
+        sid,_=self.transcript(text='x'*20000)
+        self.collector.chunk_size=1024
+        original=self.collector.upload
+        def upload(*args,**kwargs):
+            progress=kwargs['on_progress']; calls=[0]
+            def checkpoint():
+                progress();calls[0]+=1
+                if calls[0]==2: raise PassYield()
+            return original(*args,**{**kwargs,'on_progress':checkpoint})
+        with patch.object(self.collector,'upload',side_effect=upload):
+            result=self.collector.run(days=None,providers=('codex',))
+        self.assertEqual(result['deferred'],1,result)
+        saved=self.state.session('codex',sid)['files']['main']
+        self.assertEqual(saved['offset'],1024)
+        self.assertEqual(self.collector.run(days=None,providers=('codex',))['synced'],1)
+        self.assertFalse(list(self.collector.spool.iterdir()))
+
+
+if __name__=='__main__':unittest.main()

@@ -119,6 +119,8 @@ def pass_lock(root):
 def run_pass(args, fd):
     command = [sys.executable, str(Path(__file__).with_name('codex_sessions.py')), 'sync', '--home',
                str(args.sync_home), 'run', '--days', str(args.days)]
+    command.extend(['--budget-seconds', str(getattr(args, 'budget_seconds', 30)),
+                    '--budget-bytes', str(getattr(args, 'budget_bytes', 256*1024*1024))])
     if args.all: command.append('--all')
     for provider in args.providers or []: command.extend(['--provider', provider])
     env = dict(os.environ)

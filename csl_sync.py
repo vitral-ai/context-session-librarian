@@ -158,9 +158,10 @@ def command(args, csl):
                 return
             providers = Providers(state.root)
             collector = Collector(state, registry, providers)
-            result = collector.run(days=None if args.all else args.days, providers=args.providers or PROVIDERS)
+            result = collector.run(days=None if args.all else args.days, providers=args.providers or PROVIDERS,
+                                   budget_seconds=args.budget_seconds, budget_bytes=args.budget_bytes)
             print(json.dumps(result, separators=(',', ':')), flush=True)
-            if result['pending']: raise SystemExit(2)
+            if result['errors']: raise SystemExit(2)
     except SyncError as error:
         if state is not None: state.set('last_error', error.code)
         print(json.dumps({'state': 'stopped', 'error': error.code, 'retryable': error.retryable}), file=sys.stderr)
@@ -248,6 +249,13 @@ def grace(value):
     return value
 
 
+def byte_budget(value):
+    value = int(value)
+    if not 1 <= value <= 1024**4:
+        raise argparse.ArgumentTypeError('Choose 1 to 1099511627776 bytes')
+    return value
+
+
 def port(value):
     value = int(value)
     if not 0 <= value <= 65535: raise argparse.ArgumentTypeError('Choose a port from 0 to 65535')
@@ -292,6 +300,8 @@ def add_commands(subparsers, csl):
         selector.add_argument('provider', choices=PROVIDERS); selector.add_argument('native_id')
     for action in ('run','watch'):
         runner = actions.add_parser(action, help='One pass.' if action == 'run' else 'Continuous foreground sync; no daemon or timer installed.')
+        runner.add_argument('--budget-seconds', type=positive, default=30, help='Cooperative pass deadline; an in-flight request may finish.')
+        runner.add_argument('--budget-bytes', type=byte_budget, default=256*1024*1024, help='Maximum transcript I/O and upload bytes per pass (includes verification reads).')
         runner.add_argument('--days', type=positive, default=30)
         runner.add_argument('--all', action='store_true', help='Include older sessions too, except explicit exclusions.')
         runner.add_argument('--provider', dest='providers', action='append', choices=PROVIDERS)

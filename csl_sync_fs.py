@@ -1,6 +1,61 @@
 """Private file and snapshot operations shared by the native collector."""
 import os
 import stat
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+_work = ContextVar('collector_work', default=None)
+
+
+class PassYield(Exception):
+    """Normal cooperative yield, never a provider or credential failure."""
+
+
+class WorkBudget:
+    def __init__(self, seconds, size, *, clock=time.monotonic):
+        self.clock, self.deadline = clock, clock() + seconds
+        self.remaining, self.used = size, 0
+
+    def check(self, size=0):
+        if self.clock() >= self.deadline or size > self.remaining:
+            raise PassYield()
+        self.remaining -= size
+        self.used += size
+
+
+def check_work(size=0, *, available=0):
+    budget = _work.get()
+    if budget is not None:
+        if available > budget.remaining: raise PassYield()
+        budget.check(size)
+
+
+@contextmanager
+def work_budget(budget):
+    token = _work.set(budget)
+    try: yield
+    finally: _work.reset(token)
+
+
+class _BudgetStream:
+    def __init__(self, stream): self.stream = stream
+    def __getattr__(self, name): return getattr(self.stream, name)
+    def __enter__(self): return self
+    def __exit__(self, *args): return self.stream.__exit__(*args)
+    def _limit(self, size):
+        maximum = _work.get().remaining + 1
+        return maximum if size < 0 else min(size, maximum)
+    def read(self, size=-1):
+        check_work()
+        data = self.stream.read(self._limit(size))
+        check_work(len(data))
+        return data
+    def readline(self, size=-1):
+        check_work()
+        data = self.stream.readline(self._limit(size))
+        check_work(len(data))
+        return data
 
 WINDOWS = os.name == 'nt'
 
@@ -25,7 +80,8 @@ else:
 
 
 def open_stream(path):
-    return os.fdopen(open_read(path), 'rb')
+    stream = os.fdopen(open_read(path), 'rb')
+    return _BudgetStream(stream) if _work.get() is not None else stream
 
 
 def reparse(path):
