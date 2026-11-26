@@ -23,52 +23,52 @@ class NoticeWorkflowTests(unittest.TestCase):
         self.assertIn('environment: csl-ci-notices', workflow)
         self.assertIn('pull-requests: read', workflow)
         self.assertIn('CSL_GITHUB_TOKEN: ${{ github.token }}', workflow)
-        self.assertIn('CSL_HUB_NOTICE_TOKEN:\n        required: true', workflow)
+        self.assertIn('CSL_NATS_CI_CREDS:\n        required: true', workflow)
+        self.assertNotIn('CSL_HUB_', workflow)
         self.assertIn("github.event_name == 'workflow_run'", workflow)
         self.assertIn('github.event.repository.default_branch', workflow)
         self.assertNotIn('secrets: inherit', workflow)
         self.assertNotIn('inputs:', workflow)
         self.assertNotIn('download-artifact', workflow)
 
-    def test_hub_post_precedes_the_optional_nats_steps(self):
+    def test_nats_publish_has_a_separate_protected_credential_and_deadline(self):
         workflow = Path('.github/workflows/pr-completion-notice.yml').read_text()
-        self.assertIn('CSL_NATS_CI_CREDS:\n        required: false', workflow)
-        _, hub = workflow.split('      - name: Post Hub completion', 1)
-        hub, optional = hub.split('      - name: Set up the pinned Go toolchain', 1)
-        build, publish = optional.split('      - name: Post NATS completion', 1)
-        self.assertIn('post_hub(notice, os.environ)', hub)
-        self.assertIn('CSL_HUB_NOTICE_TOKEN: ${{ secrets.CSL_HUB_NOTICE_TOKEN }}', hub)
-        self.assertNotIn('CSL_NATS_CI_CREDS', hub + build)
-        self.assertNotIn('CSL_HUB_NOTICE_TOKEN', optional)
+        _, selection = workflow.split('      - name: Select current PR completion', 1)
+        selection, nats = selection.split('      - name: Set up the pinned Go toolchain', 1)
+        build, publish = nats.split('      - name: Post NATS completion', 1)
+        self.assertIn('current_head_allows_notice(notice, os.environ)', selection)
+        self.assertNotIn('post_hub', workflow)
+        self.assertNotIn('CSL_NATS_CI_CREDS', selection + build)
         self.assertIn('working-directory: nats-control', build)
         self.assertEqual(build.count('GOTOOLCHAIN: go1.27.4'), 2)
-        self.assertEqual(optional.count('continue-on-error: true'), 3)
+        self.assertNotIn('continue-on-error: true', nats)
         self.assertIn('CSL_NATS_CI_CREDS: ${{ secrets.CSL_NATS_CI_CREDS }}', publish)
         self.assertIn('CSL_NATS_CI_PUBLISHER: ${{ runner.temp }}/csl-ci-notice', publish)
         self.assertIn('timeout --signal=KILL 30s python3', publish)
-        self.assertIn("steps.hub-notice.outputs.eligible == 'true'", publish)
+        self.assertIn("steps.current-completion.outputs.eligible == 'true'", publish)
         self.assertNotIn('current_head_allows_notice', publish)
         self.assertNotIn('CSL_GITHUB_TOKEN', publish)
         self.assertIn('post_nats(workflow_notice(os.environ), os.environ)', publish)
         self.assertNotIn('github.event', publish.split('        run:')[1])
 
-    def test_hub_head_decision_is_the_only_nats_admission_witness(self):
+    def test_current_pr_success_or_failure_is_the_only_admission_witness(self):
         workflow = Path('.github/workflows/pr-completion-notice.yml').read_text()
-        hub_source = textwrap.dedent(re.search(r"python3 - <<'PY2'\n(.*?)^          PY2$", workflow,
-                                               re.M | re.S).group(1))
+        selection = textwrap.dedent(re.search(r"python3 - <<'PY2'\n(.*?)^          PY2$", workflow,
+                                              re.M | re.S).group(1))
         with tempfile.TemporaryDirectory() as scratch:
             output = Path(scratch) / 'outputs'
-            self.assertEqual(workflow.count("steps.hub-notice.outputs.eligible == 'true'"), 2)
+            self.assertEqual(workflow.count("steps.current-completion.outputs.eligible == 'true'"), 2)
+            notices = [{'results': {'completion': outcome}} for outcome in ('skipped', 'success', 'failure')]
             with patch.dict('os.environ', {'GITHUB_OUTPUT': str(output)}, clear=True), patch(
-                    'csl_ci_notice.workflow_notice', return_value={'sha': 'a' * 40}), patch(
-                    'csl_ci_notice.current_head_allows_notice', side_effect=[False, True]) as head, patch(
-                    'csl_ci_notice.post_hub') as post:
-                exec(hub_source, {})
+                    'csl_ci_notice.workflow_notice', side_effect=notices), patch(
+                    'csl_ci_notice.current_head_allows_notice', side_effect=[False, True]) as head:
+                exec(selection, {})
                 self.assertFalse(output.exists())
-                post.assert_not_called()
-                exec(hub_source, {})
+                head.assert_not_called()
+                exec(selection, {})
+                self.assertFalse(output.exists())
+                exec(selection, {})
                 self.assertEqual(output.read_text(), 'eligible=true\n')
-                post.assert_called_once()
                 self.assertEqual(head.call_count, 2)
 
     def test_unprivileged_producers_have_no_notice_credentials(self):

@@ -2,10 +2,8 @@ name: CSL completion notice
 on:
   workflow_call:
     secrets:
-      CSL_HUB_NOTICE_TOKEN:
-        required: true
       CSL_NATS_CI_CREDS:
-        required: false
+        required: true
 permissions:
   contents: read
   pull-requests: read
@@ -28,40 +26,35 @@ jobs:
             csl_bridge_store.py
             nats-control
           sparse-checkout-cone-mode: false
-      - name: Post Hub completion
-        id: hub-notice
+      - name: Select current PR completion
+        id: current-completion
         timeout-minutes: 2
         env:
           CSL_GITHUB_TOKEN: ${{ github.token }}
           CSL_EVENT: ${{ toJSON(github.event) }}
           CSL_REPOSITORY: ${{ github.repository }}
           CSL_REPOSITORY_ID: ${{ github.repository_id }}
-          CSL_HUB_URL: ${{ vars.CSL_HUB_URL }}
-          CSL_HUB_CA_PEM: ${{ vars.CSL_HUB_CA_PEM }}
-          CSL_HUB_NOTICE_TOKEN: ${{ secrets.CSL_HUB_NOTICE_TOKEN }}
         run: |
           python3 - <<'PY2'
           import os
-          from csl_ci_notice import current_head_allows_notice, post_hub, workflow_notice
+          from csl_ci_notice import current_head_allows_notice, workflow_notice
 
           notice = workflow_notice(os.environ)
-          if current_head_allows_notice(notice, os.environ):
+          if (notice['results']['completion'] in ('success', 'failure')
+                  and current_head_allows_notice(notice, os.environ)):
               with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
                   output.write('eligible=true\n')
-              post_hub(notice, os.environ)
           PY2
       - name: Set up the pinned Go toolchain
         id: nats-toolchain
-        if: ${{ !cancelled() && steps.hub-notice.outputs.eligible == 'true' && vars.CSL_NATS_CI_URL != '' }}
-        continue-on-error: true
+        if: ${{ steps.current-completion.outputs.eligible == 'true' }}
         timeout-minutes: 2
         env:
           GOTOOLCHAIN: go1.27.4
         run: timeout --signal=KILL 90s go version
       - name: Build trusted NATS publisher
         id: nats-build
-        if: ${{ !cancelled() && steps.nats-toolchain.outcome == 'success' }}
-        continue-on-error: true
+        if: ${{ steps.nats-toolchain.outcome == 'success' }}
         timeout-minutes: 2
         working-directory: nats-control
         env:
@@ -69,8 +62,7 @@ jobs:
           GOTOOLCHAIN: go1.27.4
         run: timeout --signal=KILL 90s go build -mod=readonly -trimpath -o "$RUNNER_TEMP/csl-ci-notice" ./cmd/csl-ci-notice
       - name: Post NATS completion
-        if: ${{ !cancelled() && steps.nats-build.outcome == 'success' && steps.hub-notice.outputs.eligible == 'true' }}
-        continue-on-error: true
+        if: ${{ steps.nats-build.outcome == 'success' && steps.current-completion.outputs.eligible == 'true' }}
         timeout-minutes: 1
         env:
           CSL_EVENT: ${{ toJSON(github.event) }}
@@ -86,5 +78,7 @@ jobs:
           import os
           from csl_ci_notice import post_nats, workflow_notice
 
+          if not os.environ['CSL_NATS_CI_CREDS'] or not os.environ['CSL_NATS_CI_URL']:
+              raise SystemExit('Missing protected NATS CI configuration')
           post_nats(workflow_notice(os.environ), os.environ)
           PY
