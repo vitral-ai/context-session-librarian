@@ -98,7 +98,10 @@ class Local:
             if not target or set(target) != {'schema_version', 'provider', 'cwd', 'provider_home', 'executable'} or target['schema_version'] != 1 or target['provider'] != request['provider']:
                 raise SyncError('invalid_resume_target')
             from csl_sync_providers import provider_home
-            cwd, home, executable = (absolute(target[k]).resolve(strict=True) for k in ('cwd', 'provider_home', 'executable'))
+            try:
+                cwd, home, executable = (absolute(target[k]).resolve(strict=True) for k in ('cwd', 'provider_home', 'executable'))
+            except (OSError, RuntimeError):
+                raise SyncError('invalid_resume_target') from None
             if not cwd.is_dir() or home.resolve() != provider_home(request['provider']).resolve() or not executable.is_file():
                 raise SyncError('invalid_resume_target')
             self.target = dict(target, cwd=str(cwd), provider_home=str(home), executable=str(executable))

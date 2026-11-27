@@ -77,6 +77,16 @@ class LocalTests(unittest.TestCase):
         self.assertEqual(local.target['cwd'],str(self.cwd.resolve()))
         self.assertNotEqual(action.Local(request()).target,local.target)
 
+    def test_cyclic_target_has_fixed_diagnostic(self):
+        loop=self.root/'private-project-loop';loop.symlink_to(loop)
+        for field in ('cwd','executable'):
+            target=dict(schema_version=1,provider='codex',cwd=str(self.cwd),
+                provider_home=str(self.provider),executable=str(self.binary))
+            target[field]=str(loop)
+            private_json(self.target/'project.json',target)
+            with self.subTest(field=field),self.assertRaisesRegex(SyncError,'^invalid_resume_target$'):
+                action.Local(request())
+
     def test_target_must_match_collector_home(self):
         with patch.dict(os.environ,CODEX_HOME=str(self.root/'other')):
             with self.assertRaises(SyncError):action.Local(request())
