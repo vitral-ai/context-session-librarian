@@ -211,28 +211,28 @@ def execute(q):
         settings = state.get('settings', {})
         registry = Registry(settings['endpoint'], Tokens(state.root, settings, allow_inflight_replay=False))
         writer = Writer(state, registry)
-        remote = registry.call('GET', '/sessions/' + derived)
-        if any(remote.get(k) != v for k, v in [('id', derived), ('provider', q['provider']), ('native_id', q['native_id'])]):
-            raise SyncError('writer_snapshot_changed')
-        readback_only = remote.get('snapshot_id') != q['expected_snapshot_id']
-        if readback_only and q['action'] != 'run': raise SyncError('writer_snapshot_changed')
-        base = dict(schema_version=1, request_id=q['request_id'], action=q['action'],
-                    provider=q['provider'], native_session_id=q['native_id'], registry_session_id=derived,
-                    host_id=q['expected_host_id'], **identity)
-        if local.target: base['target_id'] = q['target_id']
-        if q['action'] != 'check':
-            # Bind retries to the owner-local target and complete typed payload
-            # before any remote mutation or provider start.
-            binding = dict(request=q, identity=identity, target=local.target, endpoint=settings['endpoint'],
-                           host=str(local.host), profile=str(state.root.resolve()))
-            journal = state.root / 'resume-actions' / (q['request_id'] + '-' + q['action'] + '.json')
-            with exclusive(state.root):
+        # Collector sync and native admission share this decision boundary.
+        with exclusive(state.root), native_lock(q['provider'], q['native_id']):
+            remote = registry.call('GET', '/sessions/' + derived)
+            if any(remote.get(k) != v for k, v in [('id', derived), ('provider', q['provider']), ('native_id', q['native_id'])]):
+                raise SyncError('writer_snapshot_changed')
+            readback_only = remote.get('snapshot_id') != q['expected_snapshot_id']
+            if readback_only and q['action'] != 'run': raise SyncError('writer_snapshot_changed')
+            base = dict(schema_version=1, request_id=q['request_id'], action=q['action'],
+                        provider=q['provider'], native_session_id=q['native_id'], registry_session_id=derived,
+                        host_id=q['expected_host_id'], **identity)
+            if local.target: base['target_id'] = q['target_id']
+            if q['action'] != 'check':
+                # Bind retries to the owner-local target and complete typed payload
+                # before any remote mutation or provider start.
+                binding = dict(request=q, identity=identity, target=local.target, endpoint=settings['endpoint'],
+                               host=str(local.host), profile=str(state.root.resolve()))
+                journal = state.root / 'resume-actions' / (q['request_id'] + '-' + q['action'] + '.json')
                 previous = read_private_json(journal)
                 if previous is not None and previous != binding: raise SyncError('writer_request_conflict')
                 if readback_only and previous is None: raise SyncError('writer_snapshot_changed')
                 if previous is None: private_json(journal, binding, durable=True)
-        if q['action'] in ('check', 'release', 'run'):
-            with exclusive(state.root), native_lock(q['provider'], q['native_id']):
+            if q['action'] in ('check', 'release', 'run'):
                 if q['action'] == 'run' or q.get('intent') == 'in_place':
                     generation = q['expected_generation']
                     if generation == 0 and readback_only:
@@ -299,6 +299,7 @@ def execute(q):
                     except ProviderError as error:
                         if error.code != 'session_not_found': raise
                     else: require_stopped(q['provider'], q['native_id'], host=str(local.host))
+        if q['action'] in ('check', 'release', 'run'):
             if q['action'] == 'run': return dict(base, generation=generation, **{k:v for k,v in local.run_host(admission).items() if k not in base})
             return dict(base, state='released' if q['action'] == 'release' else 'eligible')
         if not local.target: raise SyncError('resume_target_required')

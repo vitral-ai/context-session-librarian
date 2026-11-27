@@ -1,6 +1,6 @@
 """Initial same-device acquisition with durable local state and synthetic HTTP."""
 import copy
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from unittest.mock import patch, Mock
 import unittest
 
@@ -159,6 +159,28 @@ class InitialWriterTests(LocalTests):
             with self.assertRaisesRegex(SyncError, 'writer_snapshot_changed'): action.execute(self.q)
             self.assertFalse((self.profile/'resume-actions').exists())
             self.assertFalse(self.posts); launch.assert_not_called()
+
+    def test_snapshot_advance_before_profile_lock_refuses_fresh_active_run(self):
+        self.acquire()
+        real_exclusive = action.exclusive
+        @contextmanager
+        def sync_before_lock(root):
+            # A same-device collector finishes after the caller's request but
+            # before this action owns the profile. GET must observe its snapshot.
+            self.remote['snapshot_id'] = NATIVE
+            with real_exclusive(root):
+                yield
+        q = dict(self.q, expected_generation=1)
+        with patch('csl_sync.attest_installation', return_value=self.identity), \
+             patch('csl_sync_http.Registry', return_value=self.registry), \
+             patch('csl_sync_providers._resolve'), \
+             patch.object(action, 'exclusive', side_effect=sync_before_lock), \
+             patch.object(action.Local, 'run_host') as launch:
+            with self.assertRaisesRegex(SyncError, 'writer_snapshot_changed'):
+                action.execute(q)
+            self.assertFalse((self.profile/'resume-actions').exists())
+            self.assertEqual(len(self.posts), 1)
+            launch.assert_not_called()
 
 
 if __name__ == '__main__': unittest.main()
