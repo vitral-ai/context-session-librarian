@@ -441,7 +441,7 @@ func (s *Service) publish(ctx context.Context, envelope Envelope) (uint64, error
 }
 
 func (s *Service) publishRecord(ctx context.Context, record messageRecord, revision uint64) error {
-	if record.Envelope.Kind == "digest" && record.PublishFrom == 0 {
+	if (record.Envelope.Kind == "digest" || !record.HeldUntil.IsZero()) && record.PublishFrom == 0 {
 		info, err := s.stream.Info(ctx)
 		if err != nil {
 			return err
@@ -464,6 +464,7 @@ func (s *Service) finishPublication(ctx context.Context, record messageRecord, r
 		return err
 	}
 	record.Sequence = sequence
+	record.HeldUntil = time.Time{}
 	if _, err := s.writeExpiring(ctx, "message."+record.Envelope.ID, record, revision, messageAge); err != nil {
 		return err
 	}

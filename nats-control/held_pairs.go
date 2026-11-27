@@ -146,6 +146,9 @@ func (s *Service) advanceHeldPairs(ctx context.Context, entries []messageEntry, 
 func (s *Service) advanceHeldPair(ctx context.Context, entry messageEntry, now time.Time, confirmed map[string]bool) error {
 	record := entry.record
 	env := record.Envelope
+	if sequence, err := s.recoverPublication(ctx, entry); err != nil || sequence != 0 {
+		return err
+	}
 	deniedAt, _, err := readState[time.Time](ctx, s.state, pairDenialKey(env.From, env.To))
 	if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
 		return err
@@ -202,14 +205,8 @@ func (s *Service) advanceHeldPair(ctx context.Context, entry messageEntry, now t
 			return err
 		}
 	}
-	record.HeldUntil = time.Time{}
-	record.ReadyAt = record.AcceptedAt
-	revision, err := s.writeExpiring(ctx, "message."+env.ID, record, entry.revision, messageAge)
-	if err != nil {
-		return err
-	}
 	if err := s.mentionPair(ctx, record); err != nil {
 		return err
 	}
-	return s.publishRecord(ctx, record, revision)
+	return s.publishRecord(ctx, record, entry.revision)
 }

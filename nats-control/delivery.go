@@ -625,7 +625,7 @@ func (s *Service) deliveryTick(ctx context.Context) error {
 			continue
 		}
 		if entry.record.Sequence == 0 {
-			sequence, err := s.acceptedDigest(ctx, entry)
+			sequence, err := s.recoverPublication(ctx, entry)
 			if err != nil {
 				return err
 			}
@@ -731,7 +731,7 @@ func (s *Service) deliveryTick(ctx context.Context) error {
 
 // The publish intent records the earliest possible stream sequence. A
 // confirmed broker write remains authoritative even after pair policy changes.
-func (s *Service) acceptedDigest(ctx context.Context, entry messageEntry) (uint64, error) {
+func (s *Service) recoverPublication(ctx context.Context, entry messageEntry) (uint64, error) {
 	env := entry.record.Envelope
 	next := entry.record.PublishFrom
 	if next == 0 {
