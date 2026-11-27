@@ -1,5 +1,6 @@
 """Opt-in CSL NATS transport. The core CLI does not import nats-py at startup."""
 import asyncio
+from contextvars import ContextVar
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -31,6 +32,26 @@ STREAM = 'CSL_MSG'
 JS_CONSUMER_NOT_FOUND = 10014
 OUTBOX_SECONDS = 15 * 60
 LOG = logging.getLogger(__name__)
+CLOSING_CONNECTION = ContextVar('nats_closing_connection', default=False)
+
+
+async def report_nats_error(error):
+    if (CLOSING_CONNECTION.get() and isinstance(error, ssl.SSLError)
+            and getattr(error, 'reason', None) == 'APPLICATION_DATA_AFTER_CLOSE_NOTIFY'):
+        LOG.debug('NATS TLS shutdown reported trailing application data')
+        return
+    logging.getLogger('nats.aio.client').error('nats: encountered error', exc_info=error)
+
+
+async def close_best_effort(connection):
+    closing = CLOSING_CONNECTION.set(True)
+    try:
+        await connection.close()
+    except Exception as error:
+        # Cleanup must preserve the control result or the error that led here.
+        LOG.debug('NATS connection close failed (%s)', type(error).__name__)
+    finally:
+        CLOSING_CONNECTION.reset(closing)
 
 
 class ControlRejected(BridgeError):
@@ -290,6 +311,7 @@ class Client:
         connection = await nats.connect(
             servers=[server] if server else settings['servers'], tls=tls, user_credentials=str(endpoint['credentials']),
             inbox_prefix=inbox, connect_timeout=3, max_reconnect_attempts=2, allow_reconnect=server is None,
+            error_cb=report_nats_error,
         )
         server_id = getattr(connection, '_server_info', {}).get('server_id')
         broker = f'{server} {server_id}' if server and server_id else None
@@ -310,10 +332,10 @@ class Client:
                 return client
             except (Error, OSError):
                 if client:
-                    await client.connection.close()
+                    await close_best_effort(client.connection)
             except BaseException:
                 if client:
-                    await client.connection.close()
+                    await close_best_effort(client.connection)
                 raise
         raise OSError('No configured NATS broker answered the control hello')
 
@@ -891,11 +913,7 @@ def send_command(args):
             await print_unread(client, target)
             return await post_saved(client, store, (settings['tenant'], source), thread, remembered)
         finally:
-            try:
-                await client.connection.close()
-            except Exception as error:
-                # Cleanup must preserve either the control receipt or the original send error.
-                LOG.debug('NATS send connection close failed (%s)', type(error).__name__)
+            await close_best_effort(client.connection)
 
     try:
         result = run_cli(send())

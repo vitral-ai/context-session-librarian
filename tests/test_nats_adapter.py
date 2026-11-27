@@ -20,7 +20,7 @@ from csl_bridge_store import BridgeError, Store, encode, neutralize_headers
 from csl_ci_notice import notice_request
 from codex_sessions import build_parser, main
 from csl_nats import (MAX_DIGEST, NATIVE_PEER, ClaudeInbox, Client, ControlRejected, Ledger, agent_name, body_text, deliver_codex,
-                      delivery_fingerprint, delivery_parts, post_saved, print_unread, raw_fingerprint, receive_one, recover_acks, remember_send,
+                      close_best_effort, delivery_fingerprint, delivery_parts, post_saved, print_unread, raw_fingerprint, receive_one, recover_acks, remember_send,
                       replay_outbox)
 
 
@@ -787,7 +787,7 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         except ImportError:
             self.skipTest('nats-py is not installed')
         inactive = SimpleNamespace(request=AsyncMock(side_effect=NoRespondersError),
-                                   connection=SimpleNamespace(close=AsyncMock()))
+                                   connection=SimpleNamespace(close=AsyncMock(side_effect=OSError('close failed'))))
         active = SimpleNamespace(request=AsyncMock(), connection=SimpleNamespace(close=AsyncMock()))
         settings = {'servers': ['inactive', 'active']}
         with patch.object(Client, 'connect', new=AsyncMock(side_effect=[inactive, active])) as connect:
@@ -795,6 +795,37 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([entry.kwargs['server'] for entry in connect.await_args_list], settings['servers'])
         inactive.connection.close.assert_awaited_once()
         active.connection.close.assert_not_awaited()
+
+    async def test_sdk_tls_close_callback_suppresses_only_shutdown_noise(self):
+        try:
+            import nats
+            from nats.aio.client import Client as SDKClient
+        except ImportError:
+            self.skipTest('nats-py is not installed')
+        trailing_data = ssl.SSLError('trailing application data')
+        trailing_data.reason = 'APPLICATION_DATA_AFTER_CLOSE_NOTIFY'
+        settings = {'tenant': 'vi', 'servers': ['tls://primary'], 'cafile': '/unused',
+                    'agents': {'alice': {'credentials': '/unused'}}}
+        for error in (trailing_data, ssl.SSLError('other TLS failure')):
+            with self.subTest(error=error):
+                sdk = SDKClient()
+                sdk._flush_pending = AsyncMock()
+                sdk._transport = SimpleNamespace(close=Mock(), wait_closed=AsyncMock(side_effect=error))
+
+                async def connect(**options):
+                    sdk._error_cb = options['error_cb']
+                    return sdk
+
+                with (patch.object(nats, 'connect', side_effect=connect),
+                      patch('csl_nats.ssl.create_default_context'),
+                      patch('nats.aio.client._logger.error') as reported):
+                    client = await Client.connect(settings, 'alice')
+                    await close_best_effort(client.connection)
+                    sdk._transport.wait_closed.assert_awaited_once()
+                    if error is trailing_data:
+                        reported.assert_not_called()
+                        await sdk._error_cb(trailing_data)
+                    reported.assert_called_once_with('nats: encountered error', exc_info=error)
 
     async def test_pull_restores_only_missing_durable_before_binding(self):
         try:
