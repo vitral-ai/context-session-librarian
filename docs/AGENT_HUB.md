@@ -170,7 +170,7 @@ registered. For a NATS-only name, use
 Send with `csl send --nats-config PATH --from alice --to bob --text
 "Hello"`. Add `--urgent --reason blocked` for an urgent message. If the send
 outcome is unknown, retry with `--id` set to the printed `message_id`, the
-printed `retry_pin` option, and the same sender, target, text and reply parent.
+printed `retry_pin` and `retry_from` options, and the same target, text and reply parent.
 For a NATS reply, use the printed `retry_reply` arguments in place of the
 original parent and target arguments.
 
@@ -182,11 +182,16 @@ to `senders` in the owner-managed `~/.config/csl/sender-routes.json`. Set
 {"senders":{"alice":"/private/config/vi.json"},"nats_recipients":["alice","bob"]}
 ```
 
-Plain `csl send` selects NATS for enrolled recipients and Hub for others.
+Plain `csl send` uses the current Claude session, current Codex thread, or sole
+local enrollment to identify the caller when `--from` and `CSL_AGENT` are unset.
+An enrolled sender uses NATS for all recipients on NATS-only installations.
+When a Hub is also configured, its default caller applies if no NATS session
+matches, and the local recipient list selects the enrolled caller's transport.
 `csl reply ID_OR_PREFIX` resolves the incoming parent and uses its original
 transport when the parent is still retained there. Prefixes must match exactly
 one message, starting with at least eight characters of its UUID. The CLI prints
-the selected transport. A retry using `--id` requires the original config pin.
+the selected transport. A retry using `--id` requires the printed config pin
+and `retry_from` option on either transport.
 For a pinned NATS retry, use the printed full parent ID and `--to`.
 
 Before a NATS send or reply, the CLI reports unread messages from the recipient

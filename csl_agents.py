@@ -271,8 +271,8 @@ def current_claude_session(configs):
     return None
 
 
-def infer_agent(bindings):
-    if len(bindings) == 1:
+def infer_agent(bindings, *, allow_sole=True):
+    if allow_sole and len(bindings) == 1:
         return next(iter(bindings))
     claude = current_claude_session({entry['claude_config'] for entry in bindings.values()
                                     if entry.get('cli') == 'claude'})
@@ -284,7 +284,18 @@ def infer_agent(bindings):
                 matches.append(name)
         elif codex is not None and codex == entry['session']:
             matches.append(name)
-    return matches[0] if len(matches) == 1 else None
+    if len(matches) > 1:
+        raise BridgeError('Multiple NATS agents match this process; set CSL_AGENT or use --from')
+    return matches[0] if matches else None
+
+
+def nats_source(source, path):
+    from csl_nats import config as nats_config
+
+    source = source or os.environ.get('CSL_AGENT') or infer_agent(nats_config(path)['agents'])
+    if not source:
+        raise BridgeError('Set CSL_AGENT or use --from to identify your agent')
+    return source
 
 
 def enrollment_path(value):
@@ -293,11 +304,11 @@ def enrollment_path(value):
     return Path(value).expanduser()
 
 
-def local_enrollment(source, routes, *, infer=False):
+def local_enrollment(source, routes, *, preserve_hub_default=False):
     if routes is None:
         return
     source = source or os.environ.get('CSL_AGENT')
-    if not source and infer and routes['senders']:
+    if not source and routes['senders']:
         from csl_nats import config as nats_config
 
         bindings = {}
@@ -309,7 +320,13 @@ def local_enrollment(source, routes, *, infer=False):
             if name not in settings[path]:
                 raise BridgeError(f'NATS enrollment has no binding for {name}')
             bindings[name] = settings[path][name]
-        source = infer_agent(bindings)
+        source = infer_agent(bindings, allow_sole=not preserve_hub_default)
+        if source is None and preserve_hub_default:
+            try:
+                source = config().get('agent')
+            except FileNotFoundError:
+                if len(bindings) == 1:
+                    source = next(iter(bindings))
         if source is None:
             raise BridgeError('Set CSL_AGENT or use --from to identify your agent')
     if not source:
@@ -323,7 +340,7 @@ def local_enrollment(source, routes, *, infer=False):
 
 
 def select_sender_route(args):
-    enrollment = local_enrollment(args.source, sender_routes())
+    enrollment = local_enrollment(args.source, sender_routes(), preserve_hub_default=True)
     if enrollment is None:
         return
     args.source, nats_config, enrolled = enrollment
@@ -334,6 +351,12 @@ def select_sender_route(args):
         args.to, selector, transport = reply_route(nats_config, source, reply_parent(args),
                                                   args.to, hub_ledger)
         args.message_id, args.in_reply_to = selector, None
+    elif transport == 'hub':
+        try:
+            config()
+        except FileNotFoundError:
+            # NATS-only installations let the controller resolve the target.
+            transport = 'nats'
     if transport == 'nats':
         args.nats_config = nats_config
     elif args.is_reply:
@@ -361,7 +384,7 @@ def _execute(args):
             raise BridgeError('Choose either --nats-config or --hub-config')
         if args.nats_config is None and hub_config is None:
             routes = sender_routes()
-            if enrollment := local_enrollment(args.source, routes, infer=True):
+            if enrollment := local_enrollment(args.source, routes):
                 args.source, args.nats_config, _ = enrollment
             elif nats_tool or routes is None:
                 if legacy_config := os.environ.get('CSL_NATS_CONFIG'):
@@ -372,8 +395,12 @@ def _execute(args):
     if args.hub_action == 'history' and args.since is not None:
         raise BridgeError('--since requires NATS history')
     if args.hub_action == 'send':
-        if args.nats_config is not None and args.is_reply:
-            resolve_pinned_nats_reply(args)
+        if args.id and not args.source and (args.nats_config is not None or hub_config is not None):
+            raise BridgeError('Use --id with the original --from sender from the printed retry_from option')
+        if args.nats_config is not None:
+            args.source = nats_source(args.source, args.nats_config)
+            if args.is_reply:
+                resolve_pinned_nats_reply(args)
         if args.nats_config is None and hub_config is None:
             if args.id:
                 raise BridgeError('Use --id with the original --nats-config or --hub-config path printed for the send')
@@ -425,6 +452,7 @@ def _execute(args):
                 raise BridgeError('Possible secrets detected; select redacted text before sending')
         # Print the ID before networking: unknown outcomes are retried with this ID.
         print('message_id=' + request['id'], file=sys.stderr)
+        print('retry_from=' + shlex.join(('--from', source)), file=sys.stderr)
         if reply:
             print('retry_reply=' + shlex.join(('--in-reply-to', reply, '--to', target)), file=sys.stderr)
     elif args.hub_action == 'history':
@@ -491,7 +519,7 @@ def add_commands(subparsers, _):
         body = send.add_mutually_exclusive_group()
         body.add_argument('--text-file', type=Path, default=Path('-'))
         body.add_argument('--text')
-        send.add_argument('--id', help='Message UUID. Requires the original --hub-config or --nats-config path.')
+        send.add_argument('--id', help='Message UUID. Requires the original config pin and --from sender.')
         route = send.add_mutually_exclusive_group()
         route.add_argument('--hub-config', type=Path)
         route.add_argument('--nats-config', type=Path)

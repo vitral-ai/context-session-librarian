@@ -261,12 +261,17 @@ class SenderRoutingTests(unittest.TestCase):
         configs = {Path(path): {'agents': {name: bindings[name]}} for name, path in self.routes['senders'].items()}
         with (patch.dict(os.environ, {}, clear=True),
               patch('csl_nats.config', side_effect=configs.__getitem__),
-              patch('csl_nats_tools.command') as tool):
+              patch('csl_nats_tools.command') as tool,
+              contextlib.redirect_stderr(io.StringIO())):
             with self.assertRaisesRegex(BridgeError, 'use --from'):
                 csl_agents._execute(self.parse('agents', 'status'))
             with patch.dict(os.environ, {'CODEX_THREAD_ID': bindings['worker']['session']}):
                 csl_agents._execute(self.parse('agents', 'status'))
                 selected = tool.call_args.args[0]
+                self.assertEqual((selected.source, selected.nats_config), ('worker', Path('/private/worker.json')))
+                self.routes['nats_recipients'].append('client')
+                csl_agents._execute(self.parse('send', '--to', 'client', '--text', 'test body'))
+                selected = self.nats_send.call_args.args[0]
                 self.assertEqual((selected.source, selected.nats_config), ('worker', Path('/private/worker.json')))
                 csl_agents._execute(self.parse('agents', 'status', '--from', 'client'))
                 self.assertEqual(tool.call_args.args[0].source, 'client')
@@ -274,29 +279,58 @@ class SenderRoutingTests(unittest.TestCase):
             csl_agents._execute(self.parse('agents', 'status'))
             self.assertEqual(tool.call_args.args[0].source, 'worker')
 
-    def test_agents_history_infers_claude_session_from_live_parent(self):
+    def test_nats_commands_infer_claude_session_from_live_parent(self):
         claude_home = Path('/private/claude')
         record_path = claude_home / 'sessions/400.json'
         session = str(uuid.uuid4())
-        self.routes['senders']['worker'] = '/private/vi.json'
+        self.routes['senders']['worker'] = '/private/claude-vi.json'
         self.read_routes.side_effect = lambda path: ({
             'pid': 400, 'procStart': '789', 'kind': 'interactive', 'sessionId': session
         } if path == record_path else self.routes)
         fields = 'S 1 ' + '0 ' * 17 + '789'
-        settings = {'agents': {'client': {'session': self.parent},
-                               'worker': {'session': session, 'cli': 'claude', 'claude_config': claude_home}}}
-        with (patch.dict(os.environ, {}, clear=True),
+        configs = {
+            Path('/private/vi.json'): {'agents': {'client': {'session': self.parent}}},
+            Path('/private/claude-vi.json'): {'agents': {
+                'worker': {'session': session, 'cli': 'claude', 'claude_config': claude_home},
+            }},
+        }
+        self.config.side_effect = FileNotFoundError
+        with (patch.dict(os.environ, {'CSL_NATS_CONFIG': '/private/vi.json'}, clear=True),
               patch('csl_agents.os.getppid', return_value=400),
               patch('csl_agents.Path.read_text', return_value='400 (claude) ' + fields) as proc,
-              patch('csl_nats.config', return_value=settings),
+              patch('csl_nats.config', side_effect=configs.__getitem__),
               patch('csl_nats_tools.call', return_value={'messages': []}) as request,
-              contextlib.redirect_stdout(io.StringIO())):
-            csl_agents._execute(self.parse('agents', 'history', '--with', 'client'))
-            self.assertEqual(request.call_args.args[:2], (Path('/private/vi.json'), 'worker'))
+              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO())):
+            for argv in [('agents', 'history', '--with', 'client'), ('put', 'report.txt'), ('fetch', 'a' * 64)]:
+                with self.subTest(argv=argv):
+                    csl_agents._execute(self.parse(*argv))
+                    self.assertEqual(request.call_args.args[:2], (Path('/private/claude-vi.json'), 'worker'))
+            # The local recipient list omits client. With no Hub, send still uses NATS.
+            send = ('send', '--to', 'client', '--text', 'test body')
+            csl_agents._execute(self.parse(*send))
+            sent = self.nats_send.call_args.args[0]
+            self.assertEqual((sent.source, sent.nats_config), ('worker', Path('/private/claude-vi.json')))
             proc.return_value = '400 (claude) ' + fields.replace('789', '790')
-            with self.assertRaisesRegex(BridgeError, 'use --from'):
-                csl_agents._execute(self.parse('agents', 'history', '--with', 'client'))
-            request.assert_called_once()
+            for argv in [send, ('agents', 'history', '--with', 'client')]:
+                with self.subTest(argv=argv), self.assertRaisesRegex(BridgeError, 'use --from'):
+                    csl_agents._execute(self.parse(*argv))
+            self.nats_send.assert_called_once()
+            self.hub.assert_not_called()
+            self.assertEqual(request.call_count, 3)
+
+    def test_pinned_nats_reply_infers_caller_from_pinned_config(self):
+        self.nats_history.return_value = {'messages': [{'id': self.parent, 'from': 'worker', 'to': 'client'}]}
+        with (patch.dict(os.environ, {}, clear=True),
+              patch('csl_nats.config', return_value={'agents': {'client': {'session': self.parent}}}) as config,
+              contextlib.redirect_stderr(io.StringIO())):
+            csl_agents._execute(self.parse('reply', self.parent[:8], '--nats-config', '/private/pinned.json',
+                                          '--text', 'test body'))
+        config.assert_called_once_with(Path('/private/pinned.json'))
+        self.nats_history.assert_called_once()
+        self.assertEqual(self.nats_history.call_args.args[:2], (Path('/private/pinned.json'), 'client'))
+        self.assertEqual(self.nats_send.call_args.args[0].source, 'client')
+        self.read_routes.assert_not_called()
+        self.hub.assert_not_called()
 
     def test_agents_history_rejects_conflicting_live_claude_profiles(self):
         self.routes['senders']['worker'] = '/private/vi.json'
@@ -361,6 +395,17 @@ class SenderRoutingTests(unittest.TestCase):
         self.assertEqual(self.hub.call_args.args[1]['source'], 'other')
         self.nats_send.assert_not_called()
 
+    def test_unmatched_mixed_send_keeps_hub_default_caller(self):
+        settings = {'agents': {'client': {'session': self.parent}}}
+        self.config.return_value = {'agent': 'legacy'}
+        argv = ('send', '--to', 'worker', '--text', 'test body')
+        with (patch.dict(os.environ, {'CODEX_THREAD_ID': str(uuid.uuid4())}, clear=True),
+              patch('csl_nats.config', return_value=settings),
+              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO())):
+            csl_agents._execute(self.parse(*argv))
+        self.assertEqual(self.hub.call_args.args[1]['source'], 'legacy')
+        self.nats_send.assert_not_called()
+
     def test_explicit_pins_override_default(self):
         self.execute('send', '--to', 'worker', '--hub-config', '/private/hub.json')
         self.config.assert_called_once_with(Path('/private/hub.json'))
@@ -419,13 +464,33 @@ class SenderRoutingTests(unittest.TestCase):
         self.assertEqual(self.hub.call_args.args[1]['id'], message_id)
         self.nats_send.assert_not_called()
 
+    def test_inferred_hub_send_requires_original_sender_on_mixed_host_retry(self):
+        self.config.return_value = {'agent': 'legacy'}
+        settings = {'agents': {'client': {'session': self.parent}}}
+        argv = ('send', '--to', 'legacy-recipient', '--text', 'test body')
+        with (patch.dict(os.environ, {'CODEX_THREAD_ID': self.parent}, clear=True),
+              patch('csl_nats.config', return_value=settings),
+              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as stderr):
+            csl_agents._execute(self.parse(*argv))
+            options = dict(line.split('=', 1) for line in stderr.getvalue().splitlines())
+            retry = (*argv, *shlex.split(options['retry_pin']), '--id', options['message_id'])
+            with self.assertRaisesRegex(BridgeError, 'original --from sender'):
+                csl_agents._execute(self.parse(*retry))
+            self.read_routes.side_effect = FileNotFoundError
+            csl_agents._execute(self.parse(*retry, *shlex.split(options['retry_from'])))
+        requests = [invocation.args[1] for invocation in self.hub.call_args_list]
+        self.assertEqual([request['source'] for request in requests], ['client', 'client'])
+        self.assertEqual({request['id'] for request in requests}, {options['message_id']})
+
     def test_printed_retry_options_resend_inferred_nats_reply(self):
         message_id = str(uuid.uuid4())
         self.nats_history.return_value = {'messages': [{'id': self.parent, 'from': 'worker', 'to': 'client'}]}
         self.nats_send.side_effect = nats_send_command
-        parsed = self.parse('reply', self.parent[:8], '--from', 'client', '--text', 'test body')
+        parsed = self.parse('reply', self.parent[:8], '--text', 'test body')
+        worker_thread = str(uuid.uuid4())
+        self.routes['senders']['worker'] = '/private/vi.json'
         settings = {'tenant': 'vi', 'connector_home': Path('/private/bridge'),
-                    'agents': {'client': {'session': self.parent}}}
+                    'agents': {'client': {'session': self.parent}, 'worker': {'session': worker_thread}}}
         client = MagicMock()
         client.connection.close = AsyncMock()
         with patch('csl_nats.config', return_value=settings), patch('csl_nats.Store'), \
@@ -433,20 +498,26 @@ class SenderRoutingTests(unittest.TestCase):
                 patch('csl_nats.remember_send', side_effect=lambda store, tenant, envelope, thread: envelope), \
                 patch('csl_nats.Client.connect_active', new=AsyncMock(return_value=client)), \
                 patch('csl_nats.post_saved', side_effect=[TimeoutError, {'id': message_id, 'state': 'queued'}]) as post:
-            with contextlib.redirect_stderr(io.StringIO()) as stderr, \
+            with patch.dict(os.environ, {'CODEX_THREAD_ID': self.parent}, clear=True), \
+                    contextlib.redirect_stderr(io.StringIO()) as stderr, \
                     self.assertRaisesRegex(BridgeError, 'NATS send unconfirmed'):
                 csl_agents._execute(parsed)
             options = dict(line.split('=', 1) for line in stderr.getvalue().splitlines())
             self.routes['nats_recipients'] = []
-            self.execute('reply', *shlex.split(options['retry_reply']), *shlex.split(options['retry_pin']),
-                         '--id', options['message_id'])
+            retry = ('reply', *shlex.split(options['retry_reply']), *shlex.split(options['retry_pin']),
+                     '--id', options['message_id'], '--text', 'test body')
+            with (patch.dict(os.environ, {'CODEX_THREAD_ID': worker_thread, 'CSL_AGENT': 'worker'}, clear=True),
+                  contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO())):
+                with self.assertRaisesRegex(BridgeError, 'original --from sender'):
+                    csl_agents._execute(self.parse(*retry))
+                csl_agents._execute(self.parse(*retry, *shlex.split(options['retry_from'])))
         self.hub.assert_called_once()
         self.nats_history.assert_called_once()
         self.assertEqual(post.await_count, 2)
         for attempt in post.await_args_list:
             envelope = attempt.args[4]
-            self.assertEqual((envelope['id'], envelope['to'], envelope['reply_to']),
-                             (message_id, 'worker', self.parent))
+            self.assertEqual((envelope['id'], envelope['from'], envelope['to'], envelope['reply_to']),
+                             (message_id, 'client', 'worker', self.parent))
 
     def test_full_id_hub_only_reply_does_not_depend_on_nats(self):
         self.hub.side_effect = [{'messages': [{'id': self.parent, 'source': 'legacy', 'target': 'client'}]},
