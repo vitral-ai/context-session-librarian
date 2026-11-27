@@ -21,8 +21,11 @@ writer and host readback-only live proof can recover; readback never launches.
 Successful run returns the actual writer generation. The advanced-snapshot path
 requires a host supporting `readback_only:true`; older hosts refuse safely.
 Publish after independent release review and exact-head hosted/native checks.
-Preserve collector profiles and authentication; re-run install.sh with the original
-prefix after upgrading and verify csl-resume-action --help.
+Preserve collector profiles and authentication. For a retained tagged checkout,
+run `git fetch --tags` and `git switch --detach v0.5.8` after publication, then
+re-run `./install.sh` with the original prefix (`./install.sh PREFIX` for a custom
+prefix). With that prefix's `bin` first on `PATH`, verify `csl --version` reports
+0.5.8 and `csl-resume-action --help` succeeds. README has the current install steps.
 
 ### v0.5.7 — typed managed Resume adapter release candidate
 
@@ -119,8 +122,8 @@ Branch-tracking development checkouts update with `git pull --ff-only`. Tagged
 installs have a detached HEAD: update with `git fetch --tags` followed by
 `git switch --detach v0.5.0` after publication. After either update, re-run
 `./install.sh` with the same original prefix (`./install.sh PREFIX` for a custom
-prefix) to install newly added launchers. For v0.5.8, verify `csl --version` and
-`csl-resume-action --help` with that prefix's `bin` first on `PATH`.
+prefix) to install newly added launchers. Verify `csl --version` reports 0.5.0
+with that prefix's `bin` first on `PATH`. See README for current release updates.
 Keep local edits separately; do
 not reset or discard them. Pinned guided installers need their owner to update
 the archive pin. Downloading or installing
