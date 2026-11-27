@@ -11,7 +11,6 @@ compact SQLite index from ~/.codex/sessions JSONL files so Codex can answer
 from __future__ import annotations
 
 import argparse
-import curses
 import datetime as dt
 import json
 import os
@@ -2901,6 +2900,15 @@ def cockpit_tui(stdscr: Any, args: argparse.Namespace) -> list[str] | None:
 
 def cockpit(args: argparse.Namespace) -> None:
     if args.print:
+        cockpit_print(args)
+        return
+    # Curses is optional and belongs only to the interactive cockpit. Native
+    # Windows Python intentionally ships without it; transfers must still work.
+    global curses
+    try:
+        import curses
+    except ImportError:
+        print("Interactive view unavailable; showing plain output.", file=sys.stderr)
         cockpit_print(args)
         return
     if not sys.stdin.isatty() or not sys.stdout.isatty():

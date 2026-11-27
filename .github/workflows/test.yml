@@ -11,6 +11,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows-cli:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Import every root CLI entry point and check curses-free startup
+        run: python -m unittest discover -s tests -p test_cli_startup.py -v
   transfer:
     runs-on: ubuntu-latest
     strategy:

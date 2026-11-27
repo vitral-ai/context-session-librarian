@@ -4,7 +4,6 @@ One invocation exits after at most --limit items from each channel. Output is
 flushed before advancing cursors: interrupted output may repeat, never disappear.
 """
 import argparse
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -16,6 +15,7 @@ from csl_bridge_transport import local_call
 
 
 def updates(home, agent, cursor_file, output=sys.stdout, limit=100):
+    import fcntl
     if not 1 <= limit <= 1000:
         raise BridgeError('Limit must be between 1 and 1000')
     path = Path(cursor_file).absolute()

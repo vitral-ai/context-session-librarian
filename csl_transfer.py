@@ -54,6 +54,32 @@ def resume_command(sid, cwd, open_args=(), provider="codex"):
     return ["codex", "-C", str(cwd), "resume", "--all", sid, *open_args]
 
 
+
+def provider_argv(command):
+    """Execute Windows npm providers through Node, preserving literal arguments.
+
+    CreateProcess cannot find a bare npm .CMD shim. Do not pass user arguments
+    through cmd.exe: its expansion rules would change their meaning.
+    """
+    if sys.platform != "win32":
+        return command
+    executable = shutil.which(command[0])
+    if not executable:
+        raise TransferError(f"Native CLI unavailable: {command[0]}")
+    path = Path(executable)
+    if path.suffix.lower() not in (".cmd", ".bat"):
+        return [str(path), *command[1:]]
+    entries = {"codex": ("@openai", "codex", "bin", "codex.js"),
+               "claude": ("@anthropic-ai", "claude-code", "cli.js")}
+    entry = entries.get(command[0])
+    script = path.parent.joinpath("node_modules", *entry) if entry else None
+    adjacent_node = path.with_name("node.exe")
+    node = str(adjacent_node) if adjacent_node.is_file() else shutil.which("node.exe")
+    if script is None or not script.is_file() or not node:
+        raise TransferError(f"Cannot launch {command[0]} npm shim without its Node runtime and package; "
+                            "repair the native CLI installation or use its executable")
+    return [node, str(script), *command[1:]]
+
 def selected_provider(entries, requested=None):
     providers = set()
     for entry in entries:
@@ -665,7 +691,7 @@ def import_bundle(args, csl):
             if provider=='codex' and getattr(args,'refresh_native_index',True):
                 refresh_native_picker(csl)
             if args.open:
-                raise SystemExit(subprocess.call(resume_command(rows[0]['id'],cwd,getattr(args,'open_args',()),provider),cwd=cwd))
+                raise SystemExit(subprocess.call(provider_argv(resume_command(rows[0]['id'],cwd,getattr(args,'open_args',()),provider)),cwd=cwd))
             return [row['id'] for row in rows]
         validate_expected_sources(entries, getattr(args, "expected_source_ids", None))
         provider = selected_provider(entries, getattr(args, "provider", None))
@@ -794,7 +820,7 @@ def open_sessions(imported, cwd, open_args=(), provider="codex"):
         except ValueError as exc:
             raise TransferError("Sessions imported; invalid selection, use a printed resume command") from exc
     command = resume_command(imported[selected], cwd, open_args, provider)
-    raise SystemExit(subprocess.call(command, **({"cwd": cwd} if provider == "claude" else {})))
+    raise SystemExit(subprocess.call(provider_argv(command), **({"cwd": cwd} if provider == "claude" else {})))
 
 
 def run_transfer(args, csl):

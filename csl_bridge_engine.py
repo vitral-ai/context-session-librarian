@@ -1,5 +1,4 @@
 """Session-scoped coordination around existing Codex threads; no session cloning."""
-import fcntl
 import logging
 import queue
 import socketserver
@@ -105,6 +104,7 @@ def retry_publications(store):
 
 class Connector:
     def __init__(self, home, runtime_factory=Runtime):
+        import fcntl
         self.store = Store(home)
         from csl_bridge_event_delivery import EventDelivery
         self.events = EventDelivery(self.store)
@@ -858,6 +858,7 @@ class Connector:
         raise BridgeError('Unknown local operation')
 
     def close(self):
+        import fcntl
         if getattr(self, '_closed', False):
             return
         self._closed = True

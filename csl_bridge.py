@@ -1,6 +1,5 @@
 """Optional experimental CLI for automatic coordination of existing Codex agents."""
 import argparse
-import fcntl
 import os
 from pathlib import Path
 import signal
@@ -46,6 +45,7 @@ def reviewed_text(path, scrub=False):
 
 
 def configure(args):
+    import fcntl
     if args.action == 'init':
         identity = name(args.identity)
         path = args.runtime_socket.expanduser().absolute() if args.runtime_socket else None

@@ -2,7 +2,6 @@
 
 from contextlib import contextmanager
 import datetime as dt
-import fcntl
 import hashlib
 import json
 import os
@@ -170,6 +169,7 @@ def save(path, value, *, exclusive=False):
 
 @contextmanager
 def locked(root):
+    import fcntl
     root.mkdir(parents=True, mode=0o700, exist_ok=True)
     root.chmod(0o700)
     fd = os.open(root / "operation.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
