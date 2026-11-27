@@ -254,6 +254,7 @@ def current_claude_session(configs):
             parent, start = int(fields[1]), fields[19]
         except (OSError, ValueError, IndexError):
             return None
+        sessions = []
         for directory in configs:
             try:
                 record = owned_json(directory / 'sessions' / f'{pid}.json')
@@ -261,7 +262,11 @@ def current_claude_session(configs):
                 continue
             if (isinstance(record, dict) and record.get('pid') == pid
                     and record.get('procStart') == start and record.get('kind') == 'interactive'):
-                return record.get('sessionId')
+                sessions.append(record.get('sessionId'))
+        if len(sessions) > 1:
+            raise BridgeError('Multiple Claude profiles match this process; set CSL_AGENT or use --from')
+        if sessions:
+            return sessions[0]
         pid = parent
     return None
 

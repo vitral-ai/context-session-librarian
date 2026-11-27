@@ -298,6 +298,32 @@ class SenderRoutingTests(unittest.TestCase):
                 csl_agents._execute(self.parse('agents', 'history', '--with', 'client'))
             request.assert_called_once()
 
+    def test_agents_history_rejects_conflicting_live_claude_profiles(self):
+        self.routes['senders']['worker'] = '/private/vi.json'
+        bindings = {
+            name: {'session': str(uuid.uuid4()), 'cli': 'claude',
+                   'claude_config': Path('/private', name)}
+            for name in ('client', 'worker')
+        }
+        records = {
+            entry['claude_config'] / 'sessions/400.json': {
+                'pid': 400, 'procStart': '789', 'kind': 'interactive',
+                'sessionId': entry['session'],
+            }
+            for entry in bindings.values()
+        }
+        self.read_routes.side_effect = lambda path: records.get(path, self.routes)
+        with (patch.dict(os.environ, {}, clear=True),
+              patch('csl_agents.os.getppid', return_value=400),
+              patch('csl_agents.Path.read_text', return_value='400 (claude) S 1 ' + '0 ' * 17 + '789'),
+              patch('csl_nats.config', return_value={'agents': bindings}),
+              patch('csl_nats_tools.command') as tool):
+            with self.assertRaisesRegex(BridgeError, 'Multiple Claude profiles'):
+                csl_agents._execute(self.parse('agents', 'history', '--with', 'worker'))
+            tool.assert_not_called()
+            csl_agents._execute(self.parse('agents', 'history', '--with', 'worker', '--from', 'client'))
+            self.assertEqual(tool.call_args.args[0].source, 'client')
+
     def test_history_transport_pin_bypasses_local_enrollment(self):
         with patch.dict(os.environ, {'CSL_NATS_CONFIG': '/private/env.json'}, clear=True), \
                 patch('csl_nats_tools.command') as tool, contextlib.redirect_stdout(io.StringIO()):
