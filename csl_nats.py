@@ -891,7 +891,11 @@ def send_command(args):
             await print_unread(client, target)
             return await post_saved(client, store, (settings['tenant'], source), thread, remembered)
         finally:
-            await client.connection.close()
+            try:
+                await client.connection.close()
+            except Exception as error:
+                # Cleanup must preserve either the control receipt or the original send error.
+                LOG.debug('NATS send connection close failed (%s)', type(error).__name__)
 
     try:
         result = run_cli(send())

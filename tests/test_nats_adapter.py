@@ -4,6 +4,7 @@ import json
 import logging
 from pathlib import Path
 import shlex
+import ssl
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -408,6 +409,39 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
                 await print_unread(client, 'bob')
                 client.request.assert_awaited_once_with('ctl.unread', {'with': 'bob'}, timeout=1)
                 self.assertEqual(stderr.getvalue(), '')
+
+    def test_tls_close_preserves_cli_send_outcome_and_outbox(self):
+        settings = {'tenant': 'vi', 'connector_home': self.home, 'agents': {'alice': {'session': self.thread}}}
+        for operation, confirmed in (('send', True), ('reply', True), ('send', False)):
+            with self.subTest(operation=operation, confirmed=confirmed):
+                message_id = str(uuid.uuid4())
+                receipt = {'id': message_id, 'state': 'queued'}
+                self.client.send = AsyncMock(return_value=receipt, side_effect=None if confirmed else TimeoutError)
+                self.client.request = AsyncMock(return_value={'ids': [], 'count': 0})
+                self.connection.close = AsyncMock(side_effect=ssl.SSLError('APPLICATION_DATA_AFTER_CLOSE_NOTIFY'))
+                args = [operation, '--from', 'alice', '--to', 'bob', '--text', 'proof',
+                        '--nats-config', str(self.config_path), '--id', message_id]
+                if operation == 'reply':
+                    args.insert(1, self.id)
+                with (patch('csl_nats.config', return_value=settings),
+                      patch.object(Client, 'connect_active', new=AsyncMock(return_value=self.client)),
+                      patch('sys.stdout', new_callable=io.StringIO) as stdout,
+                      patch('sys.stderr', new_callable=io.StringIO) as stderr):
+                    if confirmed:
+                        self.assertEqual(main(args), 0)
+                    else:
+                        with self.assertRaisesRegex(SystemExit, r'unconfirmed \(TimeoutError\)'):
+                            main(args)
+                row, = self.store.rows('SELECT state,broker FROM nats_outbox WHERE id=?', (message_id,))
+                self.client.send.assert_awaited_once()
+                self.connection.close.assert_awaited_once()
+                self.assertNotIn('SSLError', stderr.getvalue())
+                if confirmed:
+                    self.assertEqual(json.loads(stdout.getvalue()), receipt)
+                    self.assertEqual(row, {'state': 'queued', 'broker': 'primary'})
+                else:
+                    self.assertEqual(stdout.getvalue(), '')
+                    self.assertEqual(row, {'state': None, 'broker': None})
 
     async def test_failed_control_receipt_retries_without_second_handoff(self):
         self.client.receipt = AsyncMock(side_effect=TimeoutError)
