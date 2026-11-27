@@ -33,19 +33,19 @@ func pairWriteKey(a, b string) string {
 	return "pair-write." + min(a, b) + "." + max(a, b)
 }
 
-func (s *Service) pairAllowed(ctx context.Context, from, to string) (bool, uint64, error) {
+func (s *Service) pairAllowed(ctx context.Context, from, to string) (bool, uint64, bool, error) {
 	pending, _, err := readState[bool](ctx, s.state, pairWriteKey(from, to))
 	if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
-		return false, 0, err
+		return false, 0, false, err
 	}
 	if pending {
-		return false, 0, nil
+		return false, 0, true, nil
 	}
 	allowed, revision, err := readState[bool](ctx, s.state, "pair."+from+"."+to)
 	if errors.Is(err, jetstream.ErrKeyNotFound) {
-		return false, 0, nil
+		return false, 0, false, nil
 	}
-	return allowed, revision, err
+	return allowed, revision, false, err
 }
 
 func (s *Service) validateCoordinators(ctx context.Context, name string, coordinators []string) error {
@@ -156,17 +156,6 @@ func (s *Service) pairs(ctx context.Context, caller, role string, request pairRe
 	}
 	allowed := request.Action == "allow"
 	now := s.clock().UTC()
-	if !allowed {
-		now = s.acceptanceTime()
-		key := pairDenialKey(request.A, request.B)
-		_, revision, err := readState[time.Time](ctx, s.state, key)
-		if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
-			return nil, err
-		}
-		if _, err := s.writeExpiring(ctx, key, now, revision, pairHold); err != nil {
-			return nil, err
-		}
-	}
 	revisions := make([]PairReadback, 0, 2)
 	for _, key := range []string{"pair." + request.A + "." + request.B, "pair." + request.B + "." + request.A} {
 		value, rev, err := readState[bool](ctx, s.state, key)
@@ -190,6 +179,17 @@ func (s *Service) pairs(ctx context.Context, caller, role string, request pairRe
 	}
 	if err := s.config.VerifyPairs(ctx, revisions); err != nil {
 		return nil, err
+	}
+	if !allowed {
+		now = s.acceptanceTime()
+		key := pairDenialKey(request.A, request.B)
+		_, revision, err := readState[time.Time](ctx, s.state, key)
+		if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
+			return nil, err
+		}
+		if _, err := s.writeExpiring(ctx, key, now, revision, pairHold); err != nil {
+			return nil, err
+		}
 	}
 	if err := writeState(ctx, s.state, gate, false, gateRevision); err != nil {
 		return nil, err
@@ -240,7 +240,7 @@ func (s *Service) listPairs(ctx context.Context, caller string, pendingOnly bool
 		if !scope[parts[1]] || !scope[parts[2]] {
 			continue
 		}
-		allowed, _, err := s.pairAllowed(ctx, parts[1], parts[2])
+		allowed, _, _, err := s.pairAllowed(ctx, parts[1], parts[2])
 		if err != nil {
 			return nil, err
 		}

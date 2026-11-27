@@ -184,9 +184,12 @@ func (s *Service) advanceHeldPair(ctx context.Context, entry messageEntry, now t
 		return err
 	}
 	pairKey := "pair." + env.From + "." + env.To
-	allowed, pairRev, err := s.pairAllowed(ctx, env.From, env.To)
+	allowed, pairRev, pending, err := s.pairAllowed(ctx, env.From, env.To)
 	if err != nil {
 		return err
+	}
+	if pending {
+		return nil
 	}
 	if !allowed {
 		if err := s.ensureMessageState(ctx, record); err != nil {

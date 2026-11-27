@@ -95,6 +95,9 @@ func (s *Service) admin(ctx context.Context, body []byte) (response any, err err
 		}
 		return policy, writeState(ctx, s.state, "policy.versions", policy, revision)
 	case "allow", "deny":
+		if s.config.VerifyPairs != nil {
+			return nil, invalid("use action=pairs with pair_action=allow or deny for verified pair changes")
+		}
 		if !isRegisteredName(request.From) || !isRegisteredName(request.To) || request.From == request.To {
 			return nil, invalid("two distinct agents are required")
 		}

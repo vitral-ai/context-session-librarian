@@ -154,7 +154,7 @@ func (s *Service) send(ctx context.Context, caller string, body []byte) (sendRes
 	if err != nil {
 		return sendResult{}, err
 	}
-	allowed, _, err := s.pairAllowed(ctx, caller, envelope.To)
+	allowed, _, _, err := s.pairAllowed(ctx, caller, envelope.To)
 	if err != nil {
 		return sendResult{}, err
 	}

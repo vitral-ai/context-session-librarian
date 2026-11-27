@@ -619,6 +619,7 @@ func (s *Service) deliveryTick(ctx context.Context) error {
 	// Digest records list the original message IDs. Recover their membership
 	// before regrouping originals after a crash between publish and bookkeeping.
 	batched := map[string]uint64{}
+	deferred := map[string]bool{}
 	for _, entry := range entries {
 		env := entry.record.Envelope
 		if env.Kind != "digest" {
@@ -639,9 +640,15 @@ func (s *Service) deliveryTick(ctx context.Context) error {
 			if state.State == "dropped" {
 				continue
 			}
-			allowed, err := s.canDeliver(ctx, env)
+			allowed, pending, err := s.canDeliver(ctx, env)
 			if err != nil {
 				return err
+			}
+			if pending {
+				for _, item := range env.Items {
+					deferred[item.ID] = true
+				}
+				continue
 			}
 			if !allowed {
 				if err := s.ensureMessageState(ctx, entry.record); err != nil {
@@ -679,7 +686,7 @@ func (s *Service) deliveryTick(ctx context.Context) error {
 			}
 			continue
 		}
-		if env.Kind == "digest" {
+		if env.Kind == "digest" || deferred[env.ID] {
 			continue
 		}
 		state, _, err := readState[messageState](ctx, s.state, "msg."+env.ID)
@@ -692,9 +699,12 @@ func (s *Service) deliveryTick(ctx context.Context) error {
 		if err := s.ensureMessageState(ctx, entry.record); err != nil {
 			return err
 		}
-		allowed, err := s.canDeliver(ctx, env)
+		allowed, pending, err := s.canDeliver(ctx, env)
 		if err != nil {
 			return err
+		}
+		if pending {
+			continue
 		}
 		if !allowed {
 			if err := s.markDropped(ctx, env.ID, now); err != nil {
@@ -753,10 +763,10 @@ func (s *Service) recoverPublication(ctx context.Context, entry messageEntry) (u
 	}
 }
 
-func (s *Service) canDeliver(ctx context.Context, env Envelope) (bool, error) {
+func (s *Service) canDeliver(ctx context.Context, env Envelope) (allowed, pending bool, err error) {
 	enabled, err := s.deliveryAgent(ctx, env.To)
 	if !enabled || err != nil {
-		return enabled, err
+		return enabled, false, err
 	}
 	items := env.Items
 	if env.Kind == "message" || env.Kind == "reply" {
@@ -768,14 +778,15 @@ func (s *Service) canDeliver(ctx context.Context, env Envelope) (bool, error) {
 		}
 		enabled, err := s.deliveryAgent(ctx, item.From)
 		if !enabled || err != nil {
-			return enabled, err
+			return enabled, false, err
 		}
-		allowed, _, err := s.pairAllowed(ctx, item.From, item.To)
-		if !allowed || err != nil {
-			return allowed, err
+		allowed, _, pairPending, err := s.pairAllowed(ctx, item.From, item.To)
+		if err != nil || (!allowed && !pairPending) {
+			return false, false, err
 		}
+		pending = pending || pairPending
 	}
-	return true, nil
+	return !pending, pending, nil
 }
 
 func (s *Service) markDropped(ctx context.Context, id string, now time.Time) error {
