@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.2 — 2026-11-26
+
+- Add explicit same-native-ID Resume for raw Codex and Claude packages under
+  the registry single-writer handoff. Managed source stop receipts, installation
+  attestation and durable local journals fence old writers and interrupted imports.
+  Default imports still Fork; direct opening and history-base Resume are refused.
+- Read release versions from packaged data, avoiding stale Python bytecode after
+  same-second upgrades.
+- Honor issuer-advertised refresh replay grace while preserving explicit opt-outs
+  and tighter local limits. Existing ambiguous refreshes still require sign-in.
+- Regress completion on the next pass after all raw bytes were acknowledged but
+  the view upload was interrupted, for both Codex and Claude.
+
 ## 0.5.1 — 2026-11-26
 
 - Offer a first-run upload choice, defaulting to new sessions, with last N,
