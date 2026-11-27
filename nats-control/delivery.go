@@ -26,7 +26,23 @@ func (s *Service) messages(ctx context.Context) ([]messageEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer snapshot.Stop()
+	defer func() {
+		_ = snapshot.Stop()
+		// A callback already blocked on a full Updates buffer must finish
+		// before the SDK can close the channel, even after unsubscribe.
+		timeout := time.NewTimer(time.Second)
+		defer timeout.Stop()
+		for {
+			select {
+			case _, ok := <-snapshot.Updates():
+				if !ok {
+					return
+				}
+			case <-timeout.C:
+				return
+			}
+		}
+	}()
 	var entries []messageEntry
 collect:
 	for {

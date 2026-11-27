@@ -1056,6 +1056,24 @@ func TestOperatorMode(t *testing.T) {
 		}
 		delete(want, "snapshot-test-0001")
 
+		cancelled, stop := context.WithCancel(ctx)
+		defer stop()
+		backpressure := &cancelSnapshotKV{KeyValue: service.state, cancel: stop}
+		snapshotService := &Service{state: backpressure}
+		if _, err := snapshotService.messages(cancelled); !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled snapshot returned %v", err)
+		}
+		select {
+		case _, open := <-backpressure.updates:
+			if open {
+				for range backpressure.updates {
+				}
+				t.Fatal("cancelled snapshot left buffered updates")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("cancelled snapshot did not release its watcher")
+		}
+
 		start := time.Now()
 		for id, expected := range want {
 			_, revision, err := readState[messageRecord](ctx, service.state, "message."+id)
@@ -1086,6 +1104,32 @@ func TestOperatorMode(t *testing.T) {
 			t.Fatalf("snapshot missed %d records", len(want))
 		}
 	})
+}
+
+type cancelSnapshotKV struct {
+	jetstream.KeyValue
+	cancel  context.CancelFunc
+	updates <-chan jetstream.KeyValueEntry
+}
+
+func (kv *cancelSnapshotKV) WatchFiltered(ctx context.Context, filters []string, opts ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
+	watcher, err := kv.KeyValue.WatchFiltered(ctx, filters, opts...)
+	if err != nil {
+		return nil, err
+	}
+	kv.updates = watcher.Updates()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for len(kv.updates) < cap(kv.updates) {
+		select {
+		case <-ctx.Done():
+			_ = watcher.Stop()
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+	kv.cancel()
+	return watcher, nil
 }
 
 type fixtureBroker struct {
