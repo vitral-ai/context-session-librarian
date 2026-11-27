@@ -29,6 +29,7 @@ type Config struct {
 	CreateTenant func(context.Context, TenantRequest) (TenantInfo, error)
 	EraseTenant  string
 	MirrorProbe  func(context.Context) (map[string]uint64, error)
+	VerifyPairs  func(context.Context, []PairReadback) error
 }
 
 type Service struct {
@@ -211,6 +212,12 @@ func (s *Service) control(ctx context.Context, caller, verb string, body []byte)
 	switch verb {
 	case "history":
 		return s.history(ctx, caller, body)
+	case "pairs":
+		var request pairRequest
+		if err := decode(body, &request); err != nil {
+			return nil, err
+		}
+		return s.pairs(ctx, caller, agent.Role, request)
 	case "unread":
 		return s.unread(ctx, caller, body)
 	case "receipt":

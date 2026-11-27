@@ -559,6 +559,7 @@ func (s *Service) deliveryTick(ctx context.Context) error {
 		return err
 	}
 	now := s.clock().UTC()
+	heldErr := s.advanceHeldPairs(ctx, entries, now, "", "")
 	// Digest records list the original message IDs. Recover their membership
 	// before regrouping originals after a crash between publish and bookkeeping.
 	batched := map[string]uint64{}
@@ -612,7 +613,7 @@ func (s *Service) deliveryTick(ctx context.Context) error {
 	var dueRecipients []string
 	for _, entry := range entries {
 		env := entry.record.Envelope
-		if entry.record.Sequence != 0 || entry.record.ReadyAt.After(now) {
+		if entry.record.Sequence != 0 || !entry.record.HeldUntil.IsZero() || entry.record.ReadyAt.After(now) {
 			continue
 		}
 		if sequence, exists := batched[env.ID]; exists {
@@ -669,7 +670,7 @@ func (s *Service) deliveryTick(ctx context.Context) error {
 	if err := s.sendReminders(ctx, now); err != nil {
 		return err
 	}
-	return s.pruneFiles(ctx, entries)
+	return errors.Join(heldErr, s.pruneFiles(ctx, entries))
 }
 
 // The publish intent records the earliest possible stream sequence. A
@@ -713,10 +714,7 @@ func (s *Service) canDeliver(ctx context.Context, env Envelope) (bool, error) {
 		if !enabled || err != nil {
 			return enabled, err
 		}
-		allowed, _, err := readState[bool](ctx, s.state, "pair."+item.From+"."+item.To)
-		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return false, nil
-		}
+		allowed, _, err := s.pairAllowed(ctx, item.From, item.To)
 		if !allowed || err != nil {
 			return allowed, err
 		}

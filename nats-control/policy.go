@@ -20,6 +20,7 @@ var buildVersion = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-
 
 // Agent is the record stored at agent.<name> in CSL_STATE.
 type Agent struct {
+	Coordinators  []string  `json:"coordinators,omitempty"`
 	Role          string    `json:"role"`
 	CLI           string    `json:"cli"`
 	Machine       string    `json:"machine"`
