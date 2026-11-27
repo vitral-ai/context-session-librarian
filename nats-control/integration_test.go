@@ -792,6 +792,57 @@ func TestOperatorMode(t *testing.T) {
 	call(sender, "ctl.fetch.sender", fileRequest{ID: unattachedID}, "")
 
 	verifyMirrorNotices(t, ctx, service)
+	t.Run("PromiseWatches", func(t *testing.T) {
+		create := func(note string) promiseWatch {
+			t.Helper()
+			var watch promiseWatch
+			raw := call(sender, "ctl.watch.sender", map[string]any{
+				"action": "create", "agent": "worker-a", "after_seconds": 60, "note": note,
+			}, "")
+			if err := json.Unmarshal(raw, &watch); err != nil || !messageID.MatchString(watch.ID) ||
+				watch.DueAt.Sub(watch.CreatedAt) != time.Minute {
+				t.Fatalf("watch response: %s", raw)
+			}
+			return watch
+		}
+		call(peer, "ctl.watch.worker-a", map[string]string{"action": "list"}, "forbidden")
+		silent := create("send proof")
+		cancelled := create("cancel this")
+		call(sender, "ctl.watch.sender", map[string]string{"action": "cancel", "id": cancelled.ID}, "")
+		noticeID := func(watch promiseWatch) string { return stableID("watch.sender." + watch.ID) }
+		expected := noticeID(silent)
+		advance := func(entries []messageEntry, now time.Time) {
+			t.Helper()
+			service.mu.Lock()
+			defer service.mu.Unlock()
+			if err := service.advanceWatches(ctx, entries, now); err != nil {
+				t.Fatal(err)
+			}
+		}
+		advance(nil, silent.DueAt)
+		record, revision, err := readState[messageRecord](ctx, service.state, "message."+expected)
+		if err != nil || record.Sequence == 0 || record.Envelope.Body !=
+			"worker-a promised \"send proof\" 1m ago and has not reported; ping it." {
+			t.Fatalf("watch notice: %+v %v", record, err)
+		}
+		advance(nil, silent.DueAt.Add(time.Minute))
+		if _, after, err := readState[messageRecord](ctx, service.state, "message."+expected); err != nil || after != revision {
+			t.Fatal("silent watch repeated")
+		}
+		reported := create("will report")
+		advance([]messageEntry{{record: messageRecord{
+			Envelope:   Envelope{From: "worker-a", To: "sender", Kind: "message"},
+			AcceptedAt: reported.CreatedAt.Add(time.Second),
+		}}}, reported.DueAt)
+		for _, watch := range []promiseWatch{cancelled, reported} {
+			if _, _, err := readState[messageRecord](ctx, service.state, "message."+noticeID(watch)); !errors.Is(err, jetstream.ErrKeyNotFound) {
+				t.Fatalf("unexpected notice for %s: %v", watch.Note, err)
+			}
+		}
+		if raw := call(sender, "ctl.watch.sender", map[string]string{"action": "list"}, ""); string(raw) != "{\"watches\":[]}" {
+			t.Fatalf("settled watches still listed: %s", raw)
+		}
+	})
 	verifyQueuedRevocations(t, ctx, service, owner)
 
 }
