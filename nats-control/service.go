@@ -211,6 +211,8 @@ func (s *Service) control(ctx context.Context, caller, verb string, body []byte)
 	switch verb {
 	case "history":
 		return s.history(ctx, caller, body)
+	case "watch":
+		return s.watch(ctx, caller, agent, body)
 	case "latest":
 		return s.latest(ctx, caller, body)
 	case "unread":
