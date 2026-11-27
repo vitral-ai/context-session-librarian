@@ -95,6 +95,8 @@ def print_status(result, *, verbose=False):
     print(f"Collector {'running' if running else 'stopped'}; {'paired' if result['paired'] else 'not paired'}; policy {result['policy']['selection']}.")
     print(f"{totals['synced']} synced, {totals['pending']} pending, {totals['excluded']} excluded; {totals['synced_bytes']}/{totals['planned_bytes']} bytes uploaded.")
     if result.get('last_error'): print('Last error: ' + result['last_error'])
+    if result.get('last_error') == 'workload_text_format_refused':
+        print('Upload refused: unsupported workload transcript schema or version; update the managed collector. Source files are unchanged.')
     recovery = result.get('recovery')
     if recovery:
         print('Sign in again: ' + (recovery['command'] or 'csl sync sign-in --help'))

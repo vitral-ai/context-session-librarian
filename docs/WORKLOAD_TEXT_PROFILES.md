@@ -12,7 +12,7 @@ the later one-origin runner. They do not qualify A8 or any live harness.
 never a harness home, registry, credential file or companion-file search:
 
 - `codex-0.169.0-text-v1`: a first `session_meta` header declaring
-  `cli_version: 0.169.0`, complete response-item text/call/result records, bounded
+  `cli_version` at least `0.169.0` (stable numeric major.minor.patch), complete response-item text/call/result records, bounded
   auxiliary event metadata, model and title updates. A fresh paginated stream is
   accepted only without a base and with exact contiguous integer ordinals from
   zero, matching `csl_codex_history._node`'s no-base boundary. Multiple headers,
@@ -32,7 +32,13 @@ These are synthetic fixture profiles using CSL's existing provider renderer and
 documented native versions, not new evidence of an actual executable or model
 turn. Source references are the existing CSL provider/tests and
 [provider matrix](PROVIDER_MATRIX.md). Claude is not inferred from
-Antigravity. Missing/different versions refuse. No native process is launched to
+Antigravity. The Codex profile name remains its schema baseline so existing recipe,
+enrollment and runtime bindings remain compatible. Newer Codex releases (including
+0.172.0) pass only if every record still validates against the known text schema;
+unknown record/control/content formats still refuse before upload. Missing,
+malformed or older Codex versions and different Claude versions refuse.
+`csl sync --home <collector-sync-home> status` reports `workload_text_format_refused`
+and update guidance; JSON status retains the same `last_error` code. No native process is launched to
 discover a version, and a transcript version field is not an identity authority.
 
 ## Selected Representation

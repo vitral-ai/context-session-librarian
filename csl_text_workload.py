@@ -40,6 +40,13 @@ CODEX_EVENTS = {'task_started', 'task_complete', 'item_started', 'item_completed
                 'mcp_tool_call_begin', 'mcp_tool_call_end'}
 
 
+def supported_codex_version(value):
+    """The profile names its schema baseline, not an exact CLI binary."""
+    if not isinstance(value, str) or not re.fullmatch(r'(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})', value):
+        return False
+    return tuple(map(int, value.split('.'))) >= (0, 169, 0)
+
+
 def refused():
     raise SyncError('workload_text_format_refused')
 
@@ -305,7 +312,7 @@ class WorkloadTextProvider(PreparedProvider):
             if value.get('history_base') is not None:
                 raise SyncError('workload_external_history_refused')
             if value.get('history_mode') not in (None, 'legacy', 'paginated'): refused()
-            if value.get('cli_version') != VERSIONS['codex']: refused()
+            if not supported_codex_version(value.get('cli_version')): refused()
             sid = value.get('id', value.get('session_id'))
             identifier(sid)
             if value.get('id', sid) != sid or value.get('session_id', sid) != sid: refused()

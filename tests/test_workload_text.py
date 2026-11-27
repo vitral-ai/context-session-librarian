@@ -64,6 +64,58 @@ class WorkloadTextTests(unittest.TestCase):
             path.write_bytes(b''.join(json.dumps(row).encode()+b'\n' for row in records))
         return WorkloadTextProvider(provider, ((source,'main.jsonl'),), self.root/provider/'projection', **options), path
 
+    def test_newer_codex_known_schema_uploads_without_changing_profile(self):
+        from csl_workload_launch_binding import LaunchObservation
+        peer = Peer()
+        self.addCleanup(peer.close)
+        state = State(self.root/'newer-state')
+        self.addCleanup(state.close)
+        rows = native('codex')
+        rows[0]['payload'].update(cli_version='0.172.0', source='exec')
+        adapter, _ = self.provider('codex', rows)
+        baseline = adapter.policy_fingerprint
+        result = Collector(state, Registry(peer.url, FakeTokens(), http=HTTP(attempts=1)),
+                           adapter, chunk_size=23).run(providers=['codex'], days=None)
+        self.assertEqual(result['synced'], 1)
+        self.assertEqual(result['pending'], 0)
+        self.assertEqual(adapter.profile, 'codex-0.169.0-text-v1')
+        rows[0]['payload']['cli_version'] = '0.169.0'
+        old, _ = self.provider('codex', rows)
+        self.assertEqual(old.policy_fingerprint, baseline)
+        observed = LaunchObservation.__new__(LaunchObservation)
+        observed.declared = observed.failed = False
+        rows[0]['payload']['cli_version'] = '0.172.0'
+        observed.header(rows)
+        self.assertTrue(observed.declared)
+        self.assertFalse(observed.failed)
+
+    def test_codex_compatibility_requires_version_floor_and_known_schema(self):
+        from csl_text_workload import supported_codex_version
+        for version in ('0.169.0', '0.172.0', '0.200.1', '1.0.0'):
+            self.assertTrue(supported_codex_version(version))
+            rows = native('codex')
+            rows[0]['payload'].update(cli_version=version, history_mode='paginated')
+            for ordinal, row in enumerate(rows): row['ordinal'] = ordinal
+            adapter, _ = self.provider('codex', rows)
+            self.assertEqual(adapter.list_sessions('codex')[0]['native_id'], SID)
+        for version in ('0.168.9', 'unknown', None, 172, '0.172.0-dev', '00.172.0'):
+            self.assertFalse(supported_codex_version(version))
+        rows = native('codex')
+        rows[0]['payload']['cli_version'] = '0.172.0'
+        rows.append({'type': 'unknown_new_schema', 'payload': {}})
+        adapter, _ = self.provider('codex', rows)
+        peer = Peer()
+        self.addCleanup(peer.close)
+        state = State(self.root/'refused-state')
+        self.addCleanup(state.close)
+        result = Collector(state, Registry(peer.url, FakeTokens(), http=HTTP(attempts=1)),
+                           adapter).run(providers=['codex'], days=None)
+        self.assertEqual(result['synced'], 0)
+        self.assertEqual(state.status()['last_error'], 'workload_text_format_refused')
+        self.assertEqual(peer.sessions, {})
+        self.assertEqual(peer.files, {})
+        self.assertEqual(peer.views, {})
+
     def test_adjacent_claude_only_publishes_safe_launch_cwd(self):
         for cwd, expected in (('/home/agent/project', '/home/agent/project'),
                               ('/home/' + CANARY, None), ('/home/../private', None),

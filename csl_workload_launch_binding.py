@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 
+from csl_text_workload import supported_codex_version
 from csl_workload_auth import boot_clock
 from csl_canonical import strict_json
 from csl_workload_identity import canonical
@@ -130,7 +131,7 @@ class LaunchObservation(Channel):
         try:
             value = records[0]['payload']
             if (self.declared or records[0]['type'] != 'session_meta'
-                    or value.get('cli_version') != '0.169.0' or value.get('source') != 'exec'): raise ValueError()
+                    or not supported_codex_version(value.get('cli_version')) or value.get('source') != 'exec'): raise ValueError()
             self.declared = True
         except Exception: self.failed = True
 
