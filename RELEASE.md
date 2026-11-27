@@ -8,6 +8,19 @@ The version records below refer to their original published tags, which are unch
 
 ## Version records
 
+### v0.5.7 — typed managed Resume adapter release candidate
+
+Install `csl-resume-action --json-stdin` for bounded owner-local check, release,
+import and run. Browser payloads select no paths or commands. The Linux managed
+host must compare the exact canonical target, writer incarnation and collector
+binding under the native lock before launch or replay (compatible host #903).
+Existing Fork stays separate. Require a private personal collector binding and
+owner-provisioned target; stock workload-only installations refuse. Local source
+release still requires the exact positive managed process end receipt.
+Publish after exact-head hosted/native checks and independent review. Preserve
+profiles and authentication. Paired source/local keeper admission is verified;
+DEV and real provider product-flow verification remain separate.
+
 ### v0.5.6 — installation attestation release candidate
 
 Add `csl sync --home PROFILE attest-installation --json` for the owner-local

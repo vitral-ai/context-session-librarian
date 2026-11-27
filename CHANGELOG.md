@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.7
+
+Add the installed typed owner-local Resume adapter for explicit check, release,
+import and managed run. Preserve same-native-ID writer locks and replay journals;
+bind host admission to the exact resolved target, writer generation and collector
+profile. Require personal collector pairing and configured targets, refusing
+unsupported hosts and unsafe or cyclic paths with bounded diagnostics.
+
 ## 0.5.6
 
 Add bounded, server-attested collector installation identity for owner checks.
