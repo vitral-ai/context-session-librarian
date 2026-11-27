@@ -544,7 +544,13 @@ state. Source release rechecks the managed end
 receipt under the native lock, flushes, and requires the exact complete snapshot.
 Import reuses the #142 raw single-writer handoff and atomic no-replace publication.
 Run releases the adapter lock before invoking `keeper-managed-resume --json-stdin`;
-the host reacquires it and requires an active writer fence and exact live proof.
+the host reacquires it and compares `expected_target` (the exact five target fields),
+`expected_writer` (`registry_session_id`, `account_id`, `device_id`, `generation`)
+and `expected_binding` (`profile`, `device_id`, `endpoint`) against its resolved
+target and active fence before journal, spawn or replay. Active fences carry the
+writer incarnation; the adapter upgrades an older fence only from the verified
+active local record under lock. Missing or changed admission fields refuse.
+The host also requires exact live process proof for replay.
 
 Success is one schema-v1 JSON object repeating request/action/provider,
 `native_session_id`, `registry_session_id`, `host_id`, attested `account_id` and

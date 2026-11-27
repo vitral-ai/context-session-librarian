@@ -15,7 +15,7 @@ import uuid
 
 from csl_sync_state import State, SyncError, exclusive, read_private_json, private_json
 from csl_sync_fs import open_read, private_file
-from csl_sync_writer import Writer, native_lock, check_fence, require_stopped
+from csl_sync_writer import Writer, native_lock, check_fence, require_stopped, save_fence, writer_incarnation
 
 
 def canonical_uuid(value):
@@ -103,9 +103,10 @@ class Local:
                 raise SyncError('invalid_resume_target')
             self.target = target
 
-    def run_host(self):
+    def run_host(self, admission):
         q = self.request
         payload = {k: q[k] for k in ('schema_version', 'request_id', 'provider', 'native_id', 'target_id', 'expected_host_id')}
+        payload.update(admission)
         with tempfile.TemporaryFile() as output:
             completed = subprocess.run([str(self.host), 'keeper-managed-resume', '--json-stdin'],
                 input=json.dumps(payload).encode(), stdout=output, stderr=subprocess.DEVNULL, timeout=30)
@@ -168,6 +169,16 @@ def execute(q):
                             remote.get('writer', {}).get('state') != 'active' or remote['writer'].get('device_id') != identity['device_id'] or
                             remote['writer'].get('generation') != q['expected_generation']): raise SyncError('writer_fenced')
                     _resolve(q['provider'], q['native_id'], None)
+                    incarnation = writer_incarnation(record)
+                    # Older active fences did not carry the writer generation.
+                    # Upgrade only after matching SQLite, attestation and registry
+                    # while holding the same lock used by host admission.
+                    if fence.get('writer') is None and q['action'] == 'run':
+                        save_fence(q['provider'], q['native_id'], 'active', fence['binding'], writer=incarnation)
+                    elif fence.get('writer') is not None and fence['writer'] != incarnation:
+                        raise SyncError('writer_fenced')
+                    admission = dict(expected_target=dict(local.target), expected_writer=incarnation,
+                                     expected_binding=dict(fence['binding']))
                 elif q['action'] == 'release' or q.get('intent') == 'source':
                     require_stopped(q['provider'], q['native_id'], host=str(local.host))
                     owner = remote.get('writer', {})
@@ -199,7 +210,7 @@ def execute(q):
                     except ProviderError as error:
                         if error.code != 'session_not_found': raise
                     else: require_stopped(q['provider'], q['native_id'], host=str(local.host))
-            if q['action'] == 'run': return dict(base, **{k:v for k,v in local.run_host().items() if k not in base})
+            if q['action'] == 'run': return dict(base, **{k:v for k,v in local.run_host(admission).items() if k not in base})
             return dict(base, state='released' if q['action'] == 'release' else 'eligible')
         if not local.target: raise SyncError('resume_target_required')
         from csl_resume import import_same_id

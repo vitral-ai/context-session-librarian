@@ -350,9 +350,9 @@ class WriterTests(unittest.TestCase):
         from csl_resume import import_same_id
         from csl_sync_writer import save_fence
         args, identifier, _ = self.import_fixture()
-        def interrupted(provider, identifier, state, binding):
+        def interrupted(provider, identifier, state, binding, **kwargs):
             if state == 'active': raise OSError('synthetic crash before active fence')
-            return save_fence(provider, identifier, state, binding)
+            return save_fence(provider, identifier, state, binding, **kwargs)
         with patch('csl_sync_http.Registry', return_value=self.api), \
              patch('csl_sync_writer.save_fence', side_effect=interrupted), redirect_stdout(io.StringIO()), \
              self.assertRaises(OSError):

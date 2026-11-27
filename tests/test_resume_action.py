@@ -74,12 +74,15 @@ class LocalTests(unittest.TestCase):
             keeper_session_id='live-'+REQUEST,process=dict(pid=123,start_identity='incarnation'))
         def host(argv,**kw):
             self.assertEqual(argv,[str(self.binary),'keeper-managed-resume','--json-stdin'])
-            self.assertEqual(json.loads(kw['input'])['target_id'],'project')
+            payload=json.loads(kw['input'])
+            self.assertEqual(payload['target_id'],'project')
+            self.assertEqual(payload['expected_target'],local.target)
+            self.assertEqual(payload['expected_writer']['generation'],1)
             kw['stdout'].write(json.dumps(result).encode());return Mock(returncode=0)
         with patch('csl_resume_action.subprocess.run',side_effect=host):
-            self.assertEqual(local.run_host(),result)
+            self.assertEqual(local.run_host(dict(expected_target=local.target,expected_writer=dict(generation=1),expected_binding={})),result)
             result['native_session_id']=DEVICE
-            with self.assertRaises(SyncError):local.run_host()
+            with self.assertRaises(SyncError):local.run_host(dict(expected_target=local.target,expected_writer=dict(generation=1),expected_binding={}))
     def test_owner_bound_destination_preflight(self):
         registry=Mock();registry.call.return_value=dict(id=REGISTRY,provider='codex',native_id=NATIVE,snapshot_id=SNAP,
             writer=dict(state='released',generation=0),sync=dict(complete=True),package=dict(available=True))
@@ -112,14 +115,23 @@ class LocalTests(unittest.TestCase):
             held.append(True)
             try:yield
             finally:held.pop()
-        def launch():
+        fence=dict(state='active',binding=dict(profile=str(self.profile),device_id=DEVICE,endpoint='https://registry.example'))
+        def launch(admission):
             self.assertFalse(held)
+            self.assertEqual(admission['expected_writer'],dict(registry_session_id=REGISTRY,account_id=ACCOUNT,device_id=DEVICE,generation=1))
+            self.assertEqual(admission['expected_target']['cwd'],str(self.cwd))
+            # Host must compare these captured expectations after taking its lock.
+            from csl_sync_writer import read_fence
+            self.assertEqual(read_fence('codex',NATIVE)['writer'],admission['expected_writer'])
+            self.assertEqual(admission['expected_binding'],fence['binding'])
             return dict(state='launched',process=dict(pid=1,start_identity='start'),keeper_session_id='live-'+REQUEST)
         q=request(action='run',expected_device_id=DEVICE,expected_generation=1);q.pop('intent')
         with patch('csl_sync.attest_installation',return_value=dict(account_id=ACCOUNT,device_id=DEVICE)),\
-             patch('csl_sync_http.Registry',return_value=registry),patch('csl_resume_action.check_fence',return_value=dict(state='active')),\
+             patch('csl_sync_http.Registry',return_value=registry),patch('csl_resume_action.check_fence',return_value=fence),\
              patch('csl_sync_providers._resolve'),patch('csl_resume_action.native_lock',lock),\
              patch.object(action.Local,'run_host',side_effect=launch):
             self.assertEqual(action.execute(q)['state'],'launched')
+            fence['writer']=dict(registry_session_id=REGISTRY,account_id=ACCOUNT,device_id=DEVICE,generation=2)
+            with self.assertRaisesRegex(SyncError,'writer_fenced'): action.execute(q)
 
 if __name__=='__main__':unittest.main()
