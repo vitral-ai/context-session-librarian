@@ -11,7 +11,7 @@ from tempfile import TemporaryFile
 import uuid
 
 from csl_bridge_store import BridgeError, contains_findings, encode, identifier, message_selector
-from csl_nats import Client, agent_name, config, run_cli
+from csl_nats import Client, agent_name, close_best_effort, config, run_cli
 
 CHUNK_BYTES = 256 * 1024
 MAX_FILE_BYTES = 25 * 1024 * 1024
@@ -226,7 +226,7 @@ def call(path, source, operation, *, validate_settings=None):
         try:
             return await operation(client)
         finally:
-            await client.connection.close()
+            await close_best_effort(client.connection)
 
     try:
         return run_cli(run())

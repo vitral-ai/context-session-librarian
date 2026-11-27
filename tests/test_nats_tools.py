@@ -1,10 +1,11 @@
 import base64
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 import hashlib
 import io
 import json
 from pathlib import Path
+import ssl
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
@@ -98,6 +99,29 @@ class NatsToolsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(first_line.endswith(second[:8]))
         self.assertTrue(second_line.endswith(first[:8]))
         self.assertNotIn('x' * 120, first_line)
+
+    def test_watch_tls_cleanup_preserves_the_control_outcome(self):
+        watch_id = str(uuid.uuid4())
+        args = ['agents', 'watch', '--agent', 'bob', '--after', '2h', '--note', 'Delivery report',
+                '--nats-config', '/private/config', '--from', 'alice']
+        for error in (None, BridgeError('Watch operation denied')):
+            with (self.subTest(error=error), redirect_stdout(io.StringIO()) as stdout,
+                  redirect_stderr(io.StringIO()) as stderr):
+                close = AsyncMock(side_effect=ssl.SSLError('APPLICATION_DATA_AFTER_CLOSE_NOTIFY'))
+                request = AsyncMock(return_value={'id': watch_id}, side_effect=error)
+                client = SimpleNamespace(request=request, connection=SimpleNamespace(close=close))
+                with (patch('csl_nats_tools.config', return_value={}),
+                      patch.object(Client, 'connect_active', new=AsyncMock(return_value=client))):
+                    if error is None:
+                        self.assertEqual(main(args), 0)
+                        self.assertEqual(json.loads(stdout.getvalue()), {'id': watch_id})
+                    else:
+                        with self.assertRaisesRegex(SystemExit, 'Watch operation denied'):
+                            main(args)
+                        self.assertEqual(stdout.getvalue(), '')
+                request.assert_awaited_once()
+                close.assert_awaited_once()
+                self.assertNotIn('SSLError', stderr.getvalue())
 
     async def test_history_rejects_a_repeated_cursor(self):
         cursor = str(uuid.uuid4())
