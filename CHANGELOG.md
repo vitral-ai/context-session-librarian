@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.8
+
+Resume a synced, stopped keeper-managed recording in place on its original
+device by acquiring its first writer. Keep unmanaged recordings refused with
+a specific stop-proof diagnostic. Recover exact acquisition and launch retries,
+including host readback after the active collector advances the snapshot.
+
 ## 0.5.7
 
 Add the installed typed owner-local Resume adapter for explicit check, release,

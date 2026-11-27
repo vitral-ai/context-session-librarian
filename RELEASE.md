@@ -8,6 +8,25 @@ The version records below refer to their original published tags, which are unch
 
 ## Version records
 
+### v0.5.8 — original-device in-place Resume release candidate
+
+A fully synced keeper-managed recording at legacy generation 0 can acquire its
+first writer and resume in place on its original attested device. Require exact
+synced bytes and a positive PID/start-bound end receipt. Unmanaged recordings
+return `resume_stop_proof_required`; other devices still require handoff.
+Journal the request before fencing and acquiring generation 1 under the native
+lock. Exact retries recover interrupted publication. After a lost launch response
+and a newer snapshot, only an existing exact run journal plus the same active
+writer and host readback-only live proof can recover; readback never launches.
+Successful run returns the actual writer generation. The advanced-snapshot path
+requires a host supporting `readback_only:true`; older hosts refuse safely.
+Publish after independent release review and exact-head hosted/native checks.
+Preserve collector profiles and authentication. For a retained tagged checkout,
+run `git fetch --tags` and `git switch --detach v0.5.8` after publication, then
+re-run `./install.sh` with the original prefix (`./install.sh PREFIX` for a custom
+prefix). With that prefix's `bin` first on `PATH`, verify `csl --version` reports
+0.5.8 and `csl-resume-action --help` succeeds. README has the current install steps.
+
 ### v0.5.7 — typed managed Resume adapter release candidate
 
 Install `csl-resume-action --json-stdin` for bounded owner-local check, release,
@@ -103,8 +122,8 @@ Branch-tracking development checkouts update with `git pull --ff-only`. Tagged
 installs have a detached HEAD: update with `git fetch --tags` followed by
 `git switch --detach v0.5.0` after publication. After either update, re-run
 `./install.sh` with the same original prefix (`./install.sh PREFIX` for a custom
-prefix) to install newly added launchers. For v0.5.7, verify `csl --version` and
-`csl-resume-action --help` with that prefix's `bin` first on `PATH`.
+prefix) to install newly added launchers. Verify `csl --version` reports 0.5.0
+with that prefix's `bin` first on `PATH`. See README for current release updates.
 Keep local edits separately; do
 not reset or discard them. Pinned guided installers need their owner to update
 the archive pin. Downloading or installing
