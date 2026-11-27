@@ -53,6 +53,23 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(len(rows),2)
         self.assertTrue(all({'_path','byte_count','mtime','native_id'} <= row.keys() for row in rows))
 
+    def test_excluded_canonical_and_legacy_sessions_skip_history_analysis(self):
+        for legacy in (False, True):
+            sid, path = self.transcript()
+            if legacy:
+                path.rename(path.with_name('rollout-old-name.jsonl'))
+            self.state.select('codex', sid, False)
+        healthy, _ = self.transcript()
+        prepare = self.providers.prepare_session
+        seen = []
+        def preparing(provider, candidate):
+            seen.append(candidate['native_id'])
+            return prepare(provider, candidate)
+        with patch.object(self.providers, 'prepare_session', side_effect=preparing):
+            result = self.collector.run(days=None, providers=['codex'])
+        self.assertEqual((result['synced'], result['errors']), (1, 0), result)
+        self.assertEqual(seen, [healthy])
+
     def test_huge_old_file_does_not_block_small_new_uploads_or_allocate_its_contents(self):
         configure(self.state, 'new')
         old,path = self.transcript(created='2001-01-01T00:00:00Z')

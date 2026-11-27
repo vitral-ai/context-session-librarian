@@ -250,6 +250,24 @@ class CacheTests(unittest.TestCase):
         self.assertEqual((result['synced'], result['pending']), (2, 0))
         self.assertIsNone(self.state.session('codex', bad_id)['last_error'])
 
+    def test_attached_lineage_uploads_but_does_not_offer_native_transfer(self):
+        from test_codex_history import write_rollout
+        base, base_id, position = write_rollout(self.home, label='ATTACHED-BASE')
+        # The reference captures exactly the persisted base prefix.
+        child, sid, _ = write_rollout(self.home, label='ATTACHED-CHILD', base=position)
+        rows = [json.loads(row) for row in child.read_text().splitlines()]
+        rows[0]['payload']['attached_thread'] = True
+        child.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        result = self.run_pass()
+        self.assertEqual(result['errors'], 0, result)
+        self.assertEqual(self.state.session('codex', sid)['status'], 'synced')
+        descriptor = self.providers.package_descriptor('codex', sid)
+        self.assertFalse(descriptor['available'])
+        self.assertEqual(descriptor['reason'], 'history_base_attached_thread_unverified')
+        page = self.providers.view_records('codex', sid)
+        self.assertIn('ATTACHED-BASE', json.dumps(page))
+        self.assertIn('ATTACHED-CHILD', json.dumps(page))
+
     def test_malformed_tool_id_isolated_and_repaired_old_session_stays_unselected(self):
         self.state.select('codex', self.sid, True)
         bad_id = str(uuid.uuid4())

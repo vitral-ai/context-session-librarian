@@ -72,6 +72,9 @@ class Providers:
     def prepare_session(self, provider, candidate):
         return self.cache.prepare_session(provider, candidate)
 
+    def resolve_candidate_identity(self, provider, candidate):
+        return self.cache.resolve_candidate_identity(provider, candidate)
+
     def list_sessions(self, provider):
         return (self.cache or self.module).list_sessions(provider)
 
@@ -199,6 +202,10 @@ class Collector:
                 metadata = candidate
                 if cheap and not candidate.get('error'):
                     try:
+                        candidate = self.providers.resolve_candidate_identity(provider, candidate)
+                        native_id = candidate['native_id']
+                        if self.state.selection(provider, native_id) is False:
+                            continue
                         check_work(available=candidate.get('byte_count', 0))
                         metadata = self.providers.prepare_session(provider, candidate)
                     except PassYield:

@@ -59,7 +59,7 @@ class CachedProviders:
                 # fresh lineage resolution before freezing or rendering.
                 rollouts = entry.get('graph_rollouts') if entry else None
                 if rollouts is None:
-                    rollouts = ([n.rollout_id for n in history.lineage(home, path)[:-1]]
+                    rollouts = ([n.rollout_id for n in history.lineage(home, path, allow_attached=True)[:-1]]
                                 if history.has_base(path) else [])
                 for rollout in rollouts:
                     candidates = []
@@ -218,6 +218,15 @@ class CachedProviders:
         self.unique_identity(provider, candidate, rows[0]['native_id'])
         return rows[0]
 
+    def resolve_candidate_identity(self, provider, candidate):
+        if provider != 'codex' or not candidate.get('_identity_hint'):
+            return candidate
+        home, _ = self.listed[provider]
+        native_id = self.legacy_identity(candidate['_path'], home)
+        if native_id is None:
+            raise SyncError('invalid_native_id')
+        return {**candidate, 'native_id': native_id, '_identity_hint': False}
+
     def list_sessions(self, provider, *, discovered=None):
         if provider not in ('codex', 'claude'): return self.module.list_sessions(provider)
         home = self.module.provider_home(provider)
@@ -373,9 +382,10 @@ class CachedProviders:
                 if hash_prefix(source, size) != h.hexdigest(): raise SyncError('source_changed')
                 inputs.append({'path': str(source), 'size': size, 'sha256': h.hexdigest()})
             frozen = stage / path.relative_to(home)
-            nodes = (self.module.csl_codex_history.lineage(stage, frozen)
+            nodes = (self.module.csl_codex_history.lineage(stage, frozen, allow_attached=True)
                      if provider == 'codex' and self.module.csl_codex_history.has_base(frozen) else None)
-            inventory = self.module._files(provider, frozen, stage)
+            inventory = (self.module.csl_codex_history.inventory(nodes) if nodes else
+                         self.module._files(provider, frozen, stage))
             evidence = {}
             metadata = self.module._metadata(provider, frozen, stage, 300, files=inventory, evidence=evidence)
             # Keep the inventory frozen for this pass, but fence the originals
@@ -386,6 +396,11 @@ class CachedProviders:
                                                'sha256': f['sha256']} for f in inventory])).hexdigest()
             has_conversation = self.index_view(provider, frozen, inventory[0], directory, previous, nodes=nodes, binding=binding)
             reason = None if has_conversation else 'no_conversation'
+            # Attached is persisted fork-role metadata, not a different record
+            # schema. Archive and display its verified lineage normally; moving
+            # that relationship into a new native session remains unsupported.
+            if nodes and any(n.meta.get('attached_thread') for n in nodes):
+                reason = 'history_base_attached_thread_unverified'
             package = ({'available': False, 'reason': reason, 'descriptor_version': 1, 'manifest': None, 'members': []}
                        if reason else self.module._package_mapping(provider, metadata['native_id'], frozen.suffix, metadata, inventory, nodes=nodes))
             return {'schema': 2, 'title_version': 2, 'metadata': metadata, 'inventory': inventory, 'package': package,

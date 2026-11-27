@@ -8,6 +8,16 @@ The version records below refer to their original published tags, which are unch
 
 ## Version records
 
+### v0.5.4 — Windows collector reliability release candidate
+
+Choose one Python executable deterministically and use its matching pythonw.exe
+for the independent, console-free Scheduled Task. Preserve registered provider
+homes. Apply legacy-ID exclusions before history analysis. Collect verified
+attached-thread lineage without offering unsupported native transfer; retain
+per-session error isolation so healthy sessions upload beside malformed history.
+Publish only after exact-head hosted/native checks, independent release review
+and a synthetic Windows task witness on vitral-win.
+
 ### v0.5.3 — managed Codex compatibility release candidate
 
 Keep the `codex-0.169.0-text-v1` profile and recipe identity while accepting stable

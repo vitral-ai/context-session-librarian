@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import contextlib
 
 
 if __name__ == '__main__':
@@ -18,4 +19,9 @@ if __name__ == '__main__':
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from csl_sync import main
 
-    main(['sync', '--home', state, 'watch'])
+    # pythonw has no console streams. Progress/errors remain in collector state
+    # (csl sync status); avoid an unbounded second log or a console dependency.
+    with open(os.devnull, 'w', encoding='utf-8') as sink:
+        with contextlib.redirect_stdout(sys.stdout if sys.stdout is not None else sink), \
+                contextlib.redirect_stderr(sys.stderr if sys.stderr is not None else sink):
+            main(['sync', '--home', state, 'watch'])
