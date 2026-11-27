@@ -35,11 +35,11 @@ This feature is included in v0.5.0; existing configured transports remain suppor
 
 Requires Linux and Python 3.11+. The core CLI uses only the Python standard
 library; no virtualenv or pip installation is needed. Confirm tag availability in
-the [v0.5.6 Release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.5.6)
+the [v0.5.7 Release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.5.7)
 before using the tagged installation below.
 
 ```bash
-git clone --branch v0.5.6 https://github.com/vitral-ai/context-session-librarian.git context-session-librarian
+git clone --branch v0.5.7 https://github.com/vitral-ai/context-session-librarian.git context-session-librarian
 cd context-session-librarian
 ./install.sh
 csl --version
@@ -54,11 +54,18 @@ release is published (keep any local changes; do not reset them):
 
 ```bash
 git fetch --tags
-git switch --detach v0.5.6
+git switch --detach v0.5.7
+./install.sh
 csl --version
+csl-resume-action --help
 ```
 
-Only branch-tracking development checkouts use `git pull --ff-only`.
+Re-run the installer with the same prefix used originally: the commands above
+use the default `~/.local`; for a custom prefix, run `./install.sh PREFIX`
+instead. This installs newly added launchers, including `csl-resume-action`.
+Keep that prefix's `bin` directory first on `PATH` for both verification commands.
+Only branch-tracking development checkouts use `git pull --ff-only`; after
+pulling, re-run the installer with the same prefix and verify both commands above.
 Pinned guided installations update through their installer release.
 
 Context Session Librarian was previously named Codex Session Librarian; the
@@ -67,7 +74,7 @@ Context Session Librarian was previously named Codex Session Librarian; the
 Opening a conversation requires its native CLI and your own authentication.
 Local search and ZIP transfers need no GitHub account or paid model calls.
 Team exchange additionally requires [GitHub CLI](https://cli.github.com/).
-For development, clone without `--branch v0.5.6` in a separate directory;
+For development, clone without `--branch v0.5.7` in a separate directory;
 see [release history](CHANGELOG.md) for published changes.
 
 ## Find And Reopen A Conversation
