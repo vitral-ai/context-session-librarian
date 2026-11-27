@@ -159,9 +159,15 @@ func (s *Service) handleControl(msg *nats.Msg) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	started := time.Now()
 	s.mu.Lock()
+	acquired := time.Now()
 	response, err := s.control(ctx, caller, verb, msg.Data)
 	s.mu.Unlock()
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		s.config.Logger.Info("slow control request", "tenant", s.config.Tenant, "operation", verb,
+			"lock_wait", acquired.Sub(started), "elapsed", elapsed)
+	}
 	s.respond(msg, verb, response, err)
 }
 
