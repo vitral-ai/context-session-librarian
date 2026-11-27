@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -168,10 +169,11 @@ func (s *Service) unread(ctx context.Context, caller string, body []byte) (any, 
 
 func (s *Service) history(ctx context.Context, caller string, body []byte) (any, error) {
 	var request struct {
-		With   string `json:"with,omitempty"`
-		Last   int    `json:"last,omitempty"`
-		ID     string `json:"id,omitempty"`
-		Before string `json:"before,omitempty"`
+		With   string     `json:"with,omitempty"`
+		Last   int        `json:"last,omitempty"`
+		ID     string     `json:"id,omitempty"`
+		Before string     `json:"before,omitempty"`
+		Since  *time.Time `json:"since,omitempty"`
 	}
 	if err := decode(body, &request); err != nil {
 		return nil, err
@@ -187,7 +189,8 @@ func (s *Service) history(ctx context.Context, caller string, body []byte) (any,
 		return nil, invalid("invalid pair or history limit")
 	}
 	if request.ID != "" {
-		if request.With != "" || request.Before != "" || (!messageID.MatchString(request.ID) && !validMessagePrefix(request.ID)) {
+		if request.With != "" || request.Before != "" || request.Since != nil ||
+			(!messageID.MatchString(request.ID) && !validMessagePrefix(request.ID)) {
 			return nil, invalid("provide one message ID or pair name")
 		}
 	} else if _, err := pairKey(caller, request.With); err != nil {
@@ -227,6 +230,12 @@ func (s *Service) history(ctx context.Context, caller string, body []byte) (any,
 		}
 		matches = matches[:index]
 	}
+	if request.Since != nil {
+		index := sort.Search(len(matches), func(i int) bool {
+			return matches[i].CreatedAt.After(*request.Since)
+		})
+		matches = matches[index:]
+	}
 	requested := min(request.Last, len(matches))
 	result := make([]historyEntry, 0, requested)
 	encoded := 0
@@ -265,6 +274,49 @@ func (s *Service) history(ctx context.Context, caller string, body []byte) (any,
 		Retention  int            `json:"retention"`
 		NextBefore string         `json:"next_before,omitempty"`
 	}{result, retention, next}, nil
+}
+
+type latestEntry struct {
+	With    string    `json:"with"`
+	ID      string    `json:"id"`
+	At      time.Time `json:"at"`
+	From    string    `json:"from"`
+	Preview string    `json:"preview"`
+}
+
+func (s *Service) latest(ctx context.Context, caller string, body []byte) (any, error) {
+	if err := decode(body, &struct{}{}); err != nil {
+		return nil, err
+	}
+	records, err := s.historyRecords(ctx, caller, "", "")
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(records, func(a, b historyRecord) int { return compareHistoryRecords(b, a) })
+	seen := make(map[string]bool)
+	latest := make([]latestEntry, 0)
+	for _, record := range records {
+		peer := record.From
+		if peer == caller {
+			peer = record.To
+		}
+		if seen[peer] {
+			continue
+		}
+		seen[peer] = true
+		preview := record.Body
+		characters := 0
+		for offset := range preview {
+			if characters == 120 {
+				preview = preview[:offset]
+				break
+			}
+			characters++
+		}
+		latest = append(latest, latestEntry{With: peer, ID: record.ID, At: record.CreatedAt,
+			From: record.From, Preview: preview})
+	}
+	return latest, nil
 }
 
 func (s *Service) historyRecords(ctx context.Context, caller, peer, id string) ([]historyRecord, error) {
@@ -388,6 +440,10 @@ func historyMatches(env Envelope, caller, peer, id string) bool {
 	if id != "" {
 		return (env.From == caller || env.To == caller) && strings.HasPrefix(env.ID, id) &&
 			(env.Kind == "message" || env.Kind == "reply")
+	}
+	if peer == "" {
+		return (env.From == caller && isRegisteredName(env.To)) ||
+			(env.To == caller && isRegisteredName(env.From))
 	}
 	return (env.From == caller && env.To == peer) || (env.To == caller && env.From == peer)
 }
