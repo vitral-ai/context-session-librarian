@@ -204,7 +204,7 @@ class Node:
     root: Path
 
 
-def node(root,path,boundary=None,main=False):
+def node(root,path,boundary=None,main=False,*,allow_attached=False):
     _safe(path,root)
     before=path.stat()
     if before.st_size>MAX_FILE and (main or str(path).endswith('.zst')):
@@ -217,7 +217,7 @@ def node(root,path,boundary=None,main=False):
     if owner!=ids[0]:raise HistoryError('history_base_owner_mismatch')
     if meta.get('history_mode')!='paginated':
         raise HistoryError('history_base_not_paginated')
-    if meta.get('attached_thread'):
+    if meta.get('attached_thread') and not allow_attached:
         raise HistoryError('history_base_attached_thread_unverified')
     base=reference(meta.get('history_base'))
     expected=base['end_ordinal_exclusive'] if base else 0
@@ -258,9 +258,9 @@ def candidates(root,rollout_id):
     return result
 
 
-def lineage(root,path):
+def lineage(root,path,*,allow_attached=False):
     root=Path(root).resolve();path=Path(path)
-    child=node(root,path,main=True);nodes=[child];seen={child.rollout_id}
+    child=node(root,path,main=True,allow_attached=allow_attached);nodes=[child];seen={child.rollout_id}
     total=child.descriptor['complete_length']
     while base:=reference(nodes[-1].meta.get('history_base')):
         if len(nodes)>MAX_DEPTH:raise HistoryError('history_base_depth_limit')
@@ -269,7 +269,7 @@ def lineage(root,path):
         if not possible:raise HistoryError('history_base_missing')
         valid=[];failure=None
         for candidate in possible:
-            try:valid.append(node(root,candidate,base))
+            try:valid.append(node(root,candidate,base,allow_attached=allow_attached))
             except HistoryError as error:failure=error
         if not valid:raise failure
         # ID is immutable: conflicting complete copies must not silently choose context.

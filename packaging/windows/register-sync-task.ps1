@@ -1,7 +1,7 @@
 # Opt-in Windows task for an already enrolled native collector.
 [CmdletBinding()]
 param(
-    [string]$Python = (Get-Command python.exe -CommandType Application -ErrorAction Stop).Source,
+    [string]$Python,
     [string]$State = (Join-Path $env:LOCALAPPDATA 'csl\sync'),
     [string]$TaskName = 'CSL Session Collector',
     [switch]$AtStartup,
@@ -9,9 +9,18 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $Python) {
+    # Get-Command can return more than one application. Respect PATH order,
+    # selecting one scalar before binding or resolving a filesystem path.
+    $Python = @(Get-Command python.exe -CommandType Application -ErrorAction Stop)[0].Source
+}
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
 $State = (Resolve-Path -LiteralPath $State).Path
 $Python = (Resolve-Path -LiteralPath $Python).Path
+$PythonWindowless = Join-Path (Split-Path -Parent $Python) 'pythonw.exe'
+if (-not (Test-Path -LiteralPath $PythonWindowless -PathType Leaf)) {
+    throw 'A matching pythonw.exe is required for a console-free collector. Pass -Python with the full path to a Python installation containing pythonw.exe.'
+}
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 
 $defaults = @{
@@ -47,7 +56,7 @@ try {
 }
 
 $launcher = Join-Path $PSScriptRoot 'run-sync-task.py'
-$action = New-ScheduledTaskAction -Execute $Python -WorkingDirectory $root `
+$action = New-ScheduledTaskAction -Execute $PythonWindowless -WorkingDirectory $root `
     -Argument ('"{0}" "{1}" {2}' -f $launcher, $State, $profileArgument)
 if ($AtStartup) {
     # S4U runs under the account without storing its password. It has no Windows

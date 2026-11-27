@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -137,6 +138,67 @@ class WindowsSyncTests(unittest.TestCase):
               patch('csl_sync.main', side_effect=verify_profiles) as watch):
             runpy.run_path(str(script), run_name='__main__')
         watch.assert_called_once_with(['sync', '--home', str(self.root), 'watch'])
+
+    def test_task_registration_selects_one_python_and_windowless_sibling(self):
+        root = self.root / 'source with spaces'
+        scripts = root / 'packaging' / 'windows'
+        scripts.mkdir(parents=True)
+        original = Path(__file__).resolve().parents[1] / 'packaging' / 'windows'
+        shutil.copyfile(original / 'register-sync-task.ps1', scripts / 'register-sync-task.ps1')
+        (root / 'csl_sync.py').write_text(
+            'print(\'{"enabled":true,"authentication":{"signed_in":true}}\')\n')
+        python = str(Path(sys.executable).with_name('python.exe'))
+        pythonw = str(Path(python).with_name('pythonw.exe'))
+        self.assertTrue(Path(pythonw).is_file(), 'Windows test runtime needs pythonw.exe')
+        output = self.root / 'action.json'
+        def ps(value): return "'" + str(value).replace("'", "''") + "'"
+        script = '''
+function Get-Command {
+    param($Name, $CommandType, $ErrorAction)
+    [pscustomobject]@{Source=PYTHON}
+    [pscustomobject]@{Source='C:\\second python\\python.exe'}
+}
+function New-ScheduledTaskAction {
+    param($Execute,$WorkingDirectory,$Argument)
+    @{execute=$Execute;cwd=$WorkingDirectory;arguments=$Argument} |
+        ConvertTo-Json | Set-Content -LiteralPath OUTPUT
+    return 'action'
+}
+function New-ScheduledTaskTrigger { param($AtLogOn,$User) return 'trigger' }
+function New-ScheduledTaskPrincipal { param($UserId,$LogonType,$RunLevel) return 'principal' }
+function New-ScheduledTaskSettingsSet {
+    param($MultipleInstances,$ExecutionTimeLimit,[switch]$AllowStartIfOnBatteries,
+          [switch]$DontStopIfGoingOnBatteries) return 'settings'
+}
+function Register-ScheduledTask {
+    param($TaskName,$Action,$Principal,$Trigger,$Settings,$Description,[switch]$Force)
+}
+& REGISTER -State STATE
+'''.replace('PYTHON', ps(python)).replace('OUTPUT', ps(output)).replace(
+            'REGISTER', ps(scripts / 'register-sync-task.ps1')).replace('STATE', ps(self.root))
+        # AtLogOn is a switch on the real cmdlet too.
+        script = script.replace('param($AtLogOn,$User)', 'param([switch]$AtLogOn,$User)')
+        result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        action = json.loads(output.read_text(encoding='utf-8-sig'))
+        self.assertEqual(action['execute'], pythonw)
+        self.assertEqual(action['cwd'], str(root))
+        self.assertIn('run-sync-task.py', action['arguments'])
+
+    def test_windowless_task_has_writable_streams(self):
+        script = Path(__file__).resolve().parents[1] / 'packaging' / 'windows' / 'run-sync-task.py'
+        profiles = {key: str(self.root / key) for key in (
+            'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'CSL_ANTIGRAVITY_HOME')}
+        encoded = base64.b64encode(json.dumps(profiles).encode()).decode()
+        def run(_args):
+            print('synthetic progress')
+            sys.stderr.write('synthetic diagnostic\n')
+        with (patch.object(sys, 'argv', [str(script), str(self.root), encoded]),
+              patch.object(sys, 'path', sys.path.copy()), patch.dict(os.environ),
+              patch.object(sys, 'stdout', None), patch.object(sys, 'stderr', None),
+              patch('csl_sync.main', side_effect=run)):
+            runpy.run_path(str(script), run_name='__main__')
 
     def test_replace_falls_back_when_posix_rename_is_unsupported(self):
         def unsupported(*_):

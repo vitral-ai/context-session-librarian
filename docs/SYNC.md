@@ -442,7 +442,12 @@ Start-ScheduledTask -TaskName 'CSL Session Collector'
 ```
 
 The task runs as the current user at logon. Pass `-State` if you signed in
-with a custom `--home`. The task uses the profile paths from the PowerShell
+with a custom `--home`. If PATH contains several Python installations, the
+first `python.exe` wins; use `-Python C:\path\to\python.exe` to choose explicitly.
+The matching `pythonw.exe` must exist beside it: the task runs without a console
+and continues after registration terminals close. Progress and errors are read
+with `csl sync --home STATE status --verbose`, not a task console.
+The task uses the profile paths from the PowerShell
 session that registers it. To update an existing task, stop it with
 `Stop-ScheduledTask`, run the registration script with `-Replace` and the
 same task name and options, then start the task again. A sync pass already
@@ -483,3 +488,10 @@ Raw sync success does not prove model recall. Public v0.3.0 cannot import native
 package v3; use a client containing the v3 importer. Core uses only Python's standard
 library. Windows is not claimed; existing CSL is Linux-oriented, and the lock
 and optional service examples assume Unix.
+
+The desktop collector archives attached Codex history using the same verified
+lineage boundaries, ordinals and checksums as other paginated sessions. Native
+transfer of attached relationships remains unavailable. A failed session is
+reported separately while healthy sessions continue; a nonzero pass exit does
+not mean all uploads failed. Exclusions are checked before history preparation,
+after a bounded identity lookup when an older filename contains only a hint.
