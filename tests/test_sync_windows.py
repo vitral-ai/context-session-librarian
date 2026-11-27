@@ -140,7 +140,9 @@ class WindowsSyncTests(unittest.TestCase):
         watch.assert_called_once_with(['sync', '--home', str(self.root), 'watch'])
 
     def test_task_registration_selects_one_python_and_windowless_sibling(self):
-        root = self.root / 'source with spaces'
+        # Windows PowerShell 5.1 cannot use an extended-length script path as
+        # PSScriptRoot. This short fixture exercises the normal installer path.
+        root = Path(str(self.root).removeprefix('\\\\?\\')) / 'source with spaces'
         scripts = root / 'packaging' / 'windows'
         scripts.mkdir(parents=True)
         original = Path(__file__).resolve().parents[1] / 'packaging' / 'windows'
