@@ -842,6 +842,21 @@ func TestOperatorMode(t *testing.T) {
 		if raw := call(sender, "ctl.watch.sender", map[string]string{"action": "list"}, ""); string(raw) != "{\"watches\":[]}" {
 			t.Fatalf("settled watches still listed: %s", raw)
 		}
+		call(sender, "ctl.watch.sender", map[string]any{
+			"action": "create", "agent": "worker-a", "after_seconds": 60,
+			"note": strings.Repeat("<", maxWatchNoteJSON/6+1),
+		}, "invalid")
+		for range maxPromiseWatches {
+			create(strings.Repeat("x", maxWatchNoteJSON-2))
+		}
+		var listed struct{ Watches []promiseWatch }
+		raw := call(sender, "ctl.watch.sender", map[string]string{"action": "list"}, "")
+		if err := json.Unmarshal(raw, &listed); err != nil || len(listed.Watches) != maxPromiseWatches {
+			t.Fatalf("full watch list size=%d bytes watches=%d: %v", len(raw), len(listed.Watches), err)
+		}
+		call(sender, "ctl.watch.sender", map[string]any{
+			"action": "create", "agent": "worker-a", "after_seconds": 60, "note": "over cap",
+		}, "invalid")
 	})
 	verifyQueuedRevocations(t, ctx, service, owner)
 

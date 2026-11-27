@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -14,7 +15,11 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-const maxPromiseWatches = 50
+const (
+	maxPromiseWatches = 50
+	// Leave room in the 1 MiB response for all watch IDs and timestamps.
+	maxWatchNoteJSON = 16 * 1024
+)
 
 type promiseWatch struct {
 	ID        string    `json:"id"`
@@ -81,11 +86,18 @@ func (s *Service) watch(ctx context.Context, caller string, agent Agent, body []
 			Watches []promiseWatch `json:"watches"`
 		}{watches}, nil
 	case "create":
+		encodedNote, err := json.Marshal(request.Note)
+		if err != nil {
+			return nil, err
+		}
 		if !isRegisteredName(request.Agent) || request.Agent == caller ||
 			request.AfterSeconds <= 0 || request.AfterSeconds > math.MaxInt64/int64(time.Second) ||
 			request.AfterSeconds%60 != 0 || strings.TrimSpace(request.Note) == "" ||
 			len(strconv.Quote(request.Note)) > maxBody-512 || !utf8.ValidString(request.Note) {
 			return nil, invalid("watch requires a distinct agent, positive whole minutes, and a note")
+		}
+		if len(encodedNote) > maxWatchNoteJSON {
+			return nil, invalid("watch note exceeds the 16 KiB encoded limit")
 		}
 		if err := s.activeAgent(ctx, request.Agent); err != nil {
 			return nil, err
