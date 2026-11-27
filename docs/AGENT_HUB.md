@@ -191,6 +191,7 @@ matches, and the local recipient list selects the enrolled caller's transport.
 transport when the parent is still retained there. Prefixes must match exactly
 one message, starting with at least eight characters of its UUID. The CLI prints
 the selected transport. A retry using `--id` requires the original config pin.
+Include the printed `retry_from` option for both NATS and mixed Hub/NATS retries.
 For a pinned NATS retry, use the printed full parent ID and `--to`.
 
 Before a NATS send or reply, the CLI reports unread messages from the recipient

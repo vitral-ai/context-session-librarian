@@ -401,6 +401,10 @@ def _execute(args):
             args.source = nats_source(args.source, args.nats_config)
             if args.is_reply:
                 resolve_pinned_nats_reply(args)
+        if hub_config is not None and args.id and not args.source:
+            routes = sender_routes()
+            if routes and routes['senders']:
+                raise BridgeError('Use --id with the original --from sender printed for the Hub send')
         if args.nats_config is None and hub_config is None:
             if args.id:
                 raise BridgeError('Use --id with the original --nats-config or --hub-config path printed for the send')
@@ -452,6 +456,7 @@ def _execute(args):
                 raise BridgeError('Possible secrets detected; select redacted text before sending')
         # Print the ID before networking: unknown outcomes are retried with this ID.
         print('message_id=' + request['id'], file=sys.stderr)
+        print('retry_from=' + shlex.join(('--from', source)), file=sys.stderr)
         if reply:
             print('retry_reply=' + shlex.join(('--in-reply-to', reply, '--to', target)), file=sys.stderr)
     elif args.hub_action == 'history':

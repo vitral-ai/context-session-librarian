@@ -464,6 +464,25 @@ class SenderRoutingTests(unittest.TestCase):
         self.assertEqual(self.hub.call_args.args[1]['id'], message_id)
         self.nats_send.assert_not_called()
 
+    def test_inferred_hub_send_requires_original_sender_on_mixed_host_retry(self):
+        self.config.return_value = {'agent': 'legacy'}
+        settings = {'agents': {'client': {'session': self.parent}}}
+        argv = ('send', '--to', 'legacy-recipient', '--text', 'test body')
+        with (patch.dict(os.environ, {'CODEX_THREAD_ID': self.parent}, clear=True),
+              patch('csl_nats.config', return_value=settings),
+              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as stderr):
+            csl_agents._execute(self.parse(*argv))
+            options = dict(line.split('=', 1) for line in stderr.getvalue().splitlines())
+            retry = (*argv, *shlex.split(options['retry_pin']), '--id', options['message_id'])
+            with self.assertRaisesRegex(BridgeError, 'original --from sender'):
+                csl_agents._execute(self.parse(*retry))
+            csl_agents._execute(self.parse(*retry, *shlex.split(options['retry_from'])))
+            self.read_routes.side_effect = FileNotFoundError
+            csl_agents._execute(self.parse(*retry))
+        requests = [invocation.args[1] for invocation in self.hub.call_args_list]
+        self.assertEqual([request['source'] for request in requests], ['client', 'client', 'legacy'])
+        self.assertEqual({request['id'] for request in requests}, {options['message_id']})
+
     def test_printed_retry_options_resend_inferred_nats_reply(self):
         message_id = str(uuid.uuid4())
         self.nats_history.return_value = {'messages': [{'id': self.parent, 'from': 'worker', 'to': 'client'}]}
