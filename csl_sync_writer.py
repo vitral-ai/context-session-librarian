@@ -29,11 +29,18 @@ def read_fence(provider, identifier):
     return value
 
 
-def save_fence(provider, identifier, status, binding):
+def save_fence(provider, identifier, status, binding, *, writer=None):
     """Shared launcher fence, updated under native_lock before a remote mutation."""
     value = dict(schema_version=1, provider=provider, native_session_id=identifier, state=status,
                  binding=binding)
+    if writer is not None:
+        value['writer'] = writer
     private_json(fence_path(provider, identifier), value, durable=True)
+
+
+def writer_incarnation(record):
+    return dict(registry_session_id=record['registry_id'], account_id=record['account_id'],
+                device_id=record['device_id'], generation=record['generation'])
 
 
 def profile_binding(state):
@@ -182,7 +189,8 @@ class Writer:
             raise SyncError('writer_fenced')
         record['state'] = 'active'
         self.state.save_session(provider, identifier, local)
-        save_fence(provider, identifier, 'active', profile_binding(self.state))
+        save_fence(provider, identifier, 'active', profile_binding(self.state),
+                   writer=writer_incarnation(record))
 
     def release(self, provider, identifier, *, registry_id, snapshot, generation, expected_device):
         """Caller holds native_lock and has positively observed the managed end."""
@@ -230,7 +238,7 @@ class Writer:
 
 
 
-def require_stopped(provider, identifier):
+def require_stopped(provider, identifier, *, host='vitral-host'):
     """Only the trusted host's positive process-end receipt authorizes a handoff."""
     import subprocess
     import tempfile
@@ -238,7 +246,7 @@ def require_stopped(provider, identifier):
     try:
         # Spool stdout: even a broken local CLI cannot grow collector memory.
         with tempfile.TemporaryFile() as output:
-            result = subprocess.run(['vitral-host', 'keeper-receipt', '--provider', provider,
+            result = subprocess.run([host, 'keeper-receipt', '--provider', provider,
                                      '--native-id', identifier], stdout=output,
                                     stderr=subprocess.DEVNULL, timeout=10, check=False)
             output.seek(0)

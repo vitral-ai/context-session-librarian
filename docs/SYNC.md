@@ -507,3 +507,57 @@ transfer of attached relationships remains unavailable. A failed session is
 reported separately while healthy sessions continue; a nonzero pass exit does
 not mean all uploads failed. Exclusions are checked before history preparation,
 after a bounded identity lookup when an older filename contains only a hint.
+
+## Owner-local typed Resume adapter
+
+`csl-resume-action --json-stdin` accepts one JSON object of at most 4096 bytes.
+Install with `install.sh`; guided callers may invoke the absolute source entrypoint
+with their verified Python. It is currently limited to Linux managed Connect
+launches with a separately provisioned personal collector, not a workload token.
+It resolves `$VITRAL_TUNNEL_HOME` (default `~/.vitral-tunnel`), verifies private
+`api.HOST_ID` against `expected_host_id`, and reads private `collector_setup.json`
+with absolute `home`, `runtime`, and `source`. Source must be this installed
+checkout. Host is the enrolled home's `vitral-host`, or the fixed signed Connect
+installation `/opt/vitral-connect/bin/vitral-host`. Missing binding refuses.
+
+The closed schema has `schema_version:1`, `action` (`check`, `release`, `import`,
+`run`), lowercase UUID `request_id`, `provider` (`codex`, `claude`), lowercase UUID
+`native_id`, owner-derived `registry_session_id` (`ss_` plus 64 lowercase hex),
+lowercase UUID `expected_snapshot_id`, integer `expected_generation` (0 through
+2^53-1), `expected_host_id` (`host-` plus 16 lowercase hex), and lowercase UUID
+`expected_device_id`. Only destination check may omit the device to discover it.
+Check requires `intent:source|destination|in_place`; other actions forbid intent.
+Import, run and destination/in-place checks require `target_id`; source check
+and release forbid it.
+Destination/in-place checks use an owner-provisioned target, never an arbitrary
+browser path. Target IDs contain 1–128 ASCII letters, digits, underscores or hyphens.
+
+Targets use the host's private `managed-resume-targets/<target_id>.json` schema:
+`schema_version:1`, `provider`, absolute `cwd`, `provider_home`, `executable`.
+Provider home must match the collector's resolved local home. The host further
+qualifies the native executable. No target is selected or created automatically.
+Check does installation attestation, owner/session/snapshot validation and local
+source stop or destination writer-state checks; full package/byte suitability is
+validated by import before acquisition. Destination check accepts the exact
+active/legacy source generation before release; import still requires released
+state. Source release rechecks the managed end
+receipt under the native lock, flushes, and requires the exact complete snapshot.
+Import reuses the #142 raw single-writer handoff and atomic no-replace publication.
+Run releases the adapter lock before invoking `keeper-managed-resume --json-stdin`;
+the host reacquires it and compares `expected_target` (the exact five target fields),
+`expected_writer` (`registry_session_id`, `account_id`, `device_id`, `generation`)
+and `expected_binding` (`profile`, `device_id`, `endpoint`) against its resolved
+target and active fence before journal, spawn or replay. Active fences carry the
+writer incarnation; the adapter upgrades an older fence only from the verified
+active local record under lock. Missing or changed admission fields refuse.
+The host also requires exact live process proof for replay.
+
+Success is one schema-v1 JSON object repeating request/action/provider,
+`native_session_id`, `registry_session_id`, `host_id`, attested `account_id` and
+`device_id`, plus `target_id` when selected. State is `eligible`, `released`,
+`imported` (with generation), or `launched` (with keeper ID and process proof).
+Mutating retries preserve their full request and local target binding. Failure
+has no stdout, a bounded diagnostic code on stderr, exit 75 for retryable failure
+or busy state and exit 1 otherwise. No credentials are returned. An unmanaged
+source refuses `writer_unsupported_source`; offer Fork instead. No provider is
+started by check/release/import, and default Fork import remains unchanged.

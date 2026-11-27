@@ -124,7 +124,7 @@ def import_same_id(args, csl):
                                      record.get('state') in ('pending', 'publishing', 'active') and fence and
                                      fence['state'] in ('pending', 'publishing'))
                 if existing is not None and not unpublished_retry:
-                    require_stopped(provider, identifier)
+                    require_stopped(provider, identifier, host=getattr(args, 'receipt_host', 'vitral-host'))
                 account = writer.attest(args.expected_device_id)
                 remote = registry.call('GET', '/sessions/' + args.registry_session_id)
                 matching_retry = (record.get('request_id') == args.request_id and

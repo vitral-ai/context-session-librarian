@@ -8,6 +8,7 @@ TARGET="$BIN_DIR/csl"
 
 mkdir -p "$BIN_DIR"
 ln -sfn "$SCRIPT_DIR/csl" "$TARGET"
+ln -sfn "$SCRIPT_DIR/csl-resume-action" "$BIN_DIR/csl-resume-action"
 
 VERSION=$("$TARGET" --version)
 PATH_CSL=$(command -v csl || true)
