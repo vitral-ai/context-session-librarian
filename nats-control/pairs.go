@@ -157,6 +157,7 @@ func (s *Service) pairs(ctx context.Context, caller, role string, request pairRe
 	allowed := request.Action == "allow"
 	now := s.clock().UTC()
 	if !allowed {
+		now = s.acceptanceTime()
 		key := pairDenialKey(request.A, request.B)
 		_, revision, err := readState[time.Time](ctx, s.state, key)
 		if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {

@@ -897,6 +897,11 @@ func TestOperatorMode(t *testing.T) {
 		deny := allow
 		deny.Action = "deny"
 		call(sender, "ctl.pairs.sender", deny, "")
+		denied := send(now)
+		call(sender, "ctl.pairs.sender", deny, "")
+		if state, _, err := readState[messageState](ctx, service.state, "msg."+denied.ID); err != nil || state.State != "dropped" {
+			t.Fatalf("denied hold state=%s err=%v", state.State, err)
+		}
 		expiring := send(now)
 		entries, err = service.messages(ctx)
 		if err != nil {
