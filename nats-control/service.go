@@ -367,14 +367,12 @@ func (s *Service) fleet(ctx context.Context, verb string, body []byte) (any, err
 	agents := make([]agentStatus, 0, len(keys))
 	for _, key := range keys {
 		name := strings.TrimPrefix(key, "agent.")
-		if verb == "versions" {
-			active, err := s.deliveryAgent(ctx, name)
-			if err != nil {
-				return nil, err
-			}
-			if !active {
-				continue
-			}
+		active, err := s.deliveryAgent(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		if !active {
+			continue
 		}
 		agent, _, err := readState[Agent](ctx, s.state, key)
 		if err != nil {

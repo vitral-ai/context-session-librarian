@@ -695,6 +695,10 @@ func TestOperatorMode(t *testing.T) {
 		slices.ContainsFunc(visible.Agents, func(item agentStatus) bool { return item.Name == "worker-b" }) {
 		t.Fatalf("versions roster after revoke: %s", raw)
 	}
+	if raw := call(sender, "ctl.status.sender", map[string]string{}, ""); json.Unmarshal(raw, &visible) != nil ||
+		slices.ContainsFunc(visible.Agents, func(item agentStatus) bool { return item.Name == "worker-b" }) {
+		t.Fatalf("status roster after revoke: %s", raw)
+	}
 	if err := service.ApplyRevocations(ctx); err != nil {
 		t.Fatal(err)
 	}
