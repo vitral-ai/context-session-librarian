@@ -101,10 +101,11 @@ class WindowsProviderCommandTests(unittest.TestCase):
 
     def test_windows_executable_uses_resolved_path(self):
         from csl_transfer import provider_argv
+        executable = str(Path('fixture') / 'codex.exe')
         with patch('csl_transfer.sys.platform', 'win32'), \
-             patch('csl_transfer.shutil.which', return_value='/fixture/codex.exe'):
+             patch('csl_transfer.shutil.which', return_value=executable):
             self.assertEqual(provider_argv(['codex', 'resume', 'id']),
-                             ['/fixture/codex.exe', 'resume', 'id'])
+                             [executable, 'resume', 'id'])
 
 
 if __name__ == '__main__':
