@@ -6,7 +6,6 @@ import io
 import json
 import math
 import re
-import resource
 import sys
 import warnings
 
@@ -86,6 +85,7 @@ def fixtures(markers):
 
 
 def main():
+    import resource
     resource.setrlimit(resource.RLIMIT_AS, (1024**3, 1024**3))
     resource.setrlimit(resource.RLIMIT_CPU, (8, 8))
     resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))

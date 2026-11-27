@@ -2,7 +2,6 @@
 import base64
 import binascii
 from datetime import datetime
-import fcntl
 import json
 import os
 import re
@@ -70,6 +69,7 @@ def credential_text(result, previous, agent):
 
 
 async def renew_if_due(client, path):
+    import fcntl
     previous = current_claims(path)
     if previous['exp'] > time.time() + RENEW_AHEAD:
         return False

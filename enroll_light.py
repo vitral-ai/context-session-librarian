@@ -1,7 +1,6 @@
 """Portable light enrollment. Pool lifecycle/authentication remain external hooks."""
 import argparse
 import base64
-import fcntl
 import json
 import hashlib
 import os
@@ -190,6 +189,7 @@ def command(value):
 
 
 def main(argv=None):
+    import fcntl
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--home', type=Path, default=Path.home() / '.local/share/csl-light')
     parser.add_argument('peer', type=name)

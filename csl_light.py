@@ -1,5 +1,5 @@
 """Persistent CSL stream. Standard library; no pool client, lease or governor dependency."""
-import argparse, contextlib, concurrent.futures, fcntl, hashlib, json, os, queue, selectors, signal, socket, sqlite3, subprocess, sys, threading, time, uuid
+import argparse, contextlib, concurrent.futures, hashlib, json, os, queue, selectors, signal, socket, sqlite3, subprocess, sys, threading, time, uuid
 from pathlib import Path
 from contextlib import contextmanager
 MAX = 65536
@@ -1260,6 +1260,7 @@ class Node:
         lock = (self.home / 'broker.lock').open('a')
         try:
             try:
+                import fcntl
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise ValueError('A light broker already owns this home') from None

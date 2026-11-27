@@ -3,7 +3,6 @@
 This store cannot authorize requests or establish delivery/EOF by itself.
 """
 from contextlib import contextmanager
-import fcntl
 import hashlib
 import os
 from pathlib import Path
@@ -66,6 +65,7 @@ class Evidence:
 
     @contextmanager
     def locked(self):
+        import fcntl
         fd = None
         try:
             fd = os.open(self.root/(self.context['run']+'.lock'),
