@@ -64,6 +64,19 @@ class LocalTests(unittest.TestCase):
         with self.assertRaises(SyncError):action.Local(request(expected_host_id='host-'+'b'*16))
         (self.host/'collector_setup.json').unlink()
         with self.assertRaises(SyncError):action.Local(request())
+    def test_target_captures_canonical_paths_before_host_handoff(self):
+        alias=self.root/'project-link';alias.symlink_to(self.cwd,target_is_directory=True)
+        executable=self.root/'host-link';executable.symlink_to(self.binary)
+        private_json(self.target/'project.json',dict(schema_version=1,provider='codex',cwd=str(alias),
+            provider_home=str(self.provider),executable=str(executable)))
+        local=action.Local(request())
+        self.assertEqual(local.target['cwd'],str(self.cwd.resolve()))
+        self.assertEqual(local.target['executable'],str(self.binary.resolve()))
+        other=self.root/'other-project';other.mkdir()
+        alias.unlink();alias.symlink_to(other,target_is_directory=True)
+        self.assertEqual(local.target['cwd'],str(self.cwd.resolve()))
+        self.assertNotEqual(action.Local(request()).target,local.target)
+
     def test_target_must_match_collector_home(self):
         with patch.dict(os.environ,CODEX_HOME=str(self.root/'other')):
             with self.assertRaises(SyncError):action.Local(request())
