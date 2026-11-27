@@ -176,6 +176,27 @@ func TestOperatorMode(t *testing.T) {
 			}
 		}
 		call(sender, "ctl.history.sender", history, "not_found")
+		var latest []latestEntry
+		if raw := fixtureRequest(t, ctx, third, "csl.vi.ctl.latest.worker-b", map[string]string{}); json.Unmarshal(raw, &latest) != nil ||
+			len(latest) != 1 || latest[0].With != row.From || latest[0].ID != row.ID ||
+			latest[0].From != row.From || latest[0].Preview != row.Body || !latest[0].At.Equal(stamp) {
+			t.Fatalf("latest archive response: %s", raw)
+		}
+		if raw := fixtureRequest(t, ctx, sender, "csl.vi.ctl.latest.sender", map[string]string{}); string(raw) != "[]" {
+			t.Fatalf("empty latest response: %s", raw)
+		}
+		call(third, "ctl.history.worker-b", map[string]string{"with": "worker-a", "since": "1h"}, "invalid")
+		call(third, "ctl.history.worker-b", map[string]any{"id": row.ID, "since": stamp}, "invalid")
+		for _, check := range []struct {
+			since time.Time
+			want  int
+		}{{stamp.Add(-time.Second), 1}, {stamp, 0}} {
+			var result struct{ Messages []historyEntry }
+			raw := call(third, "ctl.history.worker-b", map[string]any{"with": "worker-a", "since": check.since}, "")
+			if err := json.Unmarshal(raw, &result); err != nil || len(result.Messages) != check.want {
+				t.Fatalf("history since %s: %s", check.since, raw)
+			}
+		}
 		call(third, "ctl.receipt.worker-b", sendResult{row.ID, "acked"}, "forbidden")
 		call(sender, "ctl.receipt.sender", sendResult{row.ID, "acked"}, "not_found")
 		t.Run("Unread", func(t *testing.T) {
@@ -668,6 +689,16 @@ func TestOperatorMode(t *testing.T) {
 	pending.ID, pending.To = randomID(), "worker-b"
 	call(sender, "send.sender", pending, "")
 	admin(map[string]any{"action": "revoke", "name": "worker-b"})
+	var visible struct{ Agents []agentStatus }
+	if raw := call(sender, "ctl.versions.sender", map[string]string{}, ""); json.Unmarshal(raw, &visible) != nil ||
+		!slices.ContainsFunc(visible.Agents, func(item agentStatus) bool { return item.Name == "worker-a" }) ||
+		slices.ContainsFunc(visible.Agents, func(item agentStatus) bool { return item.Name == "worker-b" }) {
+		t.Fatalf("versions roster after revoke: %s", raw)
+	}
+	if raw := call(sender, "ctl.status.sender", map[string]string{}, ""); json.Unmarshal(raw, &visible) != nil ||
+		slices.ContainsFunc(visible.Agents, func(item agentStatus) bool { return item.Name == "worker-b" }) {
+		t.Fatalf("status roster after revoke: %s", raw)
+	}
 	if err := service.ApplyRevocations(ctx); err != nil {
 		t.Fatal(err)
 	}
