@@ -329,7 +329,8 @@ class Client:
             client = None
             try:
                 client = await cls.connect(settings, agent, server=server)
-                await client.request('ctl.hello', {'client_version': build_version()}, timeout=3)
+                # Hello runs through the same control queue as other requests.
+                await client.request('ctl.hello', {'client_version': build_version()})
                 return client
             except (Error, OSError):
                 if client:

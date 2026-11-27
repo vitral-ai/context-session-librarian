@@ -832,6 +832,26 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
         inactive.connection.close.assert_awaited_once()
         active.connection.close.assert_not_awaited()
 
+    async def test_active_selection_accepts_a_slow_control_hello(self):
+        try:
+            from nats.errors import TimeoutError as NatsTimeout
+        except ImportError:
+            self.skipTest('nats-py is not installed')
+
+        async def queued_hello(subject, data, *, headers, timeout):
+            self.assertEqual(subject, 'csl.vi.ctl.hello.alice')
+            self.assertIn('client_version', json.loads(data))
+            if timeout < 7:
+                raise NatsTimeout
+            return SimpleNamespace(data=b'{}')
+
+        self.connection.request = AsyncMock(side_effect=queued_hello)
+        settings = {'servers': ['primary', 'standby']}
+        with patch.object(Client, 'connect', new=AsyncMock(return_value=self.client)) as connect:
+            self.assertIs(await Client.connect_active(settings, 'alice'), self.client)
+        connect.assert_awaited_once_with(settings, 'alice', server='primary')
+        self.connection.request.assert_awaited_once()
+
     async def test_sdk_tls_close_callback_suppresses_only_shutdown_noise(self):
         try:
             import nats
