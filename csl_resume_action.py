@@ -15,7 +15,7 @@ import uuid
 
 from csl_sync_state import State, SyncError, exclusive, read_private_json, private_json
 from csl_sync_fs import open_read, private_file
-from csl_sync_writer import Writer, native_lock, check_fence, require_stopped, save_fence, writer_incarnation
+from csl_sync_writer import Writer, native_lock, check_fence, require_stopped, save_fence, writer_incarnation, profile_binding
 
 
 def canonical_uuid(value):
@@ -129,6 +129,73 @@ class Local:
         return value
 
 
+def initial_in_place(writer, local, q, identity, remote):
+    """Caller holds both locks. Journal before fencing; fence before remote CAS."""
+    from csl_sync_providers import raw_files
+    state = writer.state
+    row = state.session(q['provider'], q['native_id'])
+    record = row.get('writer')
+    fence = check_fence(state, q['provider'], q['native_id'])
+    binding = dict(operation='initial_in_place', endpoint=state.get('settings', {})['endpoint'],
+                   registry_id=q['registry_session_id'], snapshot_id=q['expected_snapshot_id'],
+                   previous_generation=0, request_id=q['request_id'],
+                   account_id=identity['account_id'], device_id=identity['device_id'])
+    owner = remote.get('writer', {})
+    if record:
+        if any(record.get(k) != v for k, v in binding.items()):
+            raise SyncError('writer_request_conflict')
+        if record.get('state') not in ('pending', 'publishing', 'active'):
+            raise SyncError('writer_fenced')
+        if fence and fence['state'] not in ('pending', 'publishing', 'active'):
+            raise SyncError('writer_fenced')
+        if record['state'] in ('publishing', 'active'):
+            if (record.get('generation') != 1 or owner.get('state') != 'active' or
+                    owner.get('generation') != 1 or owner.get('device_id') != identity['device_id']):
+                raise SyncError('writer_fenced')
+            # Includes SQLite-active / fence-publishing crash recovery. The
+            # pending fence has prevented any launch before publication.
+            if q['action'] != 'check': writer.published(q['provider'], q['native_id'])
+            return
+    elif fence:
+        raise SyncError('writer_fenced')
+    if (owner.get('device_id') != identity['device_id'] or
+            not (owner.get('state') == 'legacy' and owner.get('generation') == 0 or
+                 record and owner.get('state') == 'active' and owner.get('generation') == 1)):
+        raise SyncError('writer_fenced')
+    if remote.get('sync', {}).get('complete') is not True:
+        raise SyncError('source_incomplete')
+    try:
+        require_stopped(q['provider'], q['native_id'], host=str(local.host))
+    except SyncError as error:
+        if error.code != 'writer_unsupported_source': raise
+        raise SyncError('resume_stop_proof_required') from None
+    # Only the exact fully uploaded bytes of this stopped original recording
+    # can become the first writer. No flush or network write during preflight.
+    files = raw_files(q['provider'], q['native_id'])
+    known = row.get('files', {})
+    if (row.get('status') != 'synced' or row.get('snapshot_id') != q['expected_snapshot_id'] or
+            not files or len(files) != len(known) or len({f['file_key'] for f in files}) != len(files) or
+            any(f['complete_length'] != f['size'] or
+                any(known.get(f['file_key'], {}).get(k) != v for k, v in
+                    [('mode', f['mode']), ('length', f['complete_length']), ('sha256', f['sha256']),
+                     ('offset', f['complete_length'])]) for f in files)):
+        raise SyncError('writer_snapshot_changed')
+    if q['action'] == 'check': return
+    row['writer'] = dict(binding, state='pending')
+    state.save_session(q['provider'], q['native_id'], row)
+    save_fence(q['provider'], q['native_id'], 'pending', profile_binding(state))
+    result = writer.registry.call('POST', '/sessions/' + q['registry_session_id'] + '/writer/acquire',
+        body=dict(request_id=q['request_id'], expected_snapshot_id=q['expected_snapshot_id'], expected_generation=0),
+        key=q['request_id'])
+    if (result.get('device_id') != identity['device_id'] or type(result.get('generation')) is not int or
+            result['generation'] != 1 or result.get('state') != 'active'):
+        raise SyncError('invalid_writer_response')
+    row['writer'] = dict(binding, state='publishing', generation=1)
+    state.save_session(q['provider'], q['native_id'], row)
+    save_fence(q['provider'], q['native_id'], 'publishing', profile_binding(state))
+    writer.published(q['provider'], q['native_id'])
+
+
 def execute(q):
     from csl_sync import attest_installation, pull
     from csl_sync_auth import Tokens
@@ -164,13 +231,20 @@ def execute(q):
         if q['action'] in ('check', 'release', 'run'):
             with exclusive(state.root), native_lock(q['provider'], q['native_id']):
                 if q['action'] == 'run' or q.get('intent') == 'in_place':
+                    generation = q['expected_generation']
+                    if generation == 0:
+                        initial_in_place(writer, local, q, identity, remote)
+                        if q['action'] == 'check': return dict(base, state='eligible', generation=0)
+                        generation = 1
+                        # The CAS above has established the exact local and remote writer.
+                        remote['writer'] = dict(state='active', device_id=identity['device_id'], generation=1)
                     fence = check_fence(state, q['provider'], q['native_id'], uploading=True)
                     record = state.session(q['provider'], q['native_id']).get('writer', {})
                     if (not fence or fence['state'] != 'active' or record.get('registry_id') != derived or
                             record.get('account_id') != identity['account_id'] or record.get('device_id') != identity['device_id'] or
-                            record.get('state') != 'active' or record.get('generation') != q['expected_generation'] or
+                            record.get('state') != 'active' or record.get('generation') != generation or
                             remote.get('writer', {}).get('state') != 'active' or remote['writer'].get('device_id') != identity['device_id'] or
-                            remote['writer'].get('generation') != q['expected_generation']): raise SyncError('writer_fenced')
+                            remote['writer'].get('generation') != generation): raise SyncError('writer_fenced')
                     _resolve(q['provider'], q['native_id'], None)
                     incarnation = writer_incarnation(record)
                     # Older active fences did not carry the writer generation.
@@ -213,7 +287,7 @@ def execute(q):
                     except ProviderError as error:
                         if error.code != 'session_not_found': raise
                     else: require_stopped(q['provider'], q['native_id'], host=str(local.host))
-            if q['action'] == 'run': return dict(base, **{k:v for k,v in local.run_host(admission).items() if k not in base})
+            if q['action'] == 'run': return dict(base, generation=generation, **{k:v for k,v in local.run_host(admission).items() if k not in base})
             return dict(base, state='released' if q['action'] == 'release' else 'eligible')
         if not local.target: raise SyncError('resume_target_required')
         from csl_resume import import_same_id

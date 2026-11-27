@@ -30,6 +30,9 @@ server-attested account/device identity without reading or uploading transcripts
 Explicit registry same-ID Resume is experimental for raw v3 Codex/Claude bundles
 without history bases, with a managed Linux Connect writer handoff. It refuses
 unmanaged source release and direct `--open`; default import remains a Fork.
+Typed in-place Resume can acquire the first writer on the original device for a
+fully synced keeper-managed recording with positive stop proof. Unmanaged
+recordings remain ineligible.
 An internal [sanitized workload provider foundation](WORKLOAD_PROVIDERS.md)
 adds the [Codex/Claude text profiles](WORKLOAD_TEXT_PROFILES.md)
 for integration tests only. It activates no public command and does not change
