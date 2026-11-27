@@ -1037,6 +1037,55 @@ func TestOperatorMode(t *testing.T) {
 		}
 	})
 
+	t.Run("MessageSnapshot", func(t *testing.T) {
+		const count = 512
+		want := make(map[string]uint64, count)
+		stamp := time.Now().UTC()
+		for i := count; i > 0; i-- {
+			id := fmt.Sprintf("snapshot-test-%04d", i)
+			record := messageRecord{Envelope: Envelope{ID: id}, AcceptedAt: stamp.Add(time.Duration(i))}
+			revision, err := service.writeExpiring(ctx, "message."+id, record, 0, messageAge)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want[id] = revision
+		}
+		deleted := "message.snapshot-test-0001"
+		if err := service.state.Delete(ctx, deleted); err != nil {
+			t.Fatal(err)
+		}
+		delete(want, "snapshot-test-0001")
+
+		start := time.Now()
+		for id, expected := range want {
+			_, revision, err := readState[messageRecord](ctx, service.state, "message."+id)
+			if err != nil || revision != expected {
+				t.Fatalf("fixture record %s: revision=%d err=%v", id, revision, err)
+			}
+		}
+		t.Logf("individual reads loaded %d records in %s", len(want), time.Since(start))
+		start = time.Now()
+		entries, err := service.messages(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("snapshot loaded %d retained records in %s", len(entries), time.Since(start))
+		last := ""
+		for _, entry := range entries {
+			id := entry.record.Envelope.ID
+			if !strings.HasPrefix(id, "snapshot-test-") {
+				continue
+			}
+			if id <= last || want[id] != entry.revision {
+				t.Fatalf("snapshot returned unexpected order or revision for %s", id)
+			}
+			last = id
+			delete(want, id)
+		}
+		if len(want) != 0 {
+			t.Fatalf("snapshot missed %d records", len(want))
+		}
+	})
 }
 
 type fixtureBroker struct {

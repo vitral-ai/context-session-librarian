@@ -20,20 +20,35 @@ type messageEntry struct {
 }
 
 func (s *Service) messages(ctx context.Context) ([]messageEntry, error) {
-	keys, err := stateKeys(ctx, s.state, "message.*")
+	// The initial snapshot carries both values and revisions in one ordered
+	// delivery. Stop at its completion marker without subscribing to changes.
+	snapshot, err := s.state.WatchFiltered(ctx, []string{"message.*"}, jetstream.IgnoreDeletes())
 	if err != nil {
 		return nil, err
 	}
-	entries := make([]messageEntry, 0, len(keys))
-	for _, key := range keys {
-		record, revision, err := readState[messageRecord](ctx, s.state, key)
-		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			continue
+	defer snapshot.Stop()
+	var entries []messageEntry
+collect:
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case entry, ok := <-snapshot.Updates():
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if !ok {
+				return nil, errors.New("message state snapshot closed before completion")
+			}
+			if entry == nil {
+				break collect
+			}
+			var record messageRecord
+			if err := json.Unmarshal(entry.Value(), &record); err != nil {
+				return nil, fmt.Errorf("decode message state %s: %w", entry.Key(), err)
+			}
+			entries = append(entries, messageEntry{record, entry.Revision()})
 		}
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, messageEntry{record, revision})
 	}
 	slices.SortFunc(entries, func(a, b messageEntry) int {
 		if order := a.record.AcceptedAt.Compare(b.record.AcceptedAt); order != 0 {
