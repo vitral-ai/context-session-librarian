@@ -558,7 +558,12 @@ and `expected_binding` (`profile`, `device_id`, `endpoint`) against its resolved
 target and active fence before journal, spawn or replay. Active fences carry the
 writer incarnation; the adapter upgrades an older fence only from the verified
 active local record under lock. Missing or changed admission fields refuse.
-The host also requires exact live process proof for replay.
+The host also requires exact live process proof for replay. If a run response
+is lost and the active collector advances the snapshot, only an already-existing
+exact durable run journal can authorize `readback_only:true` host admission.
+The same target, active writer generation and collector binding must still match.
+Readback cannot reserve or launch a keeper; missing or ended launch proof refuses.
+First acquisition and all other actions still require the original snapshot.
 
 Success is one schema-v1 JSON object repeating request/action/provider,
 `native_session_id`, `registry_session_id`, `host_id`, attested `account_id` and

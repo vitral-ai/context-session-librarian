@@ -212,8 +212,10 @@ def execute(q):
         registry = Registry(settings['endpoint'], Tokens(state.root, settings, allow_inflight_replay=False))
         writer = Writer(state, registry)
         remote = registry.call('GET', '/sessions/' + derived)
-        if any(remote.get(k) != v for k, v in [('id', derived), ('provider', q['provider']), ('native_id', q['native_id']), ('snapshot_id', q['expected_snapshot_id'])]):
+        if any(remote.get(k) != v for k, v in [('id', derived), ('provider', q['provider']), ('native_id', q['native_id'])]):
             raise SyncError('writer_snapshot_changed')
+        readback_only = remote.get('snapshot_id') != q['expected_snapshot_id']
+        if readback_only and q['action'] != 'run': raise SyncError('writer_snapshot_changed')
         base = dict(schema_version=1, request_id=q['request_id'], action=q['action'],
                     provider=q['provider'], native_session_id=q['native_id'], registry_session_id=derived,
                     host_id=q['expected_host_id'], **identity)
@@ -227,12 +229,19 @@ def execute(q):
             with exclusive(state.root):
                 previous = read_private_json(journal)
                 if previous is not None and previous != binding: raise SyncError('writer_request_conflict')
+                if readback_only and previous is None: raise SyncError('writer_snapshot_changed')
                 if previous is None: private_json(journal, binding, durable=True)
         if q['action'] in ('check', 'release', 'run'):
             with exclusive(state.root), native_lock(q['provider'], q['native_id']):
                 if q['action'] == 'run' or q.get('intent') == 'in_place':
                     generation = q['expected_generation']
-                    if generation == 0:
+                    if generation == 0 and readback_only:
+                        prior = state.session(q['provider'], q['native_id']).get('writer', {})
+                        if (prior.get('operation') != 'initial_in_place' or prior.get('request_id') != q['request_id'] or
+                                prior.get('snapshot_id') != q['expected_snapshot_id'] or prior.get('previous_generation') != 0):
+                            raise SyncError('writer_request_conflict')
+                        generation = 1
+                    elif generation == 0:
                         initial_in_place(writer, local, q, identity, remote)
                         if q['action'] == 'check': return dict(base, state='eligible')
                         generation = 1
@@ -250,12 +259,15 @@ def execute(q):
                     # Older active fences did not carry the writer generation.
                     # Upgrade only after matching SQLite, attestation and registry
                     # while holding the same lock used by host admission.
+                    if fence.get('writer') is None and readback_only:
+                        raise SyncError('writer_fenced')
                     if fence.get('writer') is None and q['action'] == 'run':
                         save_fence(q['provider'], q['native_id'], 'active', fence['binding'], writer=incarnation)
                     elif fence.get('writer') is not None and fence['writer'] != incarnation:
                         raise SyncError('writer_fenced')
                     admission = dict(expected_target=dict(local.target), expected_writer=incarnation,
                                      expected_binding=dict(fence['binding']))
+                    if readback_only: admission['readback_only'] = True
                 elif q['action'] == 'release' or q.get('intent') == 'source':
                     require_stopped(q['provider'], q['native_id'], host=str(local.host))
                     owner = remote.get('writer', {})

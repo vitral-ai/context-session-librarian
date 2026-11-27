@@ -119,5 +119,46 @@ class InitialWriterTests(LocalTests):
             self.assertEqual(action.execute(self.q)['generation'], 1)
             self.assertEqual(len(self.posts), 1)
 
+    def test_advanced_snapshot_retry_is_exact_readback_and_never_acquires_again(self):
+        with patch('csl_sync.attest_installation', return_value=self.identity), \
+             patch('csl_sync_http.Registry', return_value=self.registry), \
+             patch('csl_sync_providers._resolve'), \
+             patch.object(action.Local, 'run_host', return_value=dict(state='launched')) as launch:
+            action.execute(self.q)
+            self.assertNotIn('readback_only', launch.call_args.args[0])
+            self.remote['snapshot_id'] = NATIVE  # active collector published a newer snapshot
+            self.stop.side_effect = SyncError('writer_unsupported_source')  # provider is now live
+            before = self.state.session('codex', NATIVE)
+            result = action.execute(self.q)
+            self.assertEqual(result['generation'], 1)
+            self.assertTrue(launch.call_args.args[0]['readback_only'])
+            self.assertEqual(self.state.session('codex', NATIVE), before)
+            self.assertEqual(len(self.posts), 1)
+            launch.side_effect = SyncError('managed_launch_refused')  # missing/dead host reservation
+            with self.assertRaisesRegex(SyncError, 'managed_launch_refused'): action.execute(self.q)
+            self.assertEqual(len(self.posts), 1)
+            launch.side_effect = None
+            self.remote['writer']['generation'] = 2
+            with self.assertRaisesRegex(SyncError, 'writer_fenced'): action.execute(self.q)
+            self.remote['writer']['generation'] = 1
+            changed = dict(self.q, request_id=NATIVE)
+            with self.assertRaisesRegex(SyncError, 'writer_snapshot_changed'): action.execute(changed)
+            self.assertFalse((self.profile/'resume-actions'/(NATIVE+'-run.json')).exists())
+            self.remote['snapshot_id'] = SNAP
+            # An exact journal cannot be reused after target selection changes.
+            from csl_sync_state import private_json
+            private_json(self.target/'project.json', dict(schema_version=1, provider='codex',
+                cwd=str(self.provider), provider_home=str(self.provider), executable=str(self.binary)))
+            with self.assertRaisesRegex(SyncError, 'writer_request_conflict'): action.execute(self.q)
+
+    def test_advanced_snapshot_without_prior_run_refuses_before_journal_or_cas(self):
+        self.remote['snapshot_id'] = NATIVE
+        with patch('csl_sync.attest_installation', return_value=self.identity), \
+             patch('csl_sync_http.Registry', return_value=self.registry), \
+             patch.object(action.Local, 'run_host') as launch:
+            with self.assertRaisesRegex(SyncError, 'writer_snapshot_changed'): action.execute(self.q)
+            self.assertFalse((self.profile/'resume-actions').exists())
+            self.assertFalse(self.posts); launch.assert_not_called()
+
 
 if __name__ == '__main__': unittest.main()
