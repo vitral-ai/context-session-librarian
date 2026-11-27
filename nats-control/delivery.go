@@ -615,16 +615,18 @@ func (s *Service) deliveryTick(ctx context.Context) error {
 		return err
 	}
 	now := s.clock().UTC()
+	heldErr := s.advanceHeldPairs(ctx, entries, now, "", "")
 	// Digest records list the original message IDs. Recover their membership
 	// before regrouping originals after a crash between publish and bookkeeping.
 	batched := map[string]uint64{}
+	deferred := map[string]bool{}
 	for _, entry := range entries {
 		env := entry.record.Envelope
 		if env.Kind != "digest" {
 			continue
 		}
 		if entry.record.Sequence == 0 {
-			sequence, err := s.acceptedDigest(ctx, entry)
+			sequence, err := s.recoverPublication(ctx, entry)
 			if err != nil {
 				return err
 			}
@@ -638,9 +640,15 @@ func (s *Service) deliveryTick(ctx context.Context) error {
 			if state.State == "dropped" {
 				continue
 			}
-			allowed, err := s.canDeliver(ctx, env)
+			allowed, pending, err := s.canDeliver(ctx, env)
 			if err != nil {
 				return err
+			}
+			if pending {
+				for _, item := range env.Items {
+					deferred[item.ID] = true
+				}
+				continue
 			}
 			if !allowed {
 				if err := s.ensureMessageState(ctx, entry.record); err != nil {
@@ -668,7 +676,7 @@ func (s *Service) deliveryTick(ctx context.Context) error {
 	var dueRecipients []string
 	for _, entry := range entries {
 		env := entry.record.Envelope
-		if entry.record.Sequence != 0 || entry.record.ReadyAt.After(now) {
+		if entry.record.Sequence != 0 || !entry.record.HeldUntil.IsZero() || entry.record.ReadyAt.After(now) {
 			continue
 		}
 		if sequence, exists := batched[env.ID]; exists {
@@ -678,7 +686,7 @@ func (s *Service) deliveryTick(ctx context.Context) error {
 			}
 			continue
 		}
-		if env.Kind == "digest" {
+		if env.Kind == "digest" || deferred[env.ID] {
 			continue
 		}
 		state, _, err := readState[messageState](ctx, s.state, "msg."+env.ID)
@@ -691,9 +699,12 @@ func (s *Service) deliveryTick(ctx context.Context) error {
 		if err := s.ensureMessageState(ctx, entry.record); err != nil {
 			return err
 		}
-		allowed, err := s.canDeliver(ctx, env)
+		allowed, pending, err := s.canDeliver(ctx, env)
 		if err != nil {
 			return err
+		}
+		if pending {
+			continue
 		}
 		if !allowed {
 			if err := s.markDropped(ctx, env.ID, now); err != nil {
@@ -725,12 +736,12 @@ func (s *Service) deliveryTick(ctx context.Context) error {
 	if err := s.sendReminders(ctx, now); err != nil {
 		return err
 	}
-	return errors.Join(s.advanceWatches(ctx, entries, now), s.pruneFiles(ctx, entries))
+	return errors.Join(heldErr, s.advanceWatches(ctx, entries, now), s.pruneFiles(ctx, entries))
 }
 
 // The publish intent records the earliest possible stream sequence. A
 // confirmed broker write remains authoritative even after pair policy changes.
-func (s *Service) acceptedDigest(ctx context.Context, entry messageEntry) (uint64, error) {
+func (s *Service) recoverPublication(ctx context.Context, entry messageEntry) (uint64, error) {
 	env := entry.record.Envelope
 	next := entry.record.PublishFrom
 	if next == 0 {
@@ -752,10 +763,10 @@ func (s *Service) acceptedDigest(ctx context.Context, entry messageEntry) (uint6
 	}
 }
 
-func (s *Service) canDeliver(ctx context.Context, env Envelope) (bool, error) {
+func (s *Service) canDeliver(ctx context.Context, env Envelope) (allowed, pending bool, err error) {
 	enabled, err := s.deliveryAgent(ctx, env.To)
 	if !enabled || err != nil {
-		return enabled, err
+		return enabled, false, err
 	}
 	items := env.Items
 	if env.Kind == "message" || env.Kind == "reply" {
@@ -767,17 +778,15 @@ func (s *Service) canDeliver(ctx context.Context, env Envelope) (bool, error) {
 		}
 		enabled, err := s.deliveryAgent(ctx, item.From)
 		if !enabled || err != nil {
-			return enabled, err
+			return enabled, false, err
 		}
-		allowed, _, err := readState[bool](ctx, s.state, "pair."+item.From+"."+item.To)
-		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return false, nil
+		allowed, _, pairPending, err := s.pairAllowed(ctx, item.From, item.To)
+		if err != nil || (!allowed && !pairPending) {
+			return false, false, err
 		}
-		if !allowed || err != nil {
-			return allowed, err
-		}
+		pending = pending || pairPending
 	}
-	return true, nil
+	return !pending, pending, nil
 }
 
 func (s *Service) markDropped(ctx context.Context, id string, now time.Time) error {

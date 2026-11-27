@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -46,6 +47,10 @@ func run() (string, error) {
 	mirrorCreds := flag.String("mirror-credentials", "", "read-only standby SYS credentials file")
 	mirrorInbox := flag.String("mirror-inbox-prefix", "", "scoped standby SYS reply prefix")
 	mirrorServer := flag.String("mirror-server", "", "expected standby server name")
+	pairPeerBroker := flag.String("pair-peer-nats", "", "private TLS endpoint of the opposite pair-state mirror")
+	pairPeerDomain := flag.String("pair-peer-domain", "", "JetStream domain of the opposite broker")
+	pairPeerCreds := flag.String("pair-peer-credentials", "", "read-only pair-state peer credential")
+	pairPeerInbox := flag.String("pair-peer-inbox-prefix", "", "scoped peer reply prefix")
 	flag.Parse()
 	if *broker == "" || *creds == "" || *signerFile == "" {
 		return *tenant, errors.New("nats, credentials and signer-file are required")
@@ -80,6 +85,37 @@ func run() (string, error) {
 	}
 	defer conn.Close()
 	config := control.Config{Tenant: *tenant, Account: *account, Signer: signer, Upgrade: *upgrade, EraseTenant: *erase}
+	if *pairPeerBroker != "" || *pairPeerDomain != "" || *pairPeerCreds != "" || *pairPeerInbox != "" {
+		config.Domains = strings.Split(*domains, ",")
+		if *pairPeerBroker == "" || *pairPeerDomain == "" || *pairPeerCreds == "" ||
+			*pairPeerInbox != "_INBOX.csl."+*tenant+".pair-peer" ||
+			len(config.Domains) != 2 || config.Domains[0] == config.Domains[1] ||
+			!slices.Contains(config.Domains, *pairPeerDomain) {
+			return *tenant, errors.New("pair peer requires all flags and two distinct JetStream domains")
+		}
+		if err := validateBrokerURL(*pairPeerBroker); err != nil {
+			return *tenant, err
+		}
+		if err := verifyCredentialAccount(*pairPeerCreds, *account); err != nil {
+			return *tenant, err
+		}
+		peerOpts := []nats.Option{nats.Name("csl-control-pair-peer"), nats.UserCredentials(*pairPeerCreds),
+			nats.CustomInboxPrefix(*pairPeerInbox), nats.Timeout(3 * time.Second), nats.RetryOnFailedConnect(true),
+			nats.IgnoreDiscoveredServers()}
+		if *ca != "" {
+			peerOpts = append(peerOpts, nats.RootCAs(*ca))
+		}
+		peer, err := nats.Connect(*pairPeerBroker, peerOpts...)
+		if err != nil {
+			return *tenant, err
+		}
+		defer peer.Close()
+		writerDomain := config.Domains[0]
+		if writerDomain == *pairPeerDomain {
+			writerDomain = config.Domains[1]
+		}
+		config.VerifyPairs = control.PairPeer(peer, *pairPeerDomain, writerDomain)
+	}
 	if *mirrorBroker != "" || *mirrorCreds != "" || *mirrorInbox != "" || *mirrorServer != "" {
 		if *mirrorBroker == "" || *mirrorCreds == "" || *mirrorInbox == "" || *mirrorServer == "" {
 			return *tenant, errors.New("all mirror monitoring flags are required")

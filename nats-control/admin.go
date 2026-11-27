@@ -9,6 +9,11 @@ import (
 )
 
 type adminRequest struct {
+	Coordinators  *[]string      `json:"coordinators,omitempty"`
+	PairAction    string         `json:"pair_action,omitempty"`
+	A             string         `json:"a,omitempty"`
+	B             string         `json:"b,omitempty"`
+	Pending       bool           `json:"pending,omitempty"`
 	History       *hubHistoryRow `json:"history,omitempty"`
 	ID            string         `json:"id,omitempty"`
 	Offset        int64          `json:"offset,omitempty"`
@@ -44,6 +49,13 @@ func (s *Service) admin(ctx context.Context, body []byte) (response any, err err
 			"action", request.Action, "agent", request.Name, "target_tenant", request.Tenant, "notices_to", request.NoticesTo, "success", err == nil, "at", s.clock().UTC())
 	}()
 	switch request.Action {
+	case "pairs":
+		return s.pairs(ctx, "owner", "", pairRequest{request.PairAction, request.A, request.B, request.Pending})
+	case "set-coordinators":
+		if request.Coordinators == nil {
+			return nil, invalid("coordinators array is required")
+		}
+		return s.setCoordinators(ctx, request.Name, *request.Coordinators)
 	case "status":
 		return s.fleet(ctx, "status", []byte("{}"))
 	case "plan-hub-history", "import-hub-history":
@@ -83,6 +95,9 @@ func (s *Service) admin(ctx context.Context, body []byte) (response any, err err
 		}
 		return policy, writeState(ctx, s.state, "policy.versions", policy, revision)
 	case "allow", "deny":
+		if s.config.VerifyPairs != nil {
+			return nil, invalid("use action=pairs with pair_action=allow or deny for verified pair changes")
+		}
 		if !isRegisteredName(request.From) || !isRegisteredName(request.To) || request.From == request.To {
 			return nil, invalid("two distinct agents are required")
 		}
@@ -156,6 +171,12 @@ func (s *Service) register(ctx context.Context, request adminRequest) (any, erro
 	if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
 		return nil, err
 	}
+	if request.Coordinators != nil {
+		if err := s.validateCoordinators(ctx, request.Name, *request.Coordinators); err != nil {
+			return nil, err
+		}
+		agent.Coordinators = *request.Coordinators
+	}
 	if _, err := s.stream.CreateOrUpdateConsumer(ctx, s.agentConsumerConfig(request.Name)); err != nil {
 		return nil, err
 	}
@@ -165,6 +186,13 @@ func (s *Service) register(ctx context.Context, request adminRequest) (any, erro
 		}
 	} else {
 		agent = existing
+		if request.Coordinators != nil {
+			updated, err := s.setCoordinators(ctx, request.Name, *request.Coordinators)
+			if err != nil {
+				return nil, err
+			}
+			agent = updated
+		}
 	}
 	return s.issue(ctx, request.Name, agent)
 }

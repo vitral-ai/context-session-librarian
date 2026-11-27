@@ -891,6 +891,152 @@ func TestOperatorMode(t *testing.T) {
 	})
 	verifyQueuedRevocations(t, ctx, service, owner)
 
+	t.Run("CoordinatedPairs", func(t *testing.T) {
+		pairSender := register("pair-worker-a", "worker")
+		pairRecipient := register("pair-worker-b", "worker")
+		for _, name := range []string{"pair-worker-a", "pair-worker-b"} {
+			admin(map[string]any{"action": "set-coordinators", "name": name, "coordinators": []string{"sender"}})
+		}
+		admin(map[string]any{"action": "settings", "notices_to": "sender"})
+		failMirror := true
+		service.mu.Lock()
+		service.config.VerifyPairs = func(_ context.Context, expected []PairReadback) error {
+			if len(expected) != 0 && failMirror {
+				return errors.New("fixture mirror unavailable")
+			}
+			return nil
+		}
+		service.mu.Unlock()
+		allow := pairRequest{Action: "allow", A: "pair-worker-a", B: "pair-worker-b"}
+		legacy := map[string]string{"action": "allow", "from": allow.A, "to": allow.B}
+		call(owner, "ctl.admin.owner", legacy, "invalid")
+		pairKey := "pair." + allow.A + "." + allow.B
+		if _, _, err := readState[bool](ctx, service.state, pairKey); !errors.Is(err, jetstream.ErrKeyNotFound) {
+			t.Fatalf("legacy allow changed verified pair: %v", err)
+		}
+		call(pairSender, "ctl.pairs.pair-worker-a", allow, "forbidden")
+		call(sender, "ctl.pairs.sender", pairRequest{Action: "allow", A: "worker-a", B: "pair-worker-b"}, "forbidden")
+		now := time.Now().UTC()
+		send := func(stamp time.Time) Envelope {
+			t.Helper()
+			env := Envelope{V: 1, ID: randomID(), To: "pair-worker-b", Kind: "message",
+				CreatedAt: stamp, Urgency: "normal", Body: "pending approval", ClientVersion: "1.3.0+abc"}
+			var result sendResult
+			raw := call(pairSender, "send.pair-worker-a", env, "")
+			if err := json.Unmarshal(raw, &result); err != nil || result != (sendResult{env.ID, "pending_pair"}) {
+				t.Fatalf("held send: %s", raw)
+			}
+			return env
+		}
+		newer := send(now)
+		older := send(now.Add(-time.Second))
+		var list struct{ Pending []pendingPair }
+		raw := call(sender, "ctl.pairs.sender", pairRequest{Action: "list", Pending: true}, "")
+		if err := json.Unmarshal(raw, &list); err != nil || len(list.Pending) != 1 || list.Pending[0].Count != 2 {
+			t.Fatalf("pending list: %s", raw)
+		}
+		call(sender, "ctl.pairs.sender", allow, "invalid")
+		middle := send(now.Add(-500 * time.Millisecond))
+		service.mu.Lock()
+		failMirror = false
+		service.mu.Unlock()
+		call(sender, "ctl.pairs.sender", allow, "")
+		legacy["action"] = "deny"
+		call(owner, "ctl.admin.owner", legacy, "invalid")
+		if allowed, _, err := readState[bool](ctx, service.state, pairKey); err != nil || !allowed {
+			t.Fatalf("legacy deny changed verified pair: allowed=%t err=%v", allowed, err)
+		}
+		previous := uint64(0)
+		for _, env := range []Envelope{older, middle, newer} {
+			record, _, err := readState[messageRecord](ctx, service.state, "message."+env.ID)
+			if err != nil || record.Sequence <= previous || !record.HeldUntil.IsZero() {
+				t.Fatalf("release order: %s sequence=%d after=%d err=%v", env.ID, record.Sequence, previous, err)
+			}
+			previous = record.Sequence
+		}
+		entries, err := service.messages(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requests := 0
+		for _, entry := range entries {
+			env := entry.record.Envelope
+			if env.Kind == "system" && strings.Contains(env.Body, "csl agents allow pair-worker-a pair-worker-b") {
+				requests++
+				if env.To != "sender" || env.Urgency != "urgent" {
+					t.Fatalf("bad approval request: %+v", env)
+				}
+			}
+		}
+		if requests != 1 {
+			t.Fatalf("approval requests=%d, want 1", requests)
+		}
+		deny := allow
+		deny.Action = "deny"
+		call(sender, "ctl.pairs.sender", deny, "")
+		denied := send(now)
+		call(sender, "ctl.pairs.sender", deny, "")
+		if state, _, err := readState[messageState](ctx, service.state, "msg."+denied.ID); err != nil || state.State != "dropped" {
+			t.Fatalf("denied hold state=%s err=%v", state.State, err)
+		}
+		expiring := send(now)
+		entries, err = service.messages(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		service.mu.Lock()
+		err = service.advanceHeldPairs(ctx, entries, service.clock().Add(pairHold+time.Second), "", "")
+		service.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		state, _, err := readState[messageState](ctx, service.state, "msg."+expiring.ID)
+		if err != nil || state.State != "dropped" {
+			t.Fatalf("expired hold state=%s err=%v", state.State, err)
+		}
+		if notice, _, err := readState[messageRecord](ctx, service.state, "message."+stableID("held.dropped."+expiring.ID)); err != nil ||
+			notice.Envelope.To != "pair-worker-a" || notice.Sequence == 0 {
+			t.Fatalf("missing expiry notice: %v", err)
+		}
+
+		call(sender, "ctl.pairs.sender", allow, "")
+		call(pairRecipient, "ctl.settings.pair-worker-b", map[string]string{"delivery": "grouped:15"}, "")
+		queued := Envelope{V: 1, ID: randomID(), To: allow.B, Kind: "message",
+			CreatedAt: now, Urgency: "normal", Body: "already queued", ClientVersion: "1.3.0+abc"}
+		call(pairSender, "send.pair-worker-a", queued, "")
+		waiting, _, err := readState[messageRecord](ctx, service.state, "message."+queued.ID)
+		if err != nil || waiting.Sequence != 0 || !waiting.HeldUntil.IsZero() {
+			t.Fatalf("expected ordinary queued message: %+v, %v", waiting, err)
+		}
+		service.mu.Lock()
+		failMirror = true
+		previousClock := service.clock
+		service.clock = func() time.Time { return waiting.ReadyAt.Add(time.Second) }
+		service.mu.Unlock()
+		t.Cleanup(func() {
+			service.mu.Lock()
+			service.clock = previousClock
+			service.mu.Unlock()
+		})
+		call(sender, "ctl.pairs.sender", allow, "invalid")
+		if err := service.deliveryTick(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if state, _, err := readState[messageState](ctx, service.state, "msg."+queued.ID); err != nil || state.State != "queued" {
+			t.Fatalf("unresolved pair changed queued state to %q: %v", state.State, err)
+		}
+		service.mu.Lock()
+		failMirror = false
+		service.mu.Unlock()
+		call(sender, "ctl.pairs.sender", allow, "")
+		if err := service.deliveryTick(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if saved, _, err := readState[messageRecord](ctx, service.state, "message."+queued.ID); err != nil || saved.Sequence == 0 {
+			t.Fatalf("queued message did not publish after confirmation: %+v, %v", saved, err)
+		}
+	})
+
 }
 
 type fixtureBroker struct {

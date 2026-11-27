@@ -58,6 +58,7 @@ type messageRecord struct {
 	ReadyAt     time.Time `json:"ready_at"`
 	Sequence    uint64    `json:"sequence,omitempty"`
 	PublishFrom uint64    `json:"publish_from,omitempty"`
+	HeldUntil   time.Time `json:"held_until,omitzero"`
 }
 
 type messageState struct {
@@ -153,16 +154,16 @@ func (s *Service) send(ctx context.Context, caller string, body []byte) (sendRes
 	if err != nil {
 		return sendResult{}, err
 	}
-	allowed, _, err := readState[bool](ctx, s.state, "pair."+caller+"."+envelope.To)
-	if errors.Is(err, jetstream.ErrKeyNotFound) || (err == nil && !allowed) {
+	allowed, _, _, err := s.pairAllowed(ctx, caller, envelope.To)
+	if err != nil {
+		return sendResult{}, err
+	}
+	if !allowed && s.config.VerifyPairs == nil {
 		s.notice(ctx, "Unapproved pair", caller, envelope.To)
 		return sendResult{}, forbidden(fmt.Sprintf(
 			"pair permission is required for %s -> %s. Ask the owner via nats-control to approve this direction.",
 			caller, envelope.To,
 		))
-	}
-	if err != nil {
-		return sendResult{}, err
 	}
 	if envelope.ReplyTo != nil {
 		parent, _, err := readState[messageRecord](ctx, s.state, "message."+*envelope.ReplyTo)
@@ -218,6 +219,9 @@ func (s *Service) send(ctx context.Context, caller string, body []byte) (sendRes
 			return sendResult{}, err
 		}
 		record = messageRecord{Envelope: envelope, Fingerprint: fingerprint, AcceptedAt: now, ReadyAt: now}
+		if !allowed {
+			record.HeldUntil = now.Add(pairHold)
+		}
 		if envelope.Urgency == "normal" && interval != 0 {
 			record.ReadyAt = now.Truncate(interval).Add(interval)
 		}
@@ -231,7 +235,22 @@ func (s *Service) send(ctx context.Context, caller string, body []byte) (sendRes
 	if err := s.ensureMessageState(ctx, record); err != nil {
 		return sendResult{}, err
 	}
-	if record.Sequence == 0 {
+	if !record.HeldUntil.IsZero() {
+		state, _, err := readState[messageState](ctx, s.state, "msg."+record.Envelope.ID)
+		if err != nil || state.State == "dropped" {
+			return sendResult{record.Envelope.ID, state.State}, err
+		}
+		if err := s.requestPairApproval(ctx, record, s.clock().UTC()); err != nil {
+			return sendResult{}, err
+		}
+	} else if record.Sequence == 0 && allowed {
+		delivery, _, err := readState[messageState](ctx, s.state, "msg."+record.Envelope.ID)
+		if err != nil {
+			return sendResult{}, err
+		}
+		if delivery.State == "dropped" {
+			return sendResult{record.Envelope.ID, "dropped"}, nil
+		}
 		if err := s.mentionPair(ctx, record); err != nil {
 			return sendResult{}, err
 		}
@@ -252,6 +271,9 @@ func (s *Service) send(ctx context.Context, caller string, body []byte) (sendRes
 		}
 	}
 	delivery, _, err := readState[messageState](ctx, s.state, "msg."+record.Envelope.ID)
+	if err == nil && !record.HeldUntil.IsZero() && delivery.State != "dropped" {
+		delivery.State = "pending_pair"
+	}
 	return sendResult{record.Envelope.ID, delivery.State}, err
 }
 
@@ -369,7 +391,11 @@ func (s *Service) ensureMessageState(ctx context.Context, record messageRecord) 
 	key := "msg." + record.Envelope.ID
 	_, _, err := readState[messageState](ctx, s.state, key)
 	if errors.Is(err, jetstream.ErrKeyNotFound) {
-		_, err = s.writeExpiring(ctx, key, messageState{"queued", record.AcceptedAt}, 0, messageAge)
+		state, ttl := "queued", messageAge
+		if !record.HeldUntil.IsZero() {
+			state, ttl = "pending_pair", max(time.Second, record.HeldUntil.Sub(s.clock()))
+		}
+		_, err = s.writeExpiring(ctx, key, messageState{state, record.AcceptedAt}, 0, ttl)
 	}
 	return err
 }
@@ -415,7 +441,7 @@ func (s *Service) publish(ctx context.Context, envelope Envelope) (uint64, error
 }
 
 func (s *Service) publishRecord(ctx context.Context, record messageRecord, revision uint64) error {
-	if record.Envelope.Kind == "digest" && record.PublishFrom == 0 {
+	if (record.Envelope.Kind == "digest" || !record.HeldUntil.IsZero()) && record.PublishFrom == 0 {
 		info, err := s.stream.Info(ctx)
 		if err != nil {
 			return err
@@ -438,6 +464,7 @@ func (s *Service) finishPublication(ctx context.Context, record messageRecord, r
 		return err
 	}
 	record.Sequence = sequence
+	record.HeldUntil = time.Time{}
 	if _, err := s.writeExpiring(ctx, "message."+record.Envelope.ID, record, revision, messageAge); err != nil {
 		return err
 	}
