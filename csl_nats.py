@@ -898,6 +898,7 @@ def send_command(args):
     from csl_nats_tools import attachment, file_id
     file_ids = list(dict.fromkeys(file_id(value) for value in getattr(args, 'attach', [])))
     print('message_id=' + message_id, file=sys.stderr)
+    print('retry_from=' + shlex.join(('--from', source)), file=sys.stderr)
     if reply_to:
         print('retry_reply=' + shlex.join((reply_to, '--to', target)), file=sys.stderr)
     thread = settings['agents'][source]['session']
