@@ -2,6 +2,7 @@
 import base64
 import binascii
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import hashlib
 import os
 from pathlib import Path
@@ -9,8 +10,8 @@ import re
 from tempfile import TemporaryFile
 import uuid
 
-from csl_bridge_store import BridgeError, encode, identifier, message_selector
-from csl_nats import Client, agent_name, config, run_cli
+from csl_bridge_store import BridgeError, contains_findings, encode, identifier, message_selector
+from csl_nats import Client, agent_name, close_best_effort, config, run_cli
 
 CHUNK_BYTES = 256 * 1024
 MAX_FILE_BYTES = 25 * 1024 * 1024
@@ -131,12 +132,44 @@ async def fetch(client, value, out=None, *, directory=Path('.'), directory_fd=No
     return {**info, 'path': str(dest)}
 
 
-async def history(client, *, partner=None, message_id=None, last=None):
+def duration_seconds(value):
+    match = re.fullmatch(r'([1-9][0-9]{0,8})([hm])', value or '')
+    if not match:
+        raise BridgeError('Use a positive duration such as 2h or 30m')
+    count, unit = match.groups()
+    return int(count) * (3600 if unit == 'h' else 60)
+
+
+def rfc3339(value):
+    if not isinstance(value, str) or not re.fullmatch(
+            r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})', value):
+        raise BridgeError('Expected an RFC3339 timestamp')
+    try:
+        return datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        raise BridgeError('Expected an RFC3339 timestamp') from None
+
+
+def since_timestamp(value):
+    if not value.endswith(('h', 'm')):
+        rfc3339(value)
+        return value
+    try:
+        return (datetime.now(timezone.utc) - timedelta(seconds=duration_seconds(value))).isoformat()
+    except OverflowError:
+        raise BridgeError('History duration is out of range') from None
+
+
+async def history(client, *, partner=None, message_id=None, last=None, since=None):
     if bool(partner) == bool(message_id):
         raise BridgeError('History requires exactly one of --with or --id')
     if last is not None and (type(last) is not int or not 1 <= last <= 10000):
         raise BridgeError('Invalid history limit')
     request = {'with': agent_name(partner, registration=True)} if partner else {'id': message_selector(message_id)}
+    if since is not None:
+        if not partner:
+            raise BridgeError('--since requires --with')
+        request['since'] = since_timestamp(since)
     if last is not None:
         request['last'] = last
     page = await client.request('ctl.history', request)
@@ -157,6 +190,31 @@ async def history(client, *, partner=None, message_id=None, last=None):
     return {'messages': messages, 'retention': retention}
 
 
+def latest_lines(rows):
+    lines = []
+    for row in rows:
+        partner = agent_name(row['with'])
+        source = agent_name(row['from'])
+        at = rfc3339(row['at'])
+        short_id = identifier(row['id'])[:8]
+        preview = ''.join(char if char.isprintable() else ' ' for char in row['preview'][:120])
+        lines.append((at, f'{partner}  {row["at"]}  {source}  {preview}  {short_id}'))
+    return [line for _, line in sorted(lines, key=lambda item: item[0], reverse=True)]
+
+
+def watch_request(args):
+    if args.list or args.cancel:
+        if args.after is not None or args.note is not None:
+            raise BridgeError('--after and --note are only valid with --agent')
+        return {'action': 'list'} if args.list else {'action': 'cancel', 'id': identifier(args.cancel)}
+    if not args.after or not args.note or not args.note.strip():
+        raise BridgeError('--agent requires --after and --note')
+    if contains_findings(args.note):
+        raise BridgeError('Possible secrets detected; redact the note before creating a watch')
+    return {'action': 'create', 'agent': agent_name(args.agent, registration=True),
+            'after_seconds': duration_seconds(args.after), 'note': args.note}
+
+
 def call(path, source, operation, *, validate_settings=None):
     settings = config(path)
     agent = agent_name(source or os.environ.get('CSL_AGENT'), registration=True)
@@ -168,7 +226,7 @@ def call(path, source, operation, *, validate_settings=None):
         try:
             return await operation(client)
         finally:
-            await client.connection.close()
+            await close_best_effort(client.connection)
 
     try:
         return run_cli(run())
@@ -179,9 +237,21 @@ def call(path, source, operation, *, validate_settings=None):
 
 
 def command(args):
+    watch = watch_request(args) if args.hub_action == 'watch' else None
+
     async def operation(client):
         if args.hub_action == 'history':
-            return await history(client, partner=args.partner, message_id=args.message_id, last=args.last)
+            return await history(client, partner=args.partner, message_id=args.message_id, last=args.last,
+                                 since=args.since)
+        if args.hub_action in ('allow', 'deny'):
+            return await client.request('ctl.pairs', {'action': args.hub_action,
+                                        'a': agent_name(args.pair_a, registration=True),
+                                        'b': agent_name(args.pair_b, registration=True)})
+        if args.hub_action == 'pairs':
+            result = await client.request('ctl.pairs', {'action': 'list', 'pending': args.pending})
+            return {'pending': result['pending']} if args.pending else result
+        if watch is not None:
+            return await client.request('ctl.watch', watch)
         if args.hub_action == 'put':
             with args.path.open('rb') as stream:
                 return await put(client, stream, args.path.name, args.to)
@@ -203,7 +273,12 @@ def command(args):
         source = infer_agent(config(args.nats_config)['agents'])
     if not source:
         raise BridgeError('Set CSL_AGENT or use --from to identify your agent')
-    print(encode(call(args.nats_config, source, operation)))
+    result = call(args.nats_config, source, operation)
+    if args.hub_action == 'latest':
+        for line in latest_lines(result):
+            print(line)
+    else:
+        print(encode(result))
 
 
 def add_options(parser):

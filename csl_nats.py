@@ -346,10 +346,14 @@ class Client:
             f'{self.root}.{operation}.{self.agent}', encode(body).encode('utf-8'), headers=headers, timeout=timeout,
         )
         result = json.loads(message.data)
+        if operation == 'ctl.latest' and isinstance(result, list):
+            return result
         if not isinstance(result, dict):
             raise BridgeError('Invalid response from NATS control')
         if 'error' in result:
             raise ControlRejected(result['error'], str(result.get('message') or result['error']))
+        if operation == 'ctl.latest':
+            raise BridgeError('Invalid NATS latest response')
         return result
 
     async def pull(self):
@@ -797,7 +801,7 @@ async def post_saved(client, store, key, thread, envelope, *, replay=False):
     try:
         result = await client.send(envelope, timeout=3 if replay else 12)
         state = result.get('state')
-        if result.get('id') != message_id or state not in ('queued', 'delivered', 'acked', 'refused', 'dropped'):
+        if result.get('id') != message_id or state not in ('queued', 'pending_pair', 'delivered', 'acked', 'refused', 'dropped'):
             raise BridgeError('Unexpected NATS send receipt; retry with the printed config pin and message ID')
     except ControlRejected as error:
         # A reply can reach the promoted broker before the sender replays its parent.
@@ -925,6 +929,11 @@ def send_command(args):
         raise BridgeError(f'NATS send unconfirmed ({type(error).__name__}); retry with the printed config pin and message ID') from None
     finally:
         store.close()
+    if result['state'] == 'pending_pair':
+        try:
+            print(f'held: pair {source} -> {target} awaiting approval', file=sys.stderr)
+        except (OSError, ValueError):
+            pass
     print(encode(result))
 
 
