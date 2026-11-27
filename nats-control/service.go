@@ -218,6 +218,8 @@ func (s *Service) control(ctx context.Context, caller, verb string, body []byte)
 			return nil, err
 		}
 		return s.pairs(ctx, caller, agent.Role, request)
+	case "watch":
+		return s.watch(ctx, caller, agent, body)
 	case "latest":
 		return s.latest(ctx, caller, body)
 	case "unread":

@@ -736,7 +736,7 @@ func (s *Service) deliveryTick(ctx context.Context) error {
 	if err := s.sendReminders(ctx, now); err != nil {
 		return err
 	}
-	return errors.Join(heldErr, s.pruneFiles(ctx, entries))
+	return errors.Join(heldErr, s.advanceWatches(ctx, entries, now), s.pruneFiles(ctx, entries))
 }
 
 // The publish intent records the earliest possible stream sequence. A
