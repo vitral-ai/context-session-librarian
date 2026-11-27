@@ -543,6 +543,14 @@ active/legacy source generation before release; import still requires released
 state. Source release rechecks the managed end
 receipt under the native lock, flushes, and requires the exact complete snapshot.
 Import reuses the #142 raw single-writer handoff and atomic no-replace publication.
+For a stopped keeper-managed recording still at legacy generation 0, in-place
+check requires the original attested device, a positive PID/start-bound end
+receipt, and local fully synced bytes matching the exact complete snapshot.
+Run journals the request, fences launches and uploads, and acquires generation 1
+under the native lock before publishing its active writer. Interrupted acquisition
+reuses the exact request; check never changes writer or fence state. Missing or
+insufficient stop proof returns `resume_stop_proof_required`; unmanaged recordings
+cannot resume in place yet. A different device must use the explicit handoff.
 Run releases the adapter lock before invoking `keeper-managed-resume --json-stdin`;
 the host reacquires it and compares `expected_target` (the exact five target fields),
 `expected_writer` (`registry_session_id`, `account_id`, `device_id`, `generation`)
@@ -550,12 +558,17 @@ and `expected_binding` (`profile`, `device_id`, `endpoint`) against its resolved
 target and active fence before journal, spawn or replay. Active fences carry the
 writer incarnation; the adapter upgrades an older fence only from the verified
 active local record under lock. Missing or changed admission fields refuse.
-The host also requires exact live process proof for replay.
+The host also requires exact live process proof for replay. If a run response
+is lost and the active collector advances the snapshot, only an already-existing
+exact durable run journal can authorize `readback_only:true` host admission.
+The same target, active writer generation and collector binding must still match.
+Readback cannot reserve or launch a keeper; missing or ended launch proof refuses.
+First acquisition and all other actions still require the original snapshot.
 
 Success is one schema-v1 JSON object repeating request/action/provider,
 `native_session_id`, `registry_session_id`, `host_id`, attested `account_id` and
 `device_id`, plus `target_id` when selected. State is `eligible`, `released`,
-`imported` (with generation), or `launched` (with keeper ID and process proof).
+`imported` (with generation), or `launched` (with actual generation, keeper ID and process proof).
 Mutating retries preserve their full request and local target binding. Failure
 has no stdout, a bounded diagnostic code on stderr, exit 75 for retryable failure
 or busy state and exit 1 otherwise. No credentials are returned. An unmanaged

@@ -99,13 +99,14 @@ class LocalTests(unittest.TestCase):
             self.assertEqual(argv,[str(self.binary),'keeper-managed-resume','--json-stdin'])
             payload=json.loads(kw['input'])
             self.assertEqual(payload['target_id'],'project')
+            self.assertTrue(payload['readback_only'])
             self.assertEqual(payload['expected_target'],local.target)
             self.assertEqual(payload['expected_writer']['generation'],1)
             kw['stdout'].write(json.dumps(result).encode());return Mock(returncode=0)
         with patch('csl_resume_action.subprocess.run',side_effect=host):
-            self.assertEqual(local.run_host(dict(expected_target=local.target,expected_writer=dict(generation=1),expected_binding={})),result)
+            self.assertEqual(local.run_host(dict(expected_target=local.target,expected_writer=dict(generation=1),expected_binding={},readback_only=True)),result)
             result['native_session_id']=DEVICE
-            with self.assertRaises(SyncError):local.run_host(dict(expected_target=local.target,expected_writer=dict(generation=1),expected_binding={}))
+            with self.assertRaises(SyncError):local.run_host(dict(expected_target=local.target,expected_writer=dict(generation=1),expected_binding={},readback_only=True))
     def test_owner_bound_destination_preflight(self):
         registry=Mock();registry.call.return_value=dict(id=REGISTRY,provider='codex',native_id=NATIVE,snapshot_id=SNAP,
             writer=dict(state='released',generation=0),sync=dict(complete=True),package=dict(available=True))
