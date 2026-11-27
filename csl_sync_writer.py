@@ -230,7 +230,7 @@ class Writer:
 
 
 
-def require_stopped(provider, identifier):
+def require_stopped(provider, identifier, *, host='vitral-host'):
     """Only the trusted host's positive process-end receipt authorizes a handoff."""
     import subprocess
     import tempfile
@@ -238,7 +238,7 @@ def require_stopped(provider, identifier):
     try:
         # Spool stdout: even a broken local CLI cannot grow collector memory.
         with tempfile.TemporaryFile() as output:
-            result = subprocess.run(['vitral-host', 'keeper-receipt', '--provider', provider,
+            result = subprocess.run([host, 'keeper-receipt', '--provider', provider,
                                      '--native-id', identifier], stdout=output,
                                     stderr=subprocess.DEVNULL, timeout=10, check=False)
             output.seek(0)

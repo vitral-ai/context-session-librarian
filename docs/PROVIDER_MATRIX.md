@@ -347,3 +347,6 @@ mailbox boundary notifications. See [hub setup](AGENT_HUB.md); native delivery a
 model consumption are distinct, and interrupted native invocations are not replayed.
 
 Agent hub pair history: `csl agents history --with NAME` (set `CSL_AGENT`), or the read-only MCP `history` tool; full bodies and delivery states, default retention 200 per pair.
+
+The experimental owner-local `csl-resume-action --json-stdin` adapter supports
+managed Codex/Claude same-ID handoff and typed Linux keeper launch; see [sync](SYNC.md).
