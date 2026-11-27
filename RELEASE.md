@@ -101,7 +101,11 @@ Distribution remains a source checkout/archive with Python 3.11+; no wheel,
 package registry, bundled interpreter or automatic updater is introduced.
 Branch-tracking development checkouts update with `git pull --ff-only`. Tagged
 installs have a detached HEAD: update with `git fetch --tags` followed by
-`git switch --detach v0.5.0` after publication. Keep local edits separately; do
+`git switch --detach v0.5.0` after publication. After either update, re-run
+`./install.sh` with the same original prefix (`./install.sh PREFIX` for a custom
+prefix) to install newly added launchers. For v0.5.7, verify `csl --version` and
+`csl-resume-action --help` with that prefix's `bin` first on `PATH`.
+Keep local edits separately; do
 not reset or discard them. Pinned guided installers need their owner to update
 the archive pin. Downloading or installing
 starts no service and preserves local authentication/selection state.

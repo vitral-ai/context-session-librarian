@@ -55,10 +55,17 @@ release is published (keep any local changes; do not reset them):
 ```bash
 git fetch --tags
 git switch --detach v0.5.7
+./install.sh
 csl --version
+csl-resume-action --help
 ```
 
-Only branch-tracking development checkouts use `git pull --ff-only`.
+Re-run the installer with the same prefix used originally: the commands above
+use the default `~/.local`; for a custom prefix, run `./install.sh PREFIX`
+instead. This installs newly added launchers, including `csl-resume-action`.
+Keep that prefix's `bin` directory first on `PATH` for both verification commands.
+Only branch-tracking development checkouts use `git pull --ff-only`; after
+pulling, re-run the installer with the same prefix and verify both commands above.
 Pinned guided installations update through their installer release.
 
 Context Session Librarian was previously named Codex Session Librarian; the
