@@ -8,6 +8,16 @@ The version records below refer to their original published tags, which are unch
 
 ## Version records
 
+### v0.5.6 — installation attestation release candidate
+
+Add `csl sync --home PROFILE attest-installation --json` for the owner-local
+Fork destination check. Success exposes only the server-validated account and
+device. Uncertain prior refreshes refuse under the OAuth lock; fresh refresh
+uses the profile's existing policy. No transcript upload or writer mutation.
+Publish after independent review and exact-head hosted/native validation.
+Preserve existing profiles and authentication. Verify the immutable published
+commit-addressed archive before handing its pin to the guided installer owner.
+
 ### v0.5.5 — Windows CLI startup release candidate
 
 Load optional curses only for the interactive cockpit, falling back to plain
