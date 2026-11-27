@@ -43,6 +43,16 @@ class CLITests(unittest.TestCase):
         self.assertEqual(status['totals']['pending'], 0)
         self.assertIn('Collector stopped; not paired; policy new.', self.cli('status').stdout)
 
+    def test_workload_schema_refusal_is_visible_in_short_and_json_status(self):
+        state = State(self.home)
+        state.set('last_error', 'workload_text_format_refused')
+        state.close()
+        result = self.cli('status')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Upload refused: unsupported workload transcript schema or version', result.stdout)
+        result = self.cli('status', '--json')
+        self.assertEqual(json.loads(result.stdout)['last_error'], 'workload_text_format_refused')
+
     def test_interactive_choices_and_cancel_preserve_local_optouts(self):
         state = State(self.home)
         self.addCleanup(state.close)

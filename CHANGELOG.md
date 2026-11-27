@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.3 — 2026-11-26
+
+- Accept Codex 0.169.0 and newer stable CLI versions when all transcript records
+  match the existing managed text schema, including 0.172.0. Preserve the existing
+  profile and runtime binding; unknown schemas still refuse before upload.
+- Explain workload format refusals in short collector status.
+
 ## 0.5.2 — 2026-11-26
 
 - Add explicit same-native-ID Resume for raw Codex and Claude packages under

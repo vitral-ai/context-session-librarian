@@ -8,6 +8,15 @@ The version records below refer to their original published tags, which are unch
 
 ## Version records
 
+### v0.5.3 — managed Codex compatibility release candidate
+
+Keep the `codex-0.169.0-text-v1` profile and recipe identity while accepting stable
+Codex versions at least 0.169.0 through the existing closed schema validator.
+Unknown formats remain refused and short status explains the refusal. This does
+not broaden the supported content schema or change Claude's version qualification.
+Publish after independent review, exact-head hosted and native checks; verify the
+published commit-addressed archive and a fresh installation before handing off pins.
+
 ### v0.5.2 — same-ID Resume release candidate
 
 Select reviewed main including #139–#142: runtime version data, discovery-bound
