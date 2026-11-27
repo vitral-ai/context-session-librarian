@@ -287,6 +287,15 @@ def infer_agent(bindings):
     return matches[0] if len(matches) == 1 else None
 
 
+def nats_source(source, path):
+    from csl_nats import config as nats_config
+
+    source = source or os.environ.get('CSL_AGENT') or infer_agent(nats_config(path)['agents'])
+    if not source:
+        raise BridgeError('Set CSL_AGENT or use --from to identify your agent')
+    return source
+
+
 def enrollment_path(value):
     if not isinstance(value, str) or not Path(value).expanduser().is_absolute():
         raise BridgeError('CSL sender routing needs an absolute NATS configuration path')
@@ -323,7 +332,7 @@ def local_enrollment(source, routes, *, infer=False):
 
 
 def select_sender_route(args):
-    enrollment = local_enrollment(args.source, sender_routes())
+    enrollment = local_enrollment(args.source, sender_routes(), infer=True)
     if enrollment is None:
         return
     args.source, nats_config, enrolled = enrollment
@@ -334,6 +343,12 @@ def select_sender_route(args):
         args.to, selector, transport = reply_route(nats_config, source, reply_parent(args),
                                                   args.to, hub_ledger)
         args.message_id, args.in_reply_to = selector, None
+    elif transport == 'hub':
+        try:
+            config()
+        except FileNotFoundError:
+            # NATS-only installations let the controller resolve the target.
+            transport = 'nats'
     if transport == 'nats':
         args.nats_config = nats_config
     elif args.is_reply:
@@ -372,8 +387,10 @@ def _execute(args):
     if args.hub_action == 'history' and args.since is not None:
         raise BridgeError('--since requires NATS history')
     if args.hub_action == 'send':
-        if args.nats_config is not None and args.is_reply:
-            resolve_pinned_nats_reply(args)
+        if args.nats_config is not None:
+            args.source = nats_source(args.source, args.nats_config)
+            if args.is_reply:
+                resolve_pinned_nats_reply(args)
         if args.nats_config is None and hub_config is None:
             if args.id:
                 raise BridgeError('Use --id with the original --nats-config or --hub-config path printed for the send')

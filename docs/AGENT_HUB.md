@@ -182,7 +182,10 @@ to `senders` in the owner-managed `~/.config/csl/sender-routes.json`. Set
 {"senders":{"alice":"/private/config/vi.json"},"nats_recipients":["alice","bob"]}
 ```
 
-Plain `csl send` selects NATS for enrolled recipients and Hub for others.
+Plain `csl send` uses the current Claude session, current Codex thread, or sole
+local enrollment to identify the caller when `--from` and `CSL_AGENT` are unset.
+An enrolled sender uses NATS for all recipients on NATS-only installations.
+When a Hub is also configured, the local recipient list selects the transport.
 `csl reply ID_OR_PREFIX` resolves the incoming parent and uses its original
 transport when the parent is still retained there. Prefixes must match exactly
 one message, starting with at least eight characters of its UUID. The CLI prints

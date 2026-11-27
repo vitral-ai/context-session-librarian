@@ -261,12 +261,17 @@ class SenderRoutingTests(unittest.TestCase):
         configs = {Path(path): {'agents': {name: bindings[name]}} for name, path in self.routes['senders'].items()}
         with (patch.dict(os.environ, {}, clear=True),
               patch('csl_nats.config', side_effect=configs.__getitem__),
-              patch('csl_nats_tools.command') as tool):
+              patch('csl_nats_tools.command') as tool,
+              contextlib.redirect_stderr(io.StringIO())):
             with self.assertRaisesRegex(BridgeError, 'use --from'):
                 csl_agents._execute(self.parse('agents', 'status'))
             with patch.dict(os.environ, {'CODEX_THREAD_ID': bindings['worker']['session']}):
                 csl_agents._execute(self.parse('agents', 'status'))
                 selected = tool.call_args.args[0]
+                self.assertEqual((selected.source, selected.nats_config), ('worker', Path('/private/worker.json')))
+                self.routes['nats_recipients'].append('client')
+                csl_agents._execute(self.parse('send', '--to', 'client', '--text', 'test body'))
+                selected = self.nats_send.call_args.args[0]
                 self.assertEqual((selected.source, selected.nats_config), ('worker', Path('/private/worker.json')))
                 csl_agents._execute(self.parse('agents', 'status', '--from', 'client'))
                 self.assertEqual(tool.call_args.args[0].source, 'client')
@@ -274,29 +279,58 @@ class SenderRoutingTests(unittest.TestCase):
             csl_agents._execute(self.parse('agents', 'status'))
             self.assertEqual(tool.call_args.args[0].source, 'worker')
 
-    def test_agents_history_infers_claude_session_from_live_parent(self):
+    def test_nats_commands_infer_claude_session_from_live_parent(self):
         claude_home = Path('/private/claude')
         record_path = claude_home / 'sessions/400.json'
         session = str(uuid.uuid4())
-        self.routes['senders']['worker'] = '/private/vi.json'
+        self.routes['senders']['worker'] = '/private/claude-vi.json'
         self.read_routes.side_effect = lambda path: ({
             'pid': 400, 'procStart': '789', 'kind': 'interactive', 'sessionId': session
         } if path == record_path else self.routes)
         fields = 'S 1 ' + '0 ' * 17 + '789'
-        settings = {'agents': {'client': {'session': self.parent},
-                               'worker': {'session': session, 'cli': 'claude', 'claude_config': claude_home}}}
-        with (patch.dict(os.environ, {}, clear=True),
+        configs = {
+            Path('/private/vi.json'): {'agents': {'client': {'session': self.parent}}},
+            Path('/private/claude-vi.json'): {'agents': {
+                'worker': {'session': session, 'cli': 'claude', 'claude_config': claude_home},
+            }},
+        }
+        self.config.side_effect = FileNotFoundError
+        with (patch.dict(os.environ, {'CSL_NATS_CONFIG': '/private/vi.json'}, clear=True),
               patch('csl_agents.os.getppid', return_value=400),
               patch('csl_agents.Path.read_text', return_value='400 (claude) ' + fields) as proc,
-              patch('csl_nats.config', return_value=settings),
+              patch('csl_nats.config', side_effect=configs.__getitem__),
               patch('csl_nats_tools.call', return_value={'messages': []}) as request,
-              contextlib.redirect_stdout(io.StringIO())):
-            csl_agents._execute(self.parse('agents', 'history', '--with', 'client'))
-            self.assertEqual(request.call_args.args[:2], (Path('/private/vi.json'), 'worker'))
+              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO())):
+            for argv in [('agents', 'history', '--with', 'client'), ('put', 'report.txt'), ('fetch', 'a' * 64)]:
+                with self.subTest(argv=argv):
+                    csl_agents._execute(self.parse(*argv))
+                    self.assertEqual(request.call_args.args[:2], (Path('/private/claude-vi.json'), 'worker'))
+            # The local recipient list omits client. With no Hub, send still uses NATS.
+            send = ('send', '--to', 'client', '--text', 'test body')
+            csl_agents._execute(self.parse(*send))
+            sent = self.nats_send.call_args.args[0]
+            self.assertEqual((sent.source, sent.nats_config), ('worker', Path('/private/claude-vi.json')))
             proc.return_value = '400 (claude) ' + fields.replace('789', '790')
-            with self.assertRaisesRegex(BridgeError, 'use --from'):
-                csl_agents._execute(self.parse('agents', 'history', '--with', 'client'))
-            request.assert_called_once()
+            for argv in [send, ('agents', 'history', '--with', 'client')]:
+                with self.subTest(argv=argv), self.assertRaisesRegex(BridgeError, 'use --from'):
+                    csl_agents._execute(self.parse(*argv))
+            self.nats_send.assert_called_once()
+            self.hub.assert_not_called()
+            self.assertEqual(request.call_count, 3)
+
+    def test_pinned_nats_reply_infers_caller_from_pinned_config(self):
+        self.nats_history.return_value = {'messages': [{'id': self.parent, 'from': 'worker', 'to': 'client'}]}
+        with (patch.dict(os.environ, {}, clear=True),
+              patch('csl_nats.config', return_value={'agents': {'client': {'session': self.parent}}}) as config,
+              contextlib.redirect_stderr(io.StringIO())):
+            csl_agents._execute(self.parse('reply', self.parent[:8], '--nats-config', '/private/pinned.json',
+                                          '--text', 'test body'))
+        config.assert_called_once_with(Path('/private/pinned.json'))
+        self.nats_history.assert_called_once()
+        self.assertEqual(self.nats_history.call_args.args[:2], (Path('/private/pinned.json'), 'client'))
+        self.assertEqual(self.nats_send.call_args.args[0].source, 'client')
+        self.read_routes.assert_not_called()
+        self.hub.assert_not_called()
 
     def test_agents_history_rejects_conflicting_live_claude_profiles(self):
         self.routes['senders']['worker'] = '/private/vi.json'

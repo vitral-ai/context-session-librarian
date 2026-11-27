@@ -266,13 +266,9 @@ def command(args):
 
     if not args.nats_config:
         raise BridgeError('No NATS enrollment for this agent; identify it with --from or pass --nats-config PATH')
-    from csl_agents import infer_agent
+    from csl_agents import nats_source
 
-    source = args.source or os.environ.get('CSL_AGENT')
-    if not source:
-        source = infer_agent(config(args.nats_config)['agents'])
-    if not source:
-        raise BridgeError('Set CSL_AGENT or use --from to identify your agent')
+    source = nats_source(args.source, args.nats_config)
     result = call(args.nats_config, source, operation)
     if args.hub_action == 'latest':
         for line in latest_lines(result):
