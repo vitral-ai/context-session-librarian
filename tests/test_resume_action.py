@@ -36,6 +36,8 @@ class RequestTests(unittest.TestCase):
             with self.subTest(changed=changed),self.assertRaises(SyncError): action.validate(request(**changed))
         q=request(action='run',expected_device_id=DEVICE);q.pop('intent')
         action.validate(q)
+        missing=request(); missing.pop('target_id')
+        with self.assertRaises(SyncError): action.validate(missing)
         q.pop('expected_device_id')
         with self.assertRaises(SyncError):action.validate(q)
 
@@ -89,6 +91,12 @@ class LocalTests(unittest.TestCase):
             result=action.execute(request())
             self.assertEqual(result['state'],'eligible')
             self.assertEqual(result['device_id'],DEVICE)
+            for status in ('legacy', 'active', 'released'):
+                registry.call.return_value['writer']['state'] = status
+                self.assertEqual(action.execute(request())['state'], 'eligible')
+            registry.call.return_value['writer']['generation'] = 1
+            with self.assertRaises(SyncError): action.execute(request())
+            registry.call.return_value['writer']['generation'] = 0
             registry.call.assert_called_with('GET','/sessions/'+REGISTRY)
             with self.assertRaises(SyncError):action.execute(request(registry_session_id='ss_'+'0'*64))
             with self.assertRaises(SyncError):action.execute(request(expected_device_id=NATIVE))

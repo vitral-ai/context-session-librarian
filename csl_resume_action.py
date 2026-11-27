@@ -39,6 +39,7 @@ def validate(value):
         check = value['action'] == 'check'
         if check:
             if value.get('intent') not in ('source', 'destination', 'in_place'): raise ValueError()
+            if value['intent'] in ('destination', 'in_place') and 'target_id' not in value: raise ValueError()
         elif 'intent' in value: raise ValueError()
         if 'expected_device_id' in value:
             if not canonical_uuid(value['expected_device_id']): raise ValueError()
@@ -66,6 +67,7 @@ def absolute(value):
 
 class Local:
     def __init__(self, request):
+        if sys.platform != 'linux': raise SyncError('managed_platform_unsupported')
         self.request = request
         self.host_home = Path(os.environ.get('VITRAL_TUNNEL_HOME', str(Path.home() / '.vitral-tunnel')))
         if not self.host_home.is_absolute(): raise SyncError('unsafe_local_binding')
@@ -114,7 +116,8 @@ class Local:
             if (set(value) != {'schema_version', 'request_id', 'provider', 'native_session_id', 'state', 'keeper_session_id', 'process'} or
                     value['schema_version'] != 1 or value['request_id'] != q['request_id'] or value['provider'] != q['provider'] or
                     value['native_session_id'] != q['native_id'] or value['state'] != 'launched' or
-                    not re.fullmatch(r'live-[0-9a-f-]{36}', value['keeper_session_id']) or
+                    not isinstance(value['keeper_session_id'], str) or not value['keeper_session_id'].startswith('live-') or
+                    not canonical_uuid(value['keeper_session_id'][5:]) or
                     set(value['process']) != {'pid', 'start_identity'} or type(value['process']['pid']) is not int or value['process']['pid'] <= 0 or
                     not isinstance(value['process']['start_identity'], str) or not 0 < len(value['process']['start_identity']) <= 512):
                 raise ValueError()
@@ -147,7 +150,7 @@ def execute(q):
         if q['action'] != 'check':
             # Bind retries to the owner-local target and complete typed payload
             # before any remote mutation or provider start.
-            binding = dict(request=q, identity=identity, target=local.target,
+            binding = dict(request=q, identity=identity, target=local.target, endpoint=settings['endpoint'],
                            host=str(local.host), profile=str(state.root.resolve()))
             journal = state.root / 'resume-actions' / (q['request_id'] + '-' + q['action'] + '.json')
             with exclusive(state.root):
@@ -184,7 +187,14 @@ def execute(q):
                             snapshot=q['expected_snapshot_id'], generation=q['expected_generation'], expected_device=identity['device_id'])
                 else:
                     if not local.target: raise SyncError('resume_target_required')
-                    writer.released(derived, q['provider'], q['native_id'], q['expected_snapshot_id'], q['expected_generation'])
+                    # Read-only destination suitability is needed before the
+                    # source releases. Only import requires released state.
+                    owner = remote.get('writer', {})
+                    if (owner.get('state') not in ('legacy', 'active', 'released') or
+                            owner.get('generation') != q['expected_generation']):
+                        raise SyncError('writer_fenced')
+                    if remote.get('sync', {}).get('complete') is not True or remote.get('package', {}).get('available') is not True:
+                        raise SyncError('source_incomplete')
                     try: _resolve(q['provider'], q['native_id'], None)
                     except ProviderError as error:
                         if error.code != 'session_not_found': raise
