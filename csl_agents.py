@@ -395,16 +395,12 @@ def _execute(args):
     if args.hub_action == 'history' and args.since is not None:
         raise BridgeError('--since requires NATS history')
     if args.hub_action == 'send':
+        if args.id and not args.source and (args.nats_config is not None or hub_config is not None):
+            raise BridgeError('Use --id with the original --from sender from the printed retry_from option')
         if args.nats_config is not None:
-            if args.id and not args.source:
-                raise BridgeError('Use --id with the original --from sender printed for the NATS send')
             args.source = nats_source(args.source, args.nats_config)
             if args.is_reply:
                 resolve_pinned_nats_reply(args)
-        if hub_config is not None and args.id and not args.source:
-            routes = sender_routes()
-            if routes and routes['senders']:
-                raise BridgeError('Use --id with the original --from sender printed for the Hub send')
         if args.nats_config is None and hub_config is None:
             if args.id:
                 raise BridgeError('Use --id with the original --nats-config or --hub-config path printed for the send')
@@ -523,7 +519,7 @@ def add_commands(subparsers, _):
         body = send.add_mutually_exclusive_group()
         body.add_argument('--text-file', type=Path, default=Path('-'))
         body.add_argument('--text')
-        send.add_argument('--id', help='Message UUID. Requires the original --hub-config or --nats-config path.')
+        send.add_argument('--id', help='Message UUID. Requires the original config pin and --from sender.')
         route = send.add_mutually_exclusive_group()
         route.add_argument('--hub-config', type=Path)
         route.add_argument('--nats-config', type=Path)

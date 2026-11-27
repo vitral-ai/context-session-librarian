@@ -476,11 +476,10 @@ class SenderRoutingTests(unittest.TestCase):
             retry = (*argv, *shlex.split(options['retry_pin']), '--id', options['message_id'])
             with self.assertRaisesRegex(BridgeError, 'original --from sender'):
                 csl_agents._execute(self.parse(*retry))
-            csl_agents._execute(self.parse(*retry, *shlex.split(options['retry_from'])))
             self.read_routes.side_effect = FileNotFoundError
-            csl_agents._execute(self.parse(*retry))
+            csl_agents._execute(self.parse(*retry, *shlex.split(options['retry_from'])))
         requests = [invocation.args[1] for invocation in self.hub.call_args_list]
-        self.assertEqual([request['source'] for request in requests], ['client', 'client', 'legacy'])
+        self.assertEqual([request['source'] for request in requests], ['client', 'client'])
         self.assertEqual({request['id'] for request in requests}, {options['message_id']})
 
     def test_printed_retry_options_resend_inferred_nats_reply(self):

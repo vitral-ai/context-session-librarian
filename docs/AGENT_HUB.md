@@ -190,8 +190,8 @@ matches, and the local recipient list selects the enrolled caller's transport.
 `csl reply ID_OR_PREFIX` resolves the incoming parent and uses its original
 transport when the parent is still retained there. Prefixes must match exactly
 one message, starting with at least eight characters of its UUID. The CLI prints
-the selected transport. A retry using `--id` requires the original config pin.
-Include the printed `retry_from` option for both NATS and mixed Hub/NATS retries.
+the selected transport. A retry using `--id` requires the printed config pin
+and `retry_from` option on either transport.
 For a pinned NATS retry, use the printed full parent ID and `--to`.
 
 Before a NATS send or reply, the CLI reports unread messages from the recipient
