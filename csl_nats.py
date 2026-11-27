@@ -265,6 +265,7 @@ class ClaudeInbox:
             if output is not None:
                 emit(output)
                 db.executemany('UPDATE nats_claude_inbox SET surfaced=?,body=?,woke=0 WHERE seq=?', updates)
+            return output is not None
 
 
 class Client:

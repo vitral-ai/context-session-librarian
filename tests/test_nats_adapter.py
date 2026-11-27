@@ -276,6 +276,42 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
             reopened.wake_waiting('/fixture')
             self.assertEqual(wake.call_count, 2)
 
+    def test_claude_prompt_surfaces_pending_mail_and_identifies_stale_wakes(self):
+        with self.store.transaction() as db:
+            db.execute('INSERT INTO agents VALUES (?,?)', ('alice', self.thread))
+        inbox = ClaudeInbox(self.store, 'vi', 'alice', self.thread)
+        envelope = dict(json.loads(self.message.data), body='Idle message')
+        outputs = []
+
+        def hook(event, **fields):
+            payload = {'session_id': self.thread, 'hook_event_name': event, **fields}
+            surface_nats(self.home, 'vi', 'alice', event, payload, 10, outputs.append)
+
+        prompt = 'Another Claude session sent a message:\nCSL: new messages\n\nNative peer context'
+        with patch('csl_bridge_claude_notify.wake') as wake:
+            inbox.wake_waiting('/fixture')
+            wake.assert_not_called()
+            inbox.stage(envelope, 'idle', config_path=self.config_path)
+            inbox.wake_waiting('/fixture')
+            hook('UserPromptSubmit', prompt=prompt)
+            self.assertEqual(len(outputs), 1)
+            self.assertIn('Idle message', outputs.pop())
+
+            busy = dict(envelope, id=str(uuid.uuid4()), body='Busy message')
+            inbox.stage(busy, 'busy', config_path=self.config_path)
+            inbox.wake_waiting('/fixture')
+            hook('PostToolUse')
+            self.assertEqual(len(outputs), 1)
+            self.assertIn('Busy message', outputs.pop())
+            inbox.wake_waiting('/fixture')
+            self.assertEqual(wake.call_count, 2)
+
+        hook('UserPromptSubmit', prompt='Ordinary prompt')
+        self.assertEqual(outputs, [])
+        for wake_prompt in (prompt, 'CSL: new messages'):
+            hook('UserPromptSubmit', prompt=wake_prompt)
+            self.assertEqual(outputs.pop(), 'CSL: messages already shown above')
+
     def test_claude_digest_bounds_rendered_json_and_preserves_whole_members(self):
         with self.store.transaction() as db:
             db.execute('INSERT INTO agents VALUES (?,?)', ('alice', self.thread))
