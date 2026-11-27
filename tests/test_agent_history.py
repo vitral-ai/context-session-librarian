@@ -321,6 +321,11 @@ class SenderRoutingTests(unittest.TestCase):
             with self.assertRaisesRegex(BridgeError, 'Multiple Claude profiles'):
                 csl_agents._execute(self.parse('agents', 'history', '--with', 'worker'))
             tool.assert_not_called()
+            del records[bindings['worker']['claude_config'] / 'sessions/400.json']
+            records[bindings['client']['claude_config'] / 'sessions/400.json']['sessionId'] = bindings['worker']['session']
+            with self.assertRaisesRegex(BridgeError, 'use --from'):
+                csl_agents._execute(self.parse('agents', 'history', '--with', 'worker'))
+            tool.assert_not_called()
             csl_agents._execute(self.parse('agents', 'history', '--with', 'worker', '--from', 'client'))
             self.assertEqual(tool.call_args.args[0].source, 'client')
 

@@ -262,7 +262,7 @@ def current_claude_session(configs):
                 continue
             if (isinstance(record, dict) and record.get('pid') == pid
                     and record.get('procStart') == start and record.get('kind') == 'interactive'):
-                sessions.append(record.get('sessionId'))
+                sessions.append((directory, record.get('sessionId')))
         if len(sessions) > 1:
             raise BridgeError('Multiple Claude profiles match this process; set CSL_AGENT or use --from')
         if sessions:
@@ -277,8 +277,13 @@ def infer_agent(bindings):
     claude = current_claude_session({entry['claude_config'] for entry in bindings.values()
                                     if entry.get('cli') == 'claude'})
     codex = os.environ.get('CODEX_THREAD_ID')
-    matches = [name for name, entry in bindings.items()
-               if entry['session'] == (claude if entry.get('cli') == 'claude' else codex)]
+    matches = []
+    for name, entry in bindings.items():
+        if entry.get('cli') == 'claude':
+            if claude == (entry['claude_config'], entry['session']):
+                matches.append(name)
+        elif codex is not None and codex == entry['session']:
+            matches.append(name)
     return matches[0] if len(matches) == 1 else None
 
 
