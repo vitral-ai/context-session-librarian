@@ -12,7 +12,9 @@ The version records below refer to their original published tags, which are unch
 
 Load optional curses only for the interactive cockpit, falling back to plain
 output when unavailable. Official CLI sync and import work with guided Windows
-Python. Windows CI imports all root CLI entry points and checks startup without
+Python. Resolve npm provider shims through Node without shell expansion for
+provider open and native-picker indexing. Windows CI imports all root CLI entry
+points and checks startup without
 curses. Publish after independent review, exact-head hosted/native validation,
 and a Windows witness covering pull, fresh-ID import, provider open and Unicode
 paths. Keep existing collector profiles and authentication in place.

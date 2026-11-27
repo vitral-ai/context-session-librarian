@@ -8,7 +8,7 @@ import subprocess
 import threading
 import time
 
-from csl_transfer import TransferError
+from csl_transfer import TransferError, provider_argv
 
 
 class CodexRPC:
@@ -20,9 +20,9 @@ class CodexRPC:
     def __enter__(self):
         if not shutil.which("codex"):
             raise TransferError("Codex is required to enumerate its resume list and archive sessions")
-        self.process = subprocess.Popen(["codex", "app-server"],
+        self.process = subprocess.Popen(provider_argv(["codex", "app-server"]),
             env={**os.environ, "CODEX_HOME": str(self.home)}, stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8")
         def read():
             try:
                 for line in self.process.stdout:

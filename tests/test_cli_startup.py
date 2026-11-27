@@ -72,5 +72,40 @@ runpy.run_path(sys.argv[0], run_name='__main__')
         self.assertIn('plain output', error.getvalue())
 
 
+class WindowsProviderCommandTests(unittest.TestCase):
+    def test_npm_shim_uses_node_with_literal_unicode_arguments(self):
+        from csl_transfer import provider_argv
+        with tempfile.TemporaryDirectory(prefix='csl-空 白-') as temporary:
+            root = Path(temporary)
+            node = root / 'node.exe'
+            node.touch()
+            for provider, entry in [('codex', 'node_modules/@openai/codex/bin/codex.js'),
+                                    ('claude', 'node_modules/@anthropic-ai/claude-code/cli.js')]:
+                script = root / entry
+                script.parent.mkdir(parents=True, exist_ok=True)
+                script.touch()
+                shim = root / (provider + '.CMD')
+                shim.touch()
+                args = [provider, '--resume', 'fixture', '空 白 & %PATH% !x! ^ " literal']
+                with self.subTest(provider=provider), patch('csl_transfer.sys.platform', 'win32'), \
+                     patch('csl_transfer.shutil.which', return_value=str(shim)):
+                    self.assertEqual(provider_argv(args), [str(node), str(script), *args[1:]])
+
+    def test_missing_npm_entry_refuses_instead_of_running_shell(self):
+        from csl_transfer import provider_argv, TransferError
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch('csl_transfer.sys.platform', 'win32'), \
+             patch('csl_transfer.shutil.which', return_value=temporary + '/codex.cmd'):
+            with self.assertRaisesRegex(TransferError, 'repair the native CLI installation'):
+                provider_argv(['codex', 'resume', 'fixture'])
+
+    def test_windows_executable_uses_resolved_path(self):
+        from csl_transfer import provider_argv
+        with patch('csl_transfer.sys.platform', 'win32'), \
+             patch('csl_transfer.shutil.which', return_value='/fixture/codex.exe'):
+            self.assertEqual(provider_argv(['codex', 'resume', 'id']),
+                             ['/fixture/codex.exe', 'resume', 'id'])
+
+
 if __name__ == '__main__':
     unittest.main()
