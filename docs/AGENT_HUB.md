@@ -224,6 +224,14 @@ Pass `--nats-config PATH` to select a specific NATS configuration, or
 csl history --with coordinator --last 10 --from alice
 csl history --id MESSAGE_ID --from alice
 csl agents status
+csl agents history --with coordinator --since 2h
+csl agents latest
+csl agents allow alice bob
+csl agents deny alice bob
+csl agents pairs --pending
+csl agents watch --agent alice --after 30m --note "Send the build result"
+csl agents watch --list
+csl agents watch --cancel WATCH_UUID
 csl agents versions --from alice
 csl agents close --with coordinator --from alice
 csl agents complete --with coordinator --from alice
@@ -236,6 +244,10 @@ csl send --nats-config PATH --from alice --to coordinator --attach FILE_SHA256 -
 `--attach` for each file in a message. `fetch` verifies the digest before
 publishing the file and refuses to overwrite an existing path. Fleet status
 requires the broker's orchestrator role.
+
+NATS pair changes apply in both directions and require the owner or a
+coordinator responsible for both endpoints. A send to an unapproved pair is
+held pending approval. Watches are one-shot reminders for orchestrators.
 
 Set `--nats-config PATH` on the existing `csl-bridge-mcp` invocation to enable
 NATS history, status, versions, close, and complete for its bound agent.

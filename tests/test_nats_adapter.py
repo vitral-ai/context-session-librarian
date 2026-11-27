@@ -479,6 +479,23 @@ class NatsAdapterTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(stdout.getvalue(), '')
                     self.assertEqual(row, {'state': None, 'broker': None})
 
+    def test_held_pair_is_a_confirmed_send_receipt_and_saved_for_replay(self):
+        settings = {'tenant': 'vi', 'connector_home': self.home, 'agents': {'alice': {'session': self.thread}}}
+        receipt = {'id': self.id, 'state': 'pending_pair'}
+        self.client.send = AsyncMock(return_value=receipt)
+        self.client.request = AsyncMock(return_value={'ids': [], 'count': 0})
+        self.connection.close = AsyncMock()
+        with (patch('csl_nats.config', return_value=settings),
+              patch.object(Client, 'connect_active', new=AsyncMock(return_value=self.client)),
+              patch('sys.stdout', new_callable=io.StringIO) as stdout,
+              patch('sys.stderr', new_callable=io.StringIO) as stderr):
+            self.assertEqual(main(['send', '--from', 'alice', '--to', 'bob', '--text', 'proof',
+                                   '--nats-config', str(self.config_path), '--id', self.id]), 0)
+        self.assertIn('held: pair alice -> bob awaiting approval', stderr.getvalue().splitlines())
+        self.assertEqual(json.loads(stdout.getvalue()), receipt)
+        self.assertEqual(self.store.rows('SELECT state,broker FROM nats_outbox WHERE id=?', (self.id,)),
+                         [{'state': 'pending_pair', 'broker': 'primary'}])
+
     async def test_failed_control_receipt_retries_without_second_handoff(self):
         self.client.receipt = AsyncMock(side_effect=TimeoutError)
         with self.assertRaises(TimeoutError):

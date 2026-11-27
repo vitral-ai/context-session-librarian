@@ -354,8 +354,11 @@ def resolve_pinned_nats_reply(args):
 def _execute(args):
     hub_config = getattr(args, 'hub_config', None)
     nats_tool = ((args.hub_action == 'status' and getattr(args, 'owner', None) is None)
-                 or args.hub_action in ('versions', 'close', 'complete', 'put', 'fetch'))
-    if nats_tool or args.hub_action == 'history':
+                 or args.hub_action in ('versions', 'close', 'complete', 'put', 'fetch', 'pairs', 'latest', 'watch'))
+    dual_tool = args.hub_action in ('history', 'allow', 'deny')
+    if nats_tool or dual_tool:
+        if args.nats_config is not None and hub_config is not None:
+            raise BridgeError('Choose either --nats-config or --hub-config')
         if args.nats_config is None and hub_config is None:
             routes = sender_routes()
             if enrollment := local_enrollment(args.source, routes, infer=True):
@@ -363,9 +366,11 @@ def _execute(args):
             elif nats_tool or routes is None:
                 if legacy_config := os.environ.get('CSL_NATS_CONFIG'):
                     args.nats_config = Path(legacy_config)
-    if nats_tool or (args.hub_action == 'history' and args.nats_config):
+    if nats_tool or (dual_tool and args.nats_config):
         from csl_nats_tools import command
         return command(args)
+    if args.hub_action == 'history' and args.since is not None:
+        raise BridgeError('--since requires NATS history')
     if args.hub_action == 'send':
         if args.nats_config is not None and args.is_reply:
             resolve_pinned_nats_reply(args)
@@ -390,7 +395,7 @@ def _execute(args):
         if args.owner is not None:
             request['owner'] = args.owner
     elif args.hub_action in ('allow', 'deny'):
-        request.update(source=args.source, target=args.target, both=args.both)
+        request.update(source=args.pair_a, target=args.pair_b, both=args.both)
     elif args.hub_action in ('show', 'remove'):
         request['name'] = args.name
     elif args.hub_action in ('send',):
@@ -463,7 +468,22 @@ def add_commands(subparsers, _):
     sub.add_parser('permissions')
     for action in ('allow', 'deny'):
         pair = sub.add_parser(action)
-        pair.add_argument('source'); pair.add_argument('target'); pair.add_argument('--both', action='store_true')
+        add_options(pair)
+        pair.add_argument('pair_a', metavar='A')
+        pair.add_argument('pair_b', metavar='B')
+        pair.add_argument('--both', action='store_true', help='Update both directions on the legacy Hub.')
+    pairs = sub.add_parser('pairs', help='List pairs you manage.')
+    add_options(pairs)
+    pairs.add_argument('--pending', action='store_true')
+    add_options(sub.add_parser('latest', help='Show the latest message per counterpart.'))
+    watch = sub.add_parser('watch', help='Create, list or cancel one-shot promise reminders.')
+    add_options(watch)
+    mode = watch.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--agent')
+    mode.add_argument('--list', action='store_true')
+    mode.add_argument('--cancel', metavar='ID')
+    watch.add_argument('--after', metavar='DURATION')
+    watch.add_argument('--note')
     for action in ('send', 'reply'):
         send = subparsers.add_parser(action, help='Send a durable envelope and wake its registered recipient.')
         send.add_argument('--from', dest='source')
@@ -491,6 +511,7 @@ def add_commands(subparsers, _):
     add_options(history)
     history.add_argument('--hub-config', dest='hub_config', type=Path, default=argparse.SUPPRESS)
     history.add_argument('--last', type=int)
+    history.add_argument('--since', help='RFC3339 timestamp or duration such as 2h or 30m.')
     subparsers.add_parser('history', parents=[history], add_help=False,
                           help='Read retained agent message history.').set_defaults(func=execute, hub_action='history')
     for action in ('status', 'versions', 'close', 'complete'):
