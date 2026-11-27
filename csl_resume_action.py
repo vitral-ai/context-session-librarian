@@ -234,7 +234,7 @@ def execute(q):
                     generation = q['expected_generation']
                     if generation == 0:
                         initial_in_place(writer, local, q, identity, remote)
-                        if q['action'] == 'check': return dict(base, state='eligible', generation=0)
+                        if q['action'] == 'check': return dict(base, state='eligible')
                         generation = 1
                         # The CAS above has established the exact local and remote writer.
                         remote['writer'] = dict(state='active', device_id=identity['device_id'], generation=1)

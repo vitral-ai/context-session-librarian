@@ -110,6 +110,9 @@ class InitialWriterTests(LocalTests):
              patch('csl_sync_http.Registry', return_value=self.registry), \
              patch('csl_sync_providers._resolve'), \
              patch.object(action.Local, 'run_host', return_value=dict(state='launched')) as launch:
+            checked = action.execute(dict(self.q, action='check', intent='in_place'))
+            self.assertNotIn('generation', checked)
+            self.assertEqual(checked['state'], 'eligible')
             result = action.execute(self.q)
             self.assertEqual(result['generation'], 1)
             self.assertEqual(launch.call_args.args[0]['expected_writer']['generation'], 1)
