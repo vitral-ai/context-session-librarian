@@ -8,6 +8,21 @@ The version records below refer to their original published tags, which are unch
 
 ## Version records
 
+### v0.5.2 — same-ID Resume release candidate
+
+Select reviewed main including #139–#142: runtime version data, discovery-bound
+refresh replay policy, interrupted-view finalization coverage and explicit registry
+single-writer Resume. Default import remains Fork. Source release requires an exact
+managed positive end receipt; a fresh destination retains the native ID and appends
+to the same registry session after installation attestation and acquisition.
+Direct --open and native history-base Resume remain refused. No universal native
+continuation claim is made. Existing ambiguous refreshes still need fresh sign-in.
+
+Publish only after independent release review, exact-head hosted checks and isolated
+native validation. Record the final immutable archive URL, bytes and SHA-256 in the
+GitHub Release and verify a fresh tagged installation. Existing authentication and
+selection state remain in place; installing the source starts no service.
+
 ### v0.5.1 — collector UX release candidate
 
 This patch selects reviewed main including #134: first-run upload choices,
