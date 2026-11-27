@@ -29,10 +29,11 @@ def token_response(value):
 
 
 class Tokens:
-    def __init__(self, root, config, *, http=None, clock=time.time):
+    def __init__(self, root, config, *, http=None, clock=time.time, allow_inflight_replay=True):
         self.root, self.config = root, config
         self.path = root / 'credentials.json'
         self.http, self.clock = http or HTTP(), clock
+        self.allow_inflight_replay = allow_inflight_replay
 
     def status(self):
         value = read_private_json(self.path)
@@ -57,6 +58,8 @@ class Tokens:
             value = read_private_json(self.path)
             if not value or value.get('refresh_state') == 'revoked':
                 raise SyncError('sign_in_required')
+            if value.get('refresh_state') == 'inflight' and not self.allow_inflight_replay:
+                raise SyncError('refresh_outcome_unknown')
             if value.get('refresh_state') == 'ready' and not force_refresh and value.get('expires_at', 0) > self.clock() + 30:
                 return value['access_token']
             if not value.get('refresh_token'):

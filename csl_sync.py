@@ -313,10 +313,7 @@ def attest_installation(state):
     except (ValueError, AttributeError):
         raise SyncError('writer_device_required') from None
     http = HTTP(timeout=2, attempts=1)
-    tokens = Tokens(state.root, settings, http=http)
-    # An unresolved earlier refresh needs recovery, not a probe-triggered replay.
-    if tokens.status().get('state') == 'inflight':
-        raise SyncError('refresh_outcome_unknown')
+    tokens = Tokens(state.root, settings, http=http, allow_inflight_replay=False)
     account = Writer(state, Registry(settings['endpoint'], tokens, http=http)).attest(device)
     if not isinstance(account, str) or re.fullmatch(r'[0-9a-f]{24}', account) is None:
         raise SyncError('writer_device_required')

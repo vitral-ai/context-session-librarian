@@ -80,6 +80,26 @@ class AttestTests(unittest.TestCase):
             code, _, _, _ = self.invoke(dict(kind='collector', account_id='a'*24, device_id=self.device))
         self.assertEqual(code, 0)
 
+    def test_uncertain_transition_before_locked_read_is_not_replayed(self):
+        from contextlib import contextmanager
+        from csl_sync_state import exclusive
+        @contextmanager
+        def transition(root, name):
+            with exclusive(root, name):
+                private_json(self.home / 'credentials.json', dict(access_token='SECRET',
+                    refresh_token='SECRET', refresh_state='inflight', refresh_started_at=time.time()))
+                yield
+        state = State(self.home)
+        settings = state.get('settings')
+        settings.update(refresh_replay_grace_seconds=30, client_id='collector')
+        state.set('settings', settings)
+        state.close()
+        with patch('csl_sync_auth.exclusive', transition):
+            code, out, err, request = self.invoke()
+        self.assertEqual((code, out), (1, ''))
+        self.assertIn('refresh_outcome_unknown', err)
+        request.assert_not_called()
+
     def test_real_parser_and_missing_profile(self):
         from csl_sync import add_commands
         root = argparse.ArgumentParser()
