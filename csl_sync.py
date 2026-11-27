@@ -17,7 +17,7 @@ import urllib.parse
 from csl_sync_auth import Tokens, discover
 from csl_sync_engine import Collector, PROVIDERS, Providers
 from csl_sync_fs import WINDOWS, protect_fd, protect_path, reparse, replace
-from csl_sync_http import Registry, checked_url
+from csl_sync_http import HTTP, Registry, checked_url
 from csl_sync_state import State, SyncError, exclusive, now, private_json
 from csl_sync_watch import pass_lock
 
@@ -143,8 +143,13 @@ def configure_choice(state, selection=None, *, limit=None, folders=()):
 def command(args, csl):
     state = None
     try:
+        if args.sync_action == 'attest-installation' and not (Path(args.sync_home).expanduser() / 'state.sqlite').is_file():
+            raise SyncError('sign_in_required')
         state = State(args.sync_home)
         action = args.sync_action
+        if action == 'attest-installation':
+            print(json.dumps(attest_installation(state), separators=(',', ':')))
+            return
         if action == 'status':
             while True:
                 result = status_snapshot(state)
@@ -276,17 +281,43 @@ def command(args, csl):
             print(json.dumps(result, separators=(',', ':')), flush=True)
             if result['errors']: raise SystemExit(2)
     except SyncError as error:
-        if state is not None and args.sync_action != 'status': state.set('last_error', error.code)
+        attesting = args.sync_action == 'attest-installation'
+        if state is not None and args.sync_action not in ('status', 'attest-installation'): state.set('last_error', error.code)
         print(json.dumps({'state': 'stopped', 'error': error.code, 'retryable': error.retryable}), file=sys.stderr)
-        raise SystemExit(2) from None
+        raise SystemExit((75 if error.retryable or error.code == 'collector_busy' else 1) if attesting else 2) from None
     except KeyboardInterrupt:
         print(json.dumps({'state': 'stopped', 'reason': 'interrupted'}), file=sys.stderr)
         raise SystemExit(130) from None
     except (OSError, ValueError, KeyError, sqlite3.Error):
         print(json.dumps({'state': 'stopped', 'error': 'sync_failed'}), file=sys.stderr)
-        raise SystemExit(2) from None
+        raise SystemExit(1 if args.sync_action == 'attest-installation' else 2) from None
     finally:
         if state is not None: state.close()
+
+
+def attest_installation(state):
+    """Server-attested installation identity; never reads or uploads transcripts.
+
+    The embedding host enforces a seven-second wall-clock limit. Each network
+    operation uses two seconds, including the existing bounded refresh replay.
+    """
+    import uuid
+    from csl_sync_writer import Writer
+    settings = state.get('settings', {})
+    if not settings.get('enabled'):
+        raise SyncError('sign_in_required')
+    device = state.get('device_id')
+    try:
+        if not isinstance(device, str) or str(uuid.UUID(device)) != device:
+            raise ValueError
+    except (ValueError, AttributeError):
+        raise SyncError('writer_device_required') from None
+    http = HTTP(timeout=2, attempts=1)
+    tokens = Tokens(state.root, settings, http=http, allow_inflight_replay=False)
+    account = Writer(state, Registry(settings['endpoint'], tokens, http=http)).attest(device)
+    if not isinstance(account, str) or re.fullmatch(r'[0-9a-f]{24}', account) is None:
+        raise SyncError('writer_device_required')
+    return {'account_id': account, 'device_id': device}
 
 
 MAX_PULL = 2 * 1024 ** 3
@@ -406,6 +437,8 @@ def add_commands(subparsers, csl):
     config.add_argument('--limit', type=positive)
     config.add_argument('--folder', action='append')
     actions.add_parser('register-device', help='Register this signed-in installation without uploading sessions.')
+    attest = actions.add_parser('attest-installation', help='Read server-attested account/device identity; may refresh this installation sign-in. No transcript upload.')
+    attest.add_argument('--json', required=True, action='store_true', help='Only account_id and device_id on success; no stdout on failure.')
     release = actions.add_parser('release-writer', help='Flush and release a positively ended managed native session. Unmanaged sessions must Fork.')
     release.add_argument('provider', choices=['codex', 'claude'])
     release.add_argument('native_id')

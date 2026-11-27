@@ -32,7 +32,8 @@ def coverage():
         commands[name]['antigravity']='experimental'
     commands['providers'] = {provider:'experimental' for provider in ('codex','claude','antigravity')}
     commands['sync']['antigravity'] = 'experimental'
-    return {"schema_version": 1, "same_id_resume": {"status": "experimental", "explicit": True,
+    return {"schema_version": 1, "installation_attestation": {"cli": "csl sync attest-installation --json",
+                "fields": ["account_id", "device_id"], "network": True, "transcript_upload": False}, "same_id_resume": {"status": "experimental", "explicit": True,
                 "providers": ["codex", "claude"], "package_version": 3, "history_bases": False,
                 "managed_source_required": True, "direct_open": False}, "agent_history": {"cli": "csl agents history", "mcp_tool": "history", "read_only": True, "default_retention_per_pair": 200}, "providers": ["codex", "claude", "antigravity"], "commands": commands,
             "sync_providers": {"interface_version":1,"module":"csl_sync_providers",

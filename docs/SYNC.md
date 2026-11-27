@@ -148,6 +148,18 @@ or transcript text is stored in these fences. Hosts must hold the same lock
 while checking the fence, invalidating an older end receipt, reserving the ID,
 and recording the new process incarnation.
 
+`csl sync --home PROFILE attest-installation --json` returns only `account_id`
+(lowercase 24 hex) and `device_id` (canonical lowercase UUID), after validation by
+the trusted identity endpoint. It requires a registered local collector, may
+refresh its own sign-in, and refuses an unresolved prior refresh. It does not
+read transcripts, acquire the collector pass lock or change collector diagnostics.
+Failures produce no stdout: exit 75 means transient network/issuer or auth-lock
+contention; exit 1 means unverified identity or required sign-in. Network calls
+use two-second timeouts without generic retries; callers must enforce a seven-second
+total deadline (including DNS and any issuer-authorized refresh replay), and cancel
+the process on channel closure. Successful JSON is under 4 KiB and contains no token.
+The guided invocation is `PYTHON -E SOURCE/csl sync --home PROFILE attest-installation --json`.
+
 `csl sync pull SESSION_ID` downloads one session package the signed-in account
 owns, using this installation's own sign-in. The registry derives the owner from
 that token, so another account's session id is refused (`not_found`) and nothing
