@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.6
+
+Add bounded, server-attested collector installation identity for owner checks.
+The probe returns only account/device IDs, refuses uncertain earlier refreshes
+under the OAuth lock, and preserves collector diagnostics.
+
 ## 0.5.3 — 2026-11-26
 
 - Accept Codex 0.169.0 and newer stable CLI versions when all transcript records
