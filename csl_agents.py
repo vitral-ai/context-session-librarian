@@ -242,10 +242,76 @@ def sender_routes():
     return routes
 
 
-def local_enrollment(source, routes):
+def current_claude_session(configs):
+    from csl_bridge_claude_notify import owned_json
+
+    if not configs:
+        return None
+    pid = os.getppid()
+    while pid > 1:
+        try:
+            fields = Path('/proc', str(pid), 'stat').read_text().rsplit(')', 1)[1].split()
+            parent, start = int(fields[1]), fields[19]
+        except (OSError, ValueError, IndexError):
+            return None
+        sessions = []
+        for directory in configs:
+            try:
+                record = owned_json(directory / 'sessions' / f'{pid}.json')
+            except (OSError, ValueError, BridgeError):
+                continue
+            if (isinstance(record, dict) and record.get('pid') == pid
+                    and record.get('procStart') == start and record.get('kind') == 'interactive'):
+                sessions.append((directory, record.get('sessionId')))
+        if len(sessions) > 1:
+            raise BridgeError('Multiple Claude profiles match this process; set CSL_AGENT or use --from')
+        if sessions:
+            return sessions[0]
+        pid = parent
+    return None
+
+
+def infer_agent(bindings):
+    if len(bindings) == 1:
+        return next(iter(bindings))
+    claude = current_claude_session({entry['claude_config'] for entry in bindings.values()
+                                    if entry.get('cli') == 'claude'})
+    codex = os.environ.get('CODEX_THREAD_ID')
+    matches = []
+    for name, entry in bindings.items():
+        if entry.get('cli') == 'claude':
+            if claude == (entry['claude_config'], entry['session']):
+                matches.append(name)
+        elif codex is not None and codex == entry['session']:
+            matches.append(name)
+    return matches[0] if len(matches) == 1 else None
+
+
+def enrollment_path(value):
+    if not isinstance(value, str) or not Path(value).expanduser().is_absolute():
+        raise BridgeError('CSL sender routing needs an absolute NATS configuration path')
+    return Path(value).expanduser()
+
+
+def local_enrollment(source, routes, *, infer=False):
     if routes is None:
         return
     source = source or os.environ.get('CSL_AGENT')
+    if not source and infer and routes['senders']:
+        from csl_nats import config as nats_config
+
+        bindings = {}
+        settings = {}
+        for name, value in routes['senders'].items():
+            path = enrollment_path(value)
+            if path not in settings:
+                settings[path] = nats_config(path)['agents']
+            if name not in settings[path]:
+                raise BridgeError(f'NATS enrollment has no binding for {name}')
+            bindings[name] = settings[path][name]
+        source = infer_agent(bindings)
+        if source is None:
+            raise BridgeError('Set CSL_AGENT or use --from to identify your agent')
     if not source:
         try:
             source = config().get('agent')
@@ -253,10 +319,7 @@ def local_enrollment(source, routes):
             return
     if source not in routes['senders']:
         return
-    route = routes['senders'][source]
-    if not isinstance(route, str) or not Path(route).expanduser().is_absolute():
-        raise BridgeError('CSL sender routing needs an absolute NATS configuration path')
-    return source, Path(route).expanduser(), routes['nats_recipients']
+    return source, enrollment_path(routes['senders'][source]), routes['nats_recipients']
 
 
 def select_sender_route(args):
@@ -295,7 +358,7 @@ def _execute(args):
     if nats_tool or args.hub_action == 'history':
         if args.nats_config is None and hub_config is None:
             routes = sender_routes()
-            if enrollment := local_enrollment(args.source, routes):
+            if enrollment := local_enrollment(args.source, routes, infer=True):
                 args.source, args.nats_config, _ = enrollment
             elif nats_tool or routes is None:
                 if legacy_config := os.environ.get('CSL_NATS_CONFIG'):

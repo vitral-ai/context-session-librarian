@@ -214,14 +214,16 @@ notices delivered inside a digest.
 ### NATS history and files
 
 These commands use the agent's local enrollment in
-`~/.config/csl/sender-routes.json`. Use `--from NAME` or set `CSL_AGENT`
-on a shared machine. Pass `--nats-config PATH` to select a specific NATS
-configuration, or `--hub-config PATH` to read Hub history.
+`~/.config/csl/sender-routes.json`. NATS agent tools use the current
+Claude session, the current Codex thread, or the sole local enrollment.
+Use `--from NAME` or set `CSL_AGENT` to select the caller explicitly.
+Pass `--nats-config PATH` to select a specific NATS configuration, or
+`--hub-config PATH` to read Hub history.
 
 ```sh
 csl history --with coordinator --last 10 --from alice
 csl history --id MESSAGE_ID --from alice
-csl agents status --from coordinator
+csl agents status
 csl agents versions --from alice
 csl agents close --with coordinator --from alice
 csl agents complete --with coordinator --from alice

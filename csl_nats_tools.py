@@ -196,7 +196,14 @@ def command(args):
 
     if not args.nats_config:
         raise BridgeError('No NATS enrollment for this agent; identify it with --from or pass --nats-config PATH')
-    print(encode(call(args.nats_config, args.source, operation)))
+    from csl_agents import infer_agent
+
+    source = args.source or os.environ.get('CSL_AGENT')
+    if not source:
+        source = infer_agent(config(args.nats_config)['agents'])
+    if not source:
+        raise BridgeError('Set CSL_AGENT or use --from to identify your agent')
+    print(encode(call(args.nats_config, source, operation)))
 
 
 def add_options(parser):
