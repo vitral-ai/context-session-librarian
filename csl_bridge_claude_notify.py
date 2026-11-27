@@ -17,6 +17,8 @@ import struct
 from csl_bridge_store import BridgeError, Store, compact_message, decode, encode
 from csl_bridge_mailbox import now, timestamp
 
+WAKE_TEXT = 'CSL: new messages'
+
 
 def owned_json(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -98,7 +100,7 @@ def send_native(connection, token, session, text):
 
 def wake(session, config=None):
     with native_connection(session, config) as (connection, token):
-        send_native(connection, token, session, 'CSL: new messages')
+        send_native(connection, token, session, WAKE_TEXT)
 
 
 def notify(home, agent, message_id, config=None):

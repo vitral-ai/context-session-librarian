@@ -5,6 +5,7 @@ import sqlite3
 import sys
 
 from csl_bridge_mailbox import now, timestamp
+from csl_bridge_claude_notify import WAKE_TEXT
 from csl_bridge_store import BridgeError, Store, compact_message, decode, encode, identifier, name
 
 EVENTS = ('SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop')
@@ -99,7 +100,12 @@ def surface_nats(home, tenant, agent, event, payload, limit, emit):
     store = Store(home)
     try:
         inbox = ClaudeInbox(store, tenant_name(tenant), agent_name(agent, registration=True), identifier(session))
-        inbox.surface(lambda text: hook_output(event, text), emit, limit)
+        surfaced = inbox.surface(lambda text: hook_output(event, text), emit, limit)
+        prompt = payload.get('prompt')
+        if (not surfaced and event == 'UserPromptSubmit' and isinstance(prompt, str)
+                and (prompt == WAKE_TEXT or prompt.startswith(
+                    f'Another Claude session sent a message:\n{WAKE_TEXT}\n\n'))):
+            emit('CSL: messages already shown above')
     finally:
         store.close()
 

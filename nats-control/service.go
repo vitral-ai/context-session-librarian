@@ -218,6 +218,8 @@ func (s *Service) control(ctx context.Context, caller, verb string, body []byte)
 			return nil, err
 		}
 		return s.pairs(ctx, caller, agent.Role, request)
+	case "latest":
+		return s.latest(ctx, caller, body)
 	case "unread":
 		return s.unread(ctx, caller, body)
 	case "receipt":
@@ -371,11 +373,19 @@ func (s *Service) fleet(ctx context.Context, verb string, body []byte) (any, err
 	slices.Sort(keys)
 	agents := make([]agentStatus, 0, len(keys))
 	for _, key := range keys {
+		name := strings.TrimPrefix(key, "agent.")
+		active, err := s.deliveryAgent(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		if !active {
+			continue
+		}
 		agent, _, err := readState[Agent](ctx, s.state, key)
 		if err != nil {
 			return nil, err
 		}
-		agents = append(agents, agentStatus{Name: strings.TrimPrefix(key, "agent."), Agent: agent, OpenSessions: []string{}})
+		agents = append(agents, agentStatus{Name: name, Agent: agent, OpenSessions: []string{}})
 	}
 	if verb == "versions" {
 		policy, _, err := readState[VersionPolicy](ctx, s.state, "policy.versions")

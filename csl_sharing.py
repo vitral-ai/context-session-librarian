@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import fcntl
 import hashlib
 import json
 import os
@@ -252,6 +251,7 @@ def inbox(args, csl):
 
 @contextmanager
 def receive_lock(csl):
+    import fcntl
     directory = state_dir(csl)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (directory / "receive.lock").open("a") as stream:
