@@ -316,14 +316,6 @@ class WorkloadTextProvider(PreparedProvider):
                 or not isinstance(kind, str) or not isinstance(value, dict)): refused()
         result = {'type': kind, 'timestamp': timestamp(record.get('timestamp')), 'payload': {}}
         if kind == 'session_meta':
-            for header in (record, value):
-                if (any(field in header for field in PROVENANCE_FIELDS)
-                        or header.get('attached_thread') is not None and header['attached_thread'] is not False
-                        or 'source' in header and (not isinstance(header['source'], str)
-                                                  or header['source'] not in ('cli', 'vscode', 'exec'))):
-                    raise SyncError('workload_text_provenance_refused')
-            if value.get('history_base') is not None:
-                raise SyncError('workload_external_history_refused')
             if value.get('history_mode') not in (None, 'legacy', 'paginated'): refused()
             sid = codex_session_id(value)
             version = value.get('cli_version')
@@ -438,6 +430,14 @@ class WorkloadTextProvider(PreparedProvider):
             header = records[0].get('payload')
             if not isinstance(header, dict): refused()
             if any(row.get('type') == 'session_meta' for row in records[1:]): refused()
+            for metadata in (records[0], header):
+                if (any(field in metadata for field in PROVENANCE_FIELDS)
+                        or metadata.get('attached_thread') is not None and metadata['attached_thread'] is not False
+                        or 'source' in metadata and (not isinstance(metadata['source'], str)
+                                                    or metadata['source'] not in ('cli', 'vscode', 'exec'))):
+                    raise SyncError('workload_text_provenance_refused')
+            if header.get('history_base') is not None:
+                raise SyncError('workload_external_history_refused')
             if header.get('history_mode') == 'paginated':
                 # Same no-base ordinal boundary as csl_codex_history._node,
                 # without resolving another file or a harness-home index.

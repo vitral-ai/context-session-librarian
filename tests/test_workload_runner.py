@@ -602,6 +602,26 @@ class UploaderTests(unittest.TestCase):
         self.assertEqual(set(self.peer.sessions), {'sessions/codex/'+SID})
         self.assertEqual(self.last_codex_error(), 'workload_text_format_refused')
 
+    def test_managed_codex_header_markers_cannot_mask_hard_refusals(self):
+        self.dual_sources()
+        self.approve_managed_fixture()
+        self.write_retained_codex('main.jsonl', '0.172.0', SID)
+        for field, value, expected in (
+            ('history_base', {'id': 'external'}, 'workload_external_history_refused'),
+            ('attached_thread', True, 'workload_text_provenance_refused'),
+            ('source', 'subagent', 'workload_text_provenance_refused'),
+        ):
+            with self.subTest(field=field):
+                rows = native('codex')
+                rows[0]['workload_profile_v1'] = 'codex-0.169.0-text-v1'
+                rows[0]['payload'].update(id=str(uuid.uuid4()), cli_version='0.172.0')
+                rows[0]['payload'][field] = value
+                (self.config.transcript_root/'masked.jsonl').write_text(
+                    ''.join(json.dumps(row)+'\n' for row in rows))
+                self.assertFalse(self.one_pass()['ok'])
+                self.assertFalse(self.peer.sessions)
+                self.assertEqual(self.last_codex_error(), expected)
+
     def test_managed_pair_rejects_device_grant_and_overlapping_sources(self):
         self.dual_sources()
         self.assertFalse(self.one_pass()['ok'])
