@@ -8,6 +8,14 @@ from csl_workload_stream import Bounds, ProjectionStore, Redactor, encoded, read
 EMPTY = hashlib.sha256(b'').hexdigest()
 
 
+class SourceProjectionRefused(SyncError):
+    """A recording with verified identity that cannot be projected."""
+
+    def __init__(self, native_id, code):
+        super().__init__(code)
+        self.native_id = native_id
+
+
 class PreparedProvider:
     """One locked collector, one format, explicit transcript sources only."""
     provider = None
@@ -52,16 +60,26 @@ class PreparedProvider:
         if provider != self.provider:
             raise SyncError('unsupported_provider')
         entries = {}
+        refused = []
+        seen = set()
         for root, relative in self.sources:
             records, cursor = (read_complete(root, relative, self.bounds) if self.capture is None else
                                read_complete(root, relative, self.bounds, capture=self.capture))
-            metadata, output, view = self.project(records)
-            if self.capture is not None: self.capture.header(records)
-            sid = metadata['native_id']
-            if sid in entries:
+            try:
+                metadata, output, view = self.project(records)
+            except SourceProjectionRefused as error:
+                sid, refusal = error.native_id, error.code
+            else:
+                if self.capture is not None: self.capture.header(records)
+                sid, refusal = metadata['native_id'], None
+            if sid in seen:
                 raise SyncError(self.duplicate_code)
+            seen.add(sid)
             if self.capture is None: verify_prefix(root, relative, cursor)
             else: verify_prefix(root, relative, cursor, capture=self.capture)
+            if refusal is not None:
+                refused.append({'native_id': sid, 'error': refusal})
+                continue
             source_key = str(Path(root).absolute()) + '/' + relative
             path = self.store.publish(source_key, output)
             self.store.checkpoint(source_key, cursor, self.policy_fingerprint, output)
@@ -73,7 +91,7 @@ class PreparedProvider:
         self.prepared = entries
         accepted = [entry['metadata'] for entry in entries.values()]
         if self.capture is not None: self.capture.admitted(self, accepted)
-        return accepted
+        return accepted + refused
 
     def _entry(self, provider, native_id):
         if provider != self.provider or native_id not in self.prepared:
