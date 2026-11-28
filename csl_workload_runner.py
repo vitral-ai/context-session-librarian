@@ -428,6 +428,7 @@ def run_provider_pass(config, deadline, composition=None, expected_worker=None, 
                    if config.provider == 'antigravity' else
                    WorkloadTextProvider(config.provider, inputs, projection, bounds=limits,
                         expected_session=config.expect_session, host_id=adjacent_host_id(config.state_root),
+                        isolate_codex_refusals=managed_pair and config.provider == 'codex',
                         capture=http.observation if isinstance(http.observation, LaunchObservation) else None))
         state = State(sync)
         try:

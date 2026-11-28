@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from csl_canonical import strict_json
 from csl_sync_providers import _view
 from csl_sync_state import SyncError
-from csl_workload_provider import PreparedProvider
+from csl_workload_provider import PreparedProvider, SourceProjectionRefused
 from csl_workload_stream import OPAQUE, StructureBudget, encoded
 
 PROFILES = {'codex': 'codex-0.169.0-text-v1', 'claude': 'claude-2.1.308-text-v1'}
@@ -40,11 +40,16 @@ CODEX_EVENTS = {'task_started', 'task_complete', 'item_started', 'item_completed
                 'mcp_tool_call_begin', 'mcp_tool_call_end'}
 
 
+def codex_version(value):
+    if not isinstance(value, str) or not re.fullmatch(r'(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})', value):
+        return None
+    return tuple(map(int, value.split('.')))
+
+
 def supported_codex_version(value):
     """The profile names its schema baseline, not an exact CLI binary."""
-    if not isinstance(value, str) or not re.fullmatch(r'(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})', value):
-        return False
-    return tuple(map(int, value.split('.'))) >= (0, 169, 0)
+    version = codex_version(value)
+    return version is not None and version >= (0, 169, 0)
 
 
 def refused():
@@ -55,6 +60,12 @@ def identifier(value):
     if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', value):
         refused()
     return value
+
+
+def codex_session_id(header):
+    sid = identifier(header.get('id', header.get('session_id')))
+    if header.get('id', sid) != sid or header.get('session_id', sid) != sid: refused()
+    return sid
 
 
 def timestamp(value):
@@ -265,13 +276,15 @@ class WorkloadTextProvider(PreparedProvider):
     expected_session = None
     host_id = None
 
-    def __init__(self, provider, sources, store, *, expected_session=None, host_id=None, **options):
+    def __init__(self, provider, sources, store, *, expected_session=None, host_id=None,
+                 isolate_codex_refusals=False, **options):
         if not isinstance(provider, str) or provider not in PROFILES:
             raise SyncError('unsupported_provider')
         if expected_session is not None and provider != 'claude': raise SyncError('unsupported_provider')
         self.provider, self.profile = provider, PROFILES[provider]
         self.expected_session = expected_session
         self.host_id = host_id
+        self.isolate_codex_refusals = isolate_codex_refusals
         super().__init__(sources, store, **options)
 
     def _working_directory(self, records):
@@ -303,19 +316,13 @@ class WorkloadTextProvider(PreparedProvider):
                 or not isinstance(kind, str) or not isinstance(value, dict)): refused()
         result = {'type': kind, 'timestamp': timestamp(record.get('timestamp')), 'payload': {}}
         if kind == 'session_meta':
-            for header in (record, value):
-                if (any(field in header for field in PROVENANCE_FIELDS)
-                        or header.get('attached_thread') is not None and header['attached_thread'] is not False
-                        or 'source' in header and (not isinstance(header['source'], str)
-                                                  or header['source'] not in ('cli', 'vscode', 'exec'))):
-                    raise SyncError('workload_text_provenance_refused')
-            if value.get('history_base') is not None:
-                raise SyncError('workload_external_history_refused')
             if value.get('history_mode') not in (None, 'legacy', 'paginated'): refused()
-            if not supported_codex_version(value.get('cli_version')): refused()
-            sid = value.get('id', value.get('session_id'))
-            identifier(sid)
-            if value.get('id', sid) != sid or value.get('session_id', sid) != sid: refused()
+            sid = codex_session_id(value)
+            version = value.get('cli_version')
+            if not supported_codex_version(version):
+                if self.isolate_codex_refusals and codex_version(version) is not None:
+                    raise SourceProjectionRefused(sid, 'workload_codex_below_floor')
+                refused()
             result['payload'] = {'id': sid}
         elif kind == 'turn_context':
             result['payload'] = selected(value, ('model',))
@@ -423,6 +430,14 @@ class WorkloadTextProvider(PreparedProvider):
             header = records[0].get('payload')
             if not isinstance(header, dict): refused()
             if any(row.get('type') == 'session_meta' for row in records[1:]): refused()
+            for metadata in (records[0], header):
+                if (any(field in metadata for field in PROVENANCE_FIELDS)
+                        or metadata.get('attached_thread') is not None and metadata['attached_thread'] is not False
+                        or 'source' in metadata and (not isinstance(metadata['source'], str)
+                                                    or metadata['source'] not in ('cli', 'vscode', 'exec'))):
+                    raise SyncError('workload_text_provenance_refused')
+            if header.get('history_base') is not None:
+                raise SyncError('workload_external_history_refused')
             if header.get('history_mode') == 'paginated':
                 # Same no-base ordinal boundary as csl_codex_history._node,
                 # without resolving another file or a harness-home index.
@@ -439,8 +454,19 @@ class WorkloadTextProvider(PreparedProvider):
                 if (not isinstance(payload, dict) or payload.get('thread_id') != sid
                         or payload.get('session_id') != sid):
                     raise SyncError('workload_text_provenance_refused')
-        selected_records = [self._codex(record, budget) if self.provider == 'codex'
-                            else self._claude(record) for record in records]
+        if self.provider == 'codex':
+            # The provider header and provenance gates above remain batch-wide.
+            # A closed-schema refusal after those gates still has a usable ID
+            # for local diagnostics and duplicate detection.
+            sid = codex_session_id(header)
+            try:
+                selected_records = [self._codex(record, budget) for record in records]
+            except SyncError as error:
+                if self.isolate_codex_refusals and error.code == 'workload_text_format_refused':
+                    raise SourceProjectionRefused(sid, error.code) from None
+                raise
+        else:
+            selected_records = [self._claude(record) for record in records]
         clean = self.redactor.clean(selected_records)
         output, view, tools, view_bytes = bytearray(), [], {}, 0
         sid = title = created = updated = model = None

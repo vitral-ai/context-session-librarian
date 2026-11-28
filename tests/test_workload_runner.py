@@ -539,6 +539,89 @@ class UploaderTests(unittest.TestCase):
         self.assertEqual(receipt['synced'], 1)
         self.assertEqual(set(self.peer.sessions), {'sessions/codex/'+SID})
 
+    def write_retained_codex(self, filename, version, native_id):
+        rows = native('codex')
+        rows[0]['payload'].update(id=native_id, cli_version=version)
+        path = self.config.transcript_root / filename
+        path.write_text(''.join(json.dumps(row)+'\n' for row in rows))
+        return path
+
+    def last_codex_error(self):
+        state = State(self.config.state_root/'sync')
+        try:
+            return state.get('last_error')
+        finally:
+            state.close()
+
+    def test_managed_codex_syncs_valid_recording_with_retained_below_floor_sources(self):
+        self.dual_sources()
+        self.approve_managed_fixture()
+        self.write_retained_codex('main.jsonl', '0.172.0', SID)
+        self.write_retained_codex('a.jsonl', '0.160.0', str(uuid.uuid4()))
+        self.write_retained_codex('z.jsonl', '0.163.0', str(uuid.uuid4()))
+        receipt = self.one_pass()
+        self.assertEqual((receipt['synced'], receipt['pending']), (1, 2))
+        self.assertFalse(receipt['ok'])
+        self.assertEqual(receipt['manifest'], [])
+        self.assertEqual(set(self.peer.sessions), {'sessions/codex/'+SID})
+        self.assertTrue(self.peer.views)
+        self.assertEqual(self.last_codex_error(), 'workload_codex_below_floor')
+
+    def test_managed_codex_checks_duplicates_across_below_floor_and_valid_sources(self):
+        self.dual_sources()
+        self.approve_managed_fixture()
+        for old, new in (('a.jsonl', 'main.jsonl'), ('main.jsonl', 'a.jsonl')):
+            with self.subTest(old_first=old == 'a.jsonl'):
+                self.write_retained_codex(old, '0.163.0', SID)
+                self.write_retained_codex(new, '0.172.0', SID)
+                self.assertFalse(self.one_pass()['ok'])
+                self.assertFalse(self.peer.sessions)
+                self.assertEqual(self.last_codex_error(), 'workload_duplicate_native_id')
+
+    def test_managed_codex_all_below_floor_remains_pending_without_uploads(self):
+        self.dual_sources()
+        self.approve_managed_fixture()
+        self.write_retained_codex('main.jsonl', '0.160.0', SID)
+        self.write_retained_codex('old.jsonl', '0.163.0', str(uuid.uuid4()))
+        receipt = self.one_pass()
+        self.assertEqual((receipt['synced'], receipt['pending']), (0, 2))
+        self.assertFalse(receipt['ok'])
+        self.assertFalse(self.peer.sessions)
+        self.assertEqual(self.last_codex_error(), 'workload_codex_below_floor')
+
+    def test_managed_codex_unknown_current_schema_still_refuses(self):
+        self.dual_sources()
+        self.approve_managed_fixture()
+        self.write_retained_codex('main.jsonl', '0.172.0', SID)
+        path = self.write_retained_codex('unknown.jsonl', '0.172.0', str(uuid.uuid4()))
+        with path.open('a') as transcript:
+            transcript.write(json.dumps({'type': 'future_record_shape', 'payload': {}})+'\n')
+        receipt = self.one_pass()
+        self.assertFalse(receipt['ok'])
+        self.assertEqual((receipt['synced'], receipt['pending']), (1, 1))
+        self.assertEqual(set(self.peer.sessions), {'sessions/codex/'+SID})
+        self.assertEqual(self.last_codex_error(), 'workload_text_format_refused')
+
+    def test_managed_codex_header_markers_cannot_mask_hard_refusals(self):
+        self.dual_sources()
+        self.approve_managed_fixture()
+        self.write_retained_codex('main.jsonl', '0.172.0', SID)
+        for field, value, expected in (
+            ('history_base', {'id': 'external'}, 'workload_external_history_refused'),
+            ('attached_thread', True, 'workload_text_provenance_refused'),
+            ('source', 'subagent', 'workload_text_provenance_refused'),
+        ):
+            with self.subTest(field=field):
+                rows = native('codex')
+                rows[0]['workload_profile_v1'] = 'codex-0.169.0-text-v1'
+                rows[0]['payload'].update(id=str(uuid.uuid4()), cli_version='0.172.0')
+                rows[0]['payload'][field] = value
+                (self.config.transcript_root/'masked.jsonl').write_text(
+                    ''.join(json.dumps(row)+'\n' for row in rows))
+                self.assertFalse(self.one_pass()['ok'])
+                self.assertFalse(self.peer.sessions)
+                self.assertEqual(self.last_codex_error(), expected)
+
     def test_managed_pair_rejects_device_grant_and_overlapping_sources(self):
         self.dual_sources()
         self.assertFalse(self.one_pass()['ok'])
