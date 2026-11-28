@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.9
+
+Keep healthy managed Codex recordings uploading when retained recordings use a
+version below the existing parser floor or an unsupported text format. Report
+refusals per native session without changing the profile or recipe. Preserve
+header provenance, duplicate-ID fences and incomplete final-flush reporting.
+
 ## 0.5.8
 
 Resume a synced, stopped keeper-managed recording in place on its original

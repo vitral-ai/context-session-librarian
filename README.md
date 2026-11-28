@@ -35,11 +35,11 @@ This feature is included in v0.5.0; existing configured transports remain suppor
 
 Requires Linux and Python 3.11+. The core CLI uses only the Python standard
 library; no virtualenv or pip installation is needed. Confirm tag availability in
-the [v0.5.8 Release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.5.8)
+the [v0.5.9 Release](https://github.com/vitral-ai/context-session-librarian/releases/tag/v0.5.9)
 before using the tagged installation below.
 
 ```bash
-git clone --branch v0.5.8 https://github.com/vitral-ai/context-session-librarian.git context-session-librarian
+git clone --branch v0.5.9 https://github.com/vitral-ai/context-session-librarian.git context-session-librarian
 cd context-session-librarian
 ./install.sh
 csl --version
@@ -54,7 +54,7 @@ release is published (keep any local changes; do not reset them):
 
 ```bash
 git fetch --tags
-git switch --detach v0.5.8
+git switch --detach v0.5.9
 ./install.sh
 csl --version
 csl-resume-action --help
@@ -74,7 +74,7 @@ Context Session Librarian was previously named Codex Session Librarian; the
 Opening a conversation requires its native CLI and your own authentication.
 Local search and ZIP transfers need no GitHub account or paid model calls.
 Team exchange additionally requires [GitHub CLI](https://cli.github.com/).
-For development, clone without `--branch v0.5.8` in a separate directory;
+For development, clone without `--branch v0.5.9` in a separate directory;
 see [release history](CHANGELOG.md) for published changes.
 
 ## Find And Reopen A Conversation

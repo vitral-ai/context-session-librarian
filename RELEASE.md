@@ -8,6 +8,20 @@ The version records below refer to their original published tags, which are unch
 
 ## Version records
 
+### v0.5.9 — managed Codex source isolation release candidate
+
+Managed Codex collection isolates known-identity format refusals so supported
+recordings upload alongside retained below-floor sources. Preserve the parser
+floor, profile and recipe. Header provenance and duplicate native-ID checks stay
+mandatory across admitted and refused sources. Refused sources remain pending;
+a partial pass cannot certify a complete final flush.
+Publish after independent release review and exact-head hosted/native checks.
+Preserve collector profiles and authentication. For a retained tagged checkout,
+run `git fetch --tags` and `git switch --detach v0.5.9` after publication, then
+re-run `./install.sh` with the original prefix (`./install.sh PREFIX` for a custom
+prefix). With that prefix's `bin` first on `PATH`, verify `csl --version` reports
+0.5.9 and `csl-resume-action --help` succeeds. README has the current install steps.
+
 ### v0.5.8 — original-device in-place Resume release candidate
 
 A fully synced keeper-managed recording at legacy generation 0 can acquire its
